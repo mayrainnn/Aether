@@ -243,3 +243,4 @@ src/_version.py
 analysis/
 new-api/
 apps/aether-proxy/aether-proxy.toml
+.gitnexus
