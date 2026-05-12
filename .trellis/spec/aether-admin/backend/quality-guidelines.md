@@ -95,6 +95,57 @@ rule is exact: finite and non-negative.
 Use typed structs when a payload carries multiple fields, and use parse helpers
 when the input is query-string or path-like text.
 
+## Scenario: Python system-config import numeric compatibility
+
+### 1. Scope / Trigger
+- Trigger: changes to system config import request parsing in
+  `crates/aether-admin/src/system.rs`, especially fields that represent prices,
+  quotas, balances, timeout seconds, or other `f64` values.
+- Python exports can serialize decimal-like values as JSON strings. Rust import
+  parsing must accept finite numeric strings while still rejecting malformed or
+  non-finite input loudly.
+
+### 2. Signatures
+- `parse_admin_system_config_import_request(bytes: &[u8]) -> Result<ParsedAdminSystemConfigImportRequest, (StatusCode, Value)>`
+- `deserialize_optional_f64_from_number<D>(deserializer: D) -> Result<Option<f64>, D::Error>`
+
+### 3. Contracts
+- Accepted `f64` JSON shapes:
+  - JSON number, finite.
+  - JSON string containing a finite numeric value, after trimming.
+  - `null` or missing remains `None`.
+- Rejected `f64` JSON shapes:
+  - empty string;
+  - non-numeric string;
+  - `NaN`, infinity, arrays, objects, booleans.
+- Error responses must keep the field path from `serde_path_to_error`, so live
+  imports identify the exact bad field, such as
+  `providers[4].monthly_quota_usd`.
+
+### 4. Validation & Error Matrix
+- finite number -> accepted as `Some(f64)`.
+- finite numeric string -> accepted as `Some(f64)`.
+- invalid numeric string -> HTTP `400`, `配置文件格式无效`, field path present.
+- non-finite value -> HTTP `400`, `配置文件格式无效`, field path present.
+
+### 5. Good/Base/Bad Cases
+- Good: a real Python export with `"monthly_quota_usd": "75.00000000"` imports.
+- Base: a Rust export with `"monthly_quota_usd": 75.0` still imports.
+- Bad: silently coerce `""` or `"not-a-number"` to `None` or `0.0`.
+
+### 6. Tests Required
+- Regression test that numeric strings parse for global model price, provider
+  quotas/timeouts, and provider model price fields.
+- Regression test that an invalid numeric string returns `400` and includes the
+  bad field name in the detail.
+
+### 7. Wrong vs Correct
+#### Wrong
+- Require JSON numbers only for import DTOs because Rust exports numbers.
+#### Correct
+- Treat Python export as an external compatibility contract: accept finite
+  numeric strings, but keep malformed input fail-loud with exact field paths.
+
 ## Required Pattern: Stable Domain Prefixes
 
 Public functions must carry the admin subdomain in the name. This protects
