@@ -87,6 +87,32 @@ fn kiro_stream_rewriter_converts_text_events_to_claude_sse() {
 }
 
 #[test]
+fn kiro_stream_rewriter_restores_model_directive_display_model() {
+    let report_context = json!({
+        "provider_api_format": "claude:messages",
+        "client_api_format": "claude:messages",
+        "envelope_name": "kiro:generateAssistantResponse",
+        "model": "claude-sonnet-4.5-high",
+        "mapped_model": "claude-sonnet-4.5"
+    });
+    let mut rewriter = KiroToClaudeCliStreamState::new(&report_context);
+    let first = rewriter
+        .push_chunk(
+            &report_context,
+            &encode_event_frame(
+                "event",
+                Some("assistantResponseEvent"),
+                &json!({"content": "Hello"}),
+            ),
+        )
+        .expect("rewrite should succeed");
+    let text = String::from_utf8(first).expect("utf8 should decode");
+
+    assert!(text.contains("\"model\":\"claude-sonnet-4.5-high\""));
+    assert!(!text.contains("\"model\":\"claude-sonnet-4.5\""));
+}
+
+#[test]
 fn kiro_stream_rewriter_converts_tool_use_to_claude_events() {
     let report_context = kiro_report_context(false);
     let mut rewriter = KiroToClaudeCliStreamState::new(&report_context);

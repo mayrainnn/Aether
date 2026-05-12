@@ -16,6 +16,7 @@ pub(in super::super) async fn build_admin_monitoring_cache_flush_response(
         .iter()
         .map(|item| item.raw_key.clone())
         .collect::<Vec<_>>();
+    state.as_ref().invalidate_scheduler_affinity_cache();
     let deleted = delete_admin_monitoring_cache_affinity_raw_keys(state, &raw_keys).await?;
     clear_admin_monitoring_scheduler_affinity_entries(state, &raw_affinities);
 

@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 
 use super::{
     MinimalCandidateSelectionReadRepository, StoredMinimalCandidateSelectionRow,
+    StoredPoolKeyCandidateOrder, StoredPoolKeyCandidateRowsByKeyIdsQuery,
     StoredPoolKeyCandidateRowsQuery, StoredProviderModelMapping,
     StoredRequestedModelCandidateRowsQuery,
 };
@@ -505,6 +506,43 @@ LIMIT $7
 OFFSET $8
 "#;
 
+fn pool_key_candidate_order_by_sql(order: &StoredPoolKeyCandidateOrder) -> &'static str {
+    match order {
+        StoredPoolKeyCandidateOrder::InternalPriority => {
+            "ORDER BY\n  pak.internal_priority ASC,\n  pak.id ASC"
+        }
+        StoredPoolKeyCandidateOrder::Lru => {
+            "ORDER BY\n  pak.last_used_at ASC NULLS FIRST,\n  pak.internal_priority ASC,\n  pak.id ASC"
+        }
+        StoredPoolKeyCandidateOrder::CacheAffinity => {
+            "ORDER BY\n  pak.last_used_at DESC NULLS LAST,\n  pak.internal_priority ASC,\n  pak.id ASC"
+        }
+        StoredPoolKeyCandidateOrder::SingleAccount => {
+            "ORDER BY\n  pak.internal_priority ASC,\n  pak.last_used_at DESC NULLS LAST,\n  pak.id ASC"
+        }
+        StoredPoolKeyCandidateOrder::LoadBalance { .. } => {
+            "ORDER BY\n  md5($9 || ':' || pak.id) ASC,\n  pak.id ASC"
+        }
+    }
+}
+
+fn pool_key_candidate_selection_sql(order: &StoredPoolKeyCandidateOrder) -> String {
+    let default_order =
+        "ORDER BY\n  pak.internal_priority ASC,\n  pak.id ASC\nLIMIT $7\nOFFSET $8\n";
+    let replacement = format!(
+        "{}\nLIMIT $7\nOFFSET $8\n",
+        pool_key_candidate_order_by_sql(order)
+    );
+    LIST_POOL_KEYS_FOR_GROUP_SQL.replace(default_order, &replacement)
+}
+
+fn pool_key_candidate_selection_by_key_ids_sql() -> String {
+    let default_order =
+        "ORDER BY\n  pak.internal_priority ASC,\n  pak.id ASC\nLIMIT $7\nOFFSET $8\n";
+    let replacement = "AND pak.id = ANY($7::text[])\nORDER BY\n  array_position($7::text[], pak.id) ASC,\n  pak.id ASC\n";
+    LIST_POOL_KEYS_FOR_GROUP_SQL.replace(default_order, replacement)
+}
+
 #[derive(Debug, Clone)]
 pub struct SqlxMinimalCandidateSelectionReadRepository {
     pool: PgPool,
@@ -650,25 +688,74 @@ impl SqlxMinimalCandidateSelectionReadRepository {
         let sql_match_aliases = sql_match_aliases(&storage_aliases);
         let limit = i64::from(query.limit.max(1));
         let offset = i64::from(query.offset);
+        let sql = pool_key_candidate_selection_sql(&query.order);
         for api_format in storage_aliases {
+            let mut query_builder = sqlx::query(sql.as_str())
+                .bind(api_format)
+                .bind(query.provider_id.as_str())
+                .bind(query.endpoint_id.as_str())
+                .bind(query.model_id.as_str())
+                .bind(sql_match_aliases.clone())
+                .bind(canonical_api_format.clone())
+                .bind(limit)
+                .bind(offset);
+            if let StoredPoolKeyCandidateOrder::LoadBalance { seed } = &query.order {
+                query_builder = query_builder.bind(seed.as_str());
+            }
             rows.extend(
                 Self::collect_query_rows(
-                    sqlx::query(LIST_POOL_KEYS_FOR_GROUP_SQL)
-                        .bind(api_format)
-                        .bind(query.provider_id.as_str())
-                        .bind(query.endpoint_id.as_str())
-                        .bind(query.model_id.as_str())
-                        .bind(sql_match_aliases.clone())
-                        .bind(canonical_api_format.clone())
-                        .bind(limit)
-                        .bind(offset)
-                        .fetch(&self.pool),
+                    query_builder.fetch(&self.pool),
                     map_candidate_selection_row,
                 )
                 .await?,
             );
         }
         Ok(dedupe_candidate_selection_rows(rows))
+    }
+
+    pub async fn list_pool_key_rows_for_group_key_ids(
+        &self,
+        query: &StoredPoolKeyCandidateRowsByKeyIdsQuery,
+    ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
+        if query.key_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut rows = Vec::new();
+        let canonical_api_format = normalize_api_format(&query.api_format);
+        let storage_aliases = api_format_aliases(&canonical_api_format);
+        let sql_match_aliases = sql_match_aliases(&storage_aliases);
+        let sql = pool_key_candidate_selection_by_key_ids_sql();
+        for api_format in storage_aliases {
+            rows.extend(
+                Self::collect_query_rows(
+                    sqlx::query(sql.as_str())
+                        .bind(api_format)
+                        .bind(query.provider_id.as_str())
+                        .bind(query.endpoint_id.as_str())
+                        .bind(query.model_id.as_str())
+                        .bind(sql_match_aliases.clone())
+                        .bind(canonical_api_format.clone())
+                        .bind(query.key_ids.clone())
+                        .fetch(&self.pool),
+                    map_candidate_selection_row,
+                )
+                .await?,
+            );
+        }
+        let key_order = query
+            .key_ids
+            .iter()
+            .enumerate()
+            .map(|(index, key_id)| (key_id.as_str(), index))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut rows = dedupe_candidate_selection_rows(rows);
+        rows.sort_by(|left, right| {
+            key_order
+                .get(left.key_id.as_str())
+                .cmp(&key_order.get(right.key_id.as_str()))
+                .then(left.key_id.cmp(&right.key_id))
+        });
+        Ok(rows)
     }
 }
 
@@ -677,13 +764,110 @@ fn requested_model_selection_sql() -> String {
         .replace(
             "AND gm.name = $2",
             r#"AND (
-    gm.name = $2
-    OR m.provider_model_name = $2
+    (
+      gm.name = $2
+      AND (
+        m.provider_model_mappings IS NULL
+        OR jsonb_typeof(m.provider_model_mappings) <> 'array'
+        OR EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(
+            CASE
+              WHEN jsonb_typeof(m.provider_model_mappings) = 'array'
+                THEN m.provider_model_mappings
+              ELSE '[]'::jsonb
+            END
+          ) AS mapping(value)
+          WHERE (
+            mapping.value -> 'api_formats' IS NULL
+            OR jsonb_typeof(mapping.value -> 'api_formats') <> 'array'
+            OR EXISTS (
+              SELECT 1
+              FROM jsonb_array_elements_text(mapping.value -> 'api_formats') AS fmt(value)
+              WHERE LOWER(BTRIM(fmt.value)) = ANY($3::text[])
+            )
+          )
+          AND (
+            mapping.value -> 'endpoint_ids' IS NULL
+            OR jsonb_typeof(mapping.value -> 'endpoint_ids') <> 'array'
+            OR EXISTS (
+              SELECT 1
+              FROM jsonb_array_elements_text(mapping.value -> 'endpoint_ids') AS endpoint(value)
+              WHERE endpoint.value = pe.id
+            )
+          )
+        )
+        OR NOT EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(
+            CASE
+              WHEN jsonb_typeof(m.provider_model_mappings) = 'array'
+                THEN m.provider_model_mappings
+              ELSE '[]'::jsonb
+            END
+          ) AS mapping(value)
+          WHERE mapping.value ->> 'name' = m.provider_model_name
+        )
+      )
+    )
+    OR (
+      m.provider_model_name = $2
+      AND (
+        m.provider_model_mappings IS NULL
+        OR jsonb_typeof(m.provider_model_mappings) <> 'array'
+        OR NOT EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(
+            CASE
+              WHEN jsonb_typeof(m.provider_model_mappings) = 'array'
+                THEN m.provider_model_mappings
+              ELSE '[]'::jsonb
+            END
+          ) AS mapping(value)
+          WHERE mapping.value ->> 'name' = m.provider_model_name
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(
+            CASE
+              WHEN jsonb_typeof(m.provider_model_mappings) = 'array'
+                THEN m.provider_model_mappings
+              ELSE '[]'::jsonb
+            END
+          ) AS mapping(value)
+          WHERE mapping.value ->> 'name' = m.provider_model_name
+            AND (
+              mapping.value -> 'api_formats' IS NULL
+              OR jsonb_typeof(mapping.value -> 'api_formats') <> 'array'
+              OR EXISTS (
+                SELECT 1
+                FROM jsonb_array_elements_text(mapping.value -> 'api_formats') AS fmt(value)
+                WHERE LOWER(BTRIM(fmt.value)) = ANY($3::text[])
+              )
+            )
+            AND (
+              mapping.value -> 'endpoint_ids' IS NULL
+              OR jsonb_typeof(mapping.value -> 'endpoint_ids') <> 'array'
+              OR EXISTS (
+                SELECT 1
+                FROM jsonb_array_elements_text(mapping.value -> 'endpoint_ids') AS endpoint(value)
+                WHERE endpoint.value = pe.id
+              )
+            )
+        )
+      )
+    )
     OR (
       jsonb_typeof(m.provider_model_mappings) = 'array'
       AND EXISTS (
         SELECT 1
-        FROM jsonb_array_elements(m.provider_model_mappings) AS mapping(value)
+        FROM jsonb_array_elements(
+          CASE
+            WHEN jsonb_typeof(m.provider_model_mappings) = 'array'
+              THEN m.provider_model_mappings
+            ELSE '[]'::jsonb
+          END
+        ) AS mapping(value)
         WHERE mapping.value ->> 'name' = $2
           AND (
             mapping.value -> 'api_formats' IS NULL
@@ -785,6 +969,13 @@ impl MinimalCandidateSelectionReadRepository for SqlxMinimalCandidateSelectionRe
         query: &StoredPoolKeyCandidateRowsQuery,
     ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
         Self::list_pool_key_rows_for_group(self, query).await
+    }
+
+    async fn list_pool_key_rows_for_group_key_ids(
+        &self,
+        query: &StoredPoolKeyCandidateRowsByKeyIdsQuery,
+    ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
+        Self::list_pool_key_rows_for_group_key_ids(self, query).await
     }
 }
 
@@ -1039,13 +1230,16 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        parse_provider_model_mappings, parse_string_list, requested_model_selection_page_sql,
-        requested_model_selection_sql, SqlxMinimalCandidateSelectionReadRepository,
+        parse_provider_model_mappings, parse_string_list, pool_key_candidate_selection_sql,
+        requested_model_selection_page_sql, requested_model_selection_sql,
+        SqlxMinimalCandidateSelectionReadRepository,
         LIST_FOR_EXACT_API_FORMAT_AND_GLOBAL_MODEL_SQL, LIST_FOR_EXACT_API_FORMAT_SQL,
         LIST_POOL_KEYS_FOR_GROUP_SQL,
     };
     use crate::driver::postgres::{PostgresPoolConfig, PostgresPoolFactory};
-    use crate::repository::candidate_selection::StoredProviderModelMapping;
+    use crate::repository::candidate_selection::{
+        StoredPoolKeyCandidateOrder, StoredProviderModelMapping,
+    };
 
     #[tokio::test]
     async fn repository_constructs_from_lazy_pool() {
@@ -1071,7 +1265,7 @@ mod tests {
         let sql = requested_model_selection_sql();
 
         assert!(sql.contains("m.provider_model_name = $2"));
-        assert!(sql.contains("jsonb_array_elements(m.provider_model_mappings)"));
+        assert!(sql.contains("jsonb_array_elements("));
         assert!(!sql.contains("json_typeof(m.provider_model_mappings)"));
         assert!(!sql.contains("json_array_elements_text(gm.config -> 'model_mappings')"));
         assert!(sql.contains("ORDER BY\n  global_model_name ASC,"));
@@ -1098,6 +1292,23 @@ mod tests {
         let sql = requested_model_selection_page_sql();
 
         assert!(sql.ends_with("LIMIT $5\nOFFSET $6"));
+    }
+
+    #[test]
+    fn pool_key_selection_sql_applies_query_order() {
+        let load_balance_sql =
+            pool_key_candidate_selection_sql(&StoredPoolKeyCandidateOrder::LoadBalance {
+                seed: "seed".to_string(),
+            });
+        assert!(load_balance_sql.contains("md5($9 || ':' || pak.id) ASC"));
+        assert!(load_balance_sql.ends_with("LIMIT $7\nOFFSET $8\n"));
+
+        let lru_sql = pool_key_candidate_selection_sql(&StoredPoolKeyCandidateOrder::Lru);
+        assert!(lru_sql.contains("pak.last_used_at ASC NULLS FIRST"));
+
+        let cache_affinity_sql =
+            pool_key_candidate_selection_sql(&StoredPoolKeyCandidateOrder::CacheAffinity);
+        assert!(cache_affinity_sql.contains("pak.last_used_at DESC NULLS LAST"));
     }
 
     #[test]

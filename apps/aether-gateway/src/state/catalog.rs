@@ -1,7 +1,8 @@
 use super::{AppState, GatewayError, LocalMutationOutcome, LocalProviderDeleteTaskState};
 use crate::handlers::shared::sync_provider_key_oauth_status_snapshot;
-use aether_data_contracts::repository::{candidates, global_models, provider_catalog};
+use aether_data_contracts::repository::{candidates, global_models, pool_scores, provider_catalog};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tracing::warn;
 
 impl AppState {
     pub fn has_provider_catalog_data_reader(&self) -> bool {
@@ -468,7 +469,7 @@ impl AppState {
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if created.is_some() {
-            self.clear_provider_transport_snapshot_cache();
+            self.invalidate_provider_routing_caches();
         }
         Ok(created)
     }
@@ -484,7 +485,7 @@ impl AppState {
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if created.is_some() {
-            self.clear_provider_transport_snapshot_cache();
+            self.invalidate_provider_routing_caches();
         }
         Ok(created)
     }
@@ -499,7 +500,7 @@ impl AppState {
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if updated.is_some() {
-            self.clear_provider_transport_snapshot_cache();
+            self.invalidate_provider_routing_caches();
         }
         Ok(updated)
     }
@@ -514,7 +515,7 @@ impl AppState {
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if deleted {
-            self.clear_provider_transport_snapshot_cache();
+            self.invalidate_provider_routing_caches();
         }
         Ok(deleted)
     }
@@ -529,8 +530,27 @@ impl AppState {
             .cleanup_deleted_provider_catalog_refs(provider_id, endpoint_ids, key_ids)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        for key_id in key_ids {
+            if let Err(err) = self
+                .data
+                .delete_pool_member_scores_for_member(
+                    &pool_scores::PoolMemberIdentity::provider_api_key(
+                        provider_id.to_string(),
+                        key_id.to_string(),
+                    ),
+                )
+                .await
+            {
+                warn!(
+                    provider_id,
+                    key_id,
+                    error = ?err,
+                    "gateway provider catalog cleanup: failed to delete pool member scores"
+                );
+            }
+        }
         if !endpoint_ids.is_empty() || !key_ids.is_empty() {
-            self.clear_provider_transport_snapshot_cache();
+            self.invalidate_provider_routing_caches();
         }
         Ok(())
     }
@@ -545,7 +565,7 @@ impl AppState {
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if created.is_some() {
-            self.clear_provider_transport_snapshot_cache();
+            self.invalidate_provider_routing_caches();
         }
         Ok(created)
     }
@@ -560,7 +580,7 @@ impl AppState {
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if updated.is_some() {
-            self.clear_provider_transport_snapshot_cache();
+            self.invalidate_provider_routing_caches();
         }
         Ok(updated)
     }
@@ -575,7 +595,7 @@ impl AppState {
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if deleted {
-            self.clear_provider_transport_snapshot_cache();
+            self.invalidate_provider_routing_caches();
         }
         Ok(deleted)
     }
@@ -590,7 +610,7 @@ impl AppState {
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if updated.is_some() {
-            self.clear_provider_transport_snapshot_cache();
+            self.invalidate_provider_routing_caches();
         }
         Ok(updated)
     }
@@ -611,7 +631,7 @@ impl AppState {
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if updated {
-            self.clear_provider_transport_snapshot_cache();
+            self.invalidate_provider_routing_caches();
         }
         Ok(updated)
     }
@@ -620,13 +640,39 @@ impl AppState {
         &self,
         key_id: &str,
     ) -> Result<bool, GatewayError> {
+        let existing_key = self
+            .data
+            .list_provider_catalog_keys_by_ids(&[key_id.to_string()])
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?
+            .into_iter()
+            .next();
         let deleted = self
             .data
             .delete_provider_catalog_key(key_id)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if deleted {
-            self.clear_provider_transport_snapshot_cache();
+            if let Some(key) = existing_key {
+                if let Err(err) = self
+                    .data
+                    .delete_pool_member_scores_for_member(
+                        &pool_scores::PoolMemberIdentity::provider_api_key(
+                            key.provider_id.clone(),
+                            key.id.clone(),
+                        ),
+                    )
+                    .await
+                {
+                    warn!(
+                        provider_id = %key.provider_id,
+                        key_id = %key.id,
+                        error = ?err,
+                        "gateway provider catalog key delete: failed to delete pool member scores"
+                    );
+                }
+            }
+            self.invalidate_provider_routing_caches();
         }
         Ok(deleted)
     }
@@ -760,8 +806,128 @@ impl AppState {
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if updated {
-            self.clear_provider_transport_snapshot_cache();
+            self.invalidate_provider_routing_caches();
         }
         Ok(updated)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
+    use aether_data_contracts::repository::provider_catalog::{
+        StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
+    };
+
+    use crate::cache::SchedulerAffinityTarget;
+    use crate::data::GatewayDataState;
+    use crate::AppState;
+
+    fn sample_provider() -> StoredProviderCatalogProvider {
+        StoredProviderCatalogProvider::new(
+            "provider-1".to_string(),
+            "Provider 1".to_string(),
+            Some("https://example.com".to_string()),
+            "openai".to_string(),
+        )
+        .expect("provider should build")
+    }
+
+    fn sample_endpoint() -> StoredProviderCatalogEndpoint {
+        StoredProviderCatalogEndpoint::new(
+            "endpoint-1".to_string(),
+            "provider-1".to_string(),
+            "openai:chat".to_string(),
+            Some("openai".to_string()),
+            Some("chat".to_string()),
+            true,
+        )
+        .expect("endpoint should build")
+        .with_transport_fields(
+            "https://api.example.com/v1".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("endpoint transport should build")
+    }
+
+    fn sample_key() -> StoredProviderCatalogKey {
+        StoredProviderCatalogKey::new(
+            "key-1".to_string(),
+            "provider-1".to_string(),
+            "Key 1".to_string(),
+            "api_key".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build")
+    }
+
+    #[tokio::test]
+    async fn provider_catalog_update_invalidates_scheduler_affinity_and_transport_snapshot_cache() {
+        let provider = sample_provider();
+        let repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![provider.clone()],
+            vec![sample_endpoint()],
+            vec![sample_key()],
+        ));
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(repository)
+                    .with_encryption_key_for_tests("test-encryption-key"),
+            );
+
+        let snapshot = state
+            .read_provider_transport_snapshot("provider-1", "endpoint-1", "key-1")
+            .await
+            .expect("provider transport should read")
+            .expect("provider transport should exist");
+        assert!(!snapshot.provider.keep_priority_on_conversion);
+
+        let cache_key = "scheduler_affinity:api-key-1:openai:chat:gpt-5";
+        let ttl = Duration::from_secs(300);
+        state.remember_scheduler_affinity_target(
+            cache_key,
+            SchedulerAffinityTarget {
+                provider_id: "provider-1".to_string(),
+                endpoint_id: "endpoint-1".to_string(),
+                key_id: "key-1".to_string(),
+            },
+            ttl,
+            128,
+        );
+        assert!(state
+            .read_scheduler_affinity_target(cache_key, ttl)
+            .is_some());
+        let initial_epoch = state.scheduler_affinity_epoch();
+
+        let mut updated_provider = provider;
+        updated_provider.keep_priority_on_conversion = true;
+        updated_provider.provider_priority = -10;
+        state
+            .update_provider_catalog_provider(&updated_provider)
+            .await
+            .expect("provider update should succeed")
+            .expect("provider should update");
+
+        assert!(state.scheduler_affinity_epoch() > initial_epoch);
+        assert!(state
+            .read_scheduler_affinity_target(cache_key, ttl)
+            .is_none());
+        let snapshot = state
+            .read_provider_transport_snapshot("provider-1", "endpoint-1", "key-1")
+            .await
+            .expect("provider transport should read after update")
+            .expect("provider transport should exist after update");
+        assert!(snapshot.provider.keep_priority_on_conversion);
     }
 }

@@ -1,10 +1,12 @@
 use std::cmp::Ordering;
 
+use sha2::{Digest, Sha256};
+
 use super::compare_candidate_identity_for_ranking;
 use super::format::{
     compare_cross_format_demotion, compare_demoted_format_preference, compare_format_preference,
 };
-use super::priority::{candidates_share_priority_group, compare_candidate_priority_slot};
+use super::priority::compare_candidate_priority_slot;
 use super::types::{SchedulerRankableCandidate, SchedulerRankingContext, SchedulerRankingMode};
 
 pub(super) fn compare_rankable_candidates(
@@ -30,6 +32,7 @@ fn compare_fixed_order(
         .then_with(|| compare_demoted_format_preference(left, right))
         .then_with(|| compare_candidate_priority_slot(left, right, context.priority_mode))
         .then_with(|| compare_format_preference(left, right))
+        .then_with(|| compare_seeded_candidate_hash(left, right, context.load_balance_seed, "tie"))
         .then_with(|| compare_candidate_identity_for_ranking(left, right))
         .then(left.original_index.cmp(&right.original_index))
 }
@@ -48,7 +51,7 @@ fn compare_cache_affinity(
         .then(left.tunnel_bucket.cmp(&right.tunnel_bucket))
         .then_with(|| compare_format_preference(left, right))
         .then_with(|| compare_health(left, right, context.include_health))
-        .then(left.affinity_hash.cmp(&right.affinity_hash))
+        .then_with(|| compare_affinity_or_seeded_hash(left, right, context.load_balance_seed))
         .then_with(|| compare_candidate_identity_for_ranking(left, right))
         .then(left.original_index.cmp(&right.original_index))
 }
@@ -62,12 +65,35 @@ fn compare_load_balance_base(
         .cmp(&right.capability_priority)
         .then_with(|| compare_cross_format_demotion(left, right))
         .then_with(|| compare_demoted_format_preference(left, right))
-        .then_with(|| compare_candidate_priority_slot(left, right, context.priority_mode))
         .then_with(|| compare_format_preference(left, right))
-        .then_with(|| compare_health(left, right, context.include_health))
-        .then(left.affinity_hash.cmp(&right.affinity_hash))
+        .then_with(|| compare_load_balance_distribution(left, right, context))
         .then_with(|| compare_candidate_identity_for_ranking(left, right))
         .then(left.original_index.cmp(&right.original_index))
+}
+
+fn compare_load_balance_distribution(
+    left: &SchedulerRankableCandidate,
+    right: &SchedulerRankableCandidate,
+    context: SchedulerRankingContext,
+) -> Ordering {
+    match context.priority_mode {
+        crate::SchedulerPriorityMode::Provider => {
+            compare_seeded_provider_hash(left, right, context.load_balance_seed)
+                .then_with(|| {
+                    if left.provider_id == right.provider_id {
+                        left.key_internal_priority.cmp(&right.key_internal_priority)
+                    } else {
+                        Ordering::Equal
+                    }
+                })
+                .then_with(|| {
+                    compare_seeded_candidate_hash(left, right, context.load_balance_seed, "key")
+                })
+        }
+        crate::SchedulerPriorityMode::GlobalKey => {
+            compare_seeded_candidate_hash(left, right, context.load_balance_seed, "global-key")
+        }
+    }
 }
 
 fn compare_health(
@@ -84,44 +110,78 @@ fn compare_health(
         .then_with(|| right.health_score.total_cmp(&left.health_score))
 }
 
-pub(super) fn apply_load_balance_rotation(
-    sorted_indices: &mut [usize],
-    candidates: &[SchedulerRankableCandidate],
-    context: SchedulerRankingContext,
-) {
-    if context.ranking_mode != SchedulerRankingMode::LoadBalance || sorted_indices.len() < 2 {
-        return;
-    }
-
-    let mut start = 0usize;
-    while start < sorted_indices.len() {
-        let mut end = start + 1;
-        while end < sorted_indices.len()
-            && candidates_share_load_balance_rotation_group(
-                &candidates[sorted_indices[start]],
-                &candidates[sorted_indices[end]],
-                context.priority_mode,
-            )
-        {
-            end += 1;
-        }
-
-        let group_len = end - start;
-        if group_len > 1 {
-            let offset = usize::try_from(context.load_balance_seed).unwrap_or(0) % group_len;
-            sorted_indices[start..end].rotate_left(offset);
-        }
-        start = end;
+fn compare_affinity_or_seeded_hash(
+    left: &SchedulerRankableCandidate,
+    right: &SchedulerRankableCandidate,
+    seed: u64,
+) -> Ordering {
+    match (left.affinity_hash, right.affinity_hash) {
+        (Some(left_hash), Some(right_hash)) => left_hash.cmp(&right_hash),
+        _ => compare_seeded_candidate_hash(left, right, seed, "tie"),
     }
 }
 
-fn candidates_share_load_balance_rotation_group(
+fn compare_seeded_provider_hash(
     left: &SchedulerRankableCandidate,
     right: &SchedulerRankableCandidate,
-    priority_mode: crate::SchedulerPriorityMode,
-) -> bool {
-    candidates_share_priority_group(left, right, priority_mode)
-        && left.capability_priority == right.capability_priority
-        && left.demote_cross_format == right.demote_cross_format
-        && left.format_preference == right.format_preference
+    seed: u64,
+) -> Ordering {
+    seeded_rank_hash(seed, "provider", [left.provider_id.as_str()], 0).cmp(&seeded_rank_hash(
+        seed,
+        "provider",
+        [right.provider_id.as_str()],
+        0,
+    ))
+}
+
+fn compare_seeded_candidate_hash(
+    left: &SchedulerRankableCandidate,
+    right: &SchedulerRankableCandidate,
+    seed: u64,
+    salt: &str,
+) -> Ordering {
+    seeded_rank_hash(
+        seed,
+        salt,
+        [
+            left.provider_id.as_str(),
+            left.endpoint_id.as_str(),
+            left.key_id.as_str(),
+            left.selected_provider_model_name.as_str(),
+        ],
+        left.original_index,
+    )
+    .cmp(&seeded_rank_hash(
+        seed,
+        salt,
+        [
+            right.provider_id.as_str(),
+            right.endpoint_id.as_str(),
+            right.key_id.as_str(),
+            right.selected_provider_model_name.as_str(),
+        ],
+        right.original_index,
+    ))
+}
+
+fn seeded_rank_hash<'a>(
+    seed: u64,
+    salt: &str,
+    parts: impl IntoIterator<Item = &'a str>,
+    original_index: usize,
+) -> u64 {
+    let mut hasher = Sha256::new();
+    hasher.update(seed.to_be_bytes());
+    hasher.update(b":");
+    hasher.update(salt.as_bytes());
+    for part in parts {
+        hasher.update(b":");
+        hasher.update(part.as_bytes());
+    }
+    hasher.update(b":");
+    hasher.update(original_index.to_be_bytes());
+    let digest = hasher.finalize();
+    u64::from_be_bytes([
+        digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7],
+    ])
 }

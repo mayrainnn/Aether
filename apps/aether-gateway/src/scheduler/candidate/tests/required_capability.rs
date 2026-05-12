@@ -176,8 +176,8 @@ async fn required_capability_without_model_uses_session_scoped_affinity() {
         Some(&client_session_affinity),
     )
     .expect("session affinity cache key should build");
-    state.scheduler_affinity_cache.insert(
-        cache_key,
+    state.remember_scheduler_affinity_target(
+        &cache_key,
         SchedulerAffinityTarget {
             provider_id: "provider-b".to_string(),
             endpoint_id: "endpoint-b".to_string(),

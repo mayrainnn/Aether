@@ -16,6 +16,7 @@ mod materialization_policy;
 mod passthrough;
 mod plan_builders;
 mod pool_scheduler;
+pub(crate) mod pool_scores;
 mod report_context;
 mod route;
 mod runtime_miss;
@@ -25,6 +26,10 @@ mod standard;
 mod state;
 
 pub(crate) use self::candidate_materialization::LocalExecutionAttemptSource;
+pub(crate) use self::candidate_resolution::{
+    candidate_auth_channel_skip_reason, read_candidate_transport_snapshot,
+    EligibleLocalExecutionCandidate, LocalExecutionCandidateKind, SkippedLocalExecutionCandidate,
+};
 pub(crate) use self::passthrough::{
     build_local_same_format_stream_attempt_source, build_local_same_format_stream_plan_and_reports,
     build_local_same_format_sync_attempt_source, build_local_same_format_sync_plan_and_reports,
@@ -36,7 +41,13 @@ pub(crate) use self::plan_builders::{
     build_standard_stream_plan_from_decision, build_standard_sync_plan_from_decision,
     AiStreamAttempt, AiSyncAttempt,
 };
+pub(crate) use self::pool_scores::{
+    build_provider_key_pool_score_upsert, provider_key_pool_score_id, provider_key_pool_score_scope,
+};
 pub(crate) use self::route::is_matching_stream_request as planner_is_matching_stream_request;
+pub(crate) use self::runtime_miss::{
+    apply_local_runtime_candidate_terminal_reason, record_local_runtime_candidate_skip_reason,
+};
 pub(crate) use self::specialized::{
     build_local_gemini_files_stream_attempt_source_for_kind,
     build_local_gemini_files_stream_plan_and_reports_for_kind,
@@ -48,6 +59,7 @@ pub(crate) use self::specialized::{
     build_local_image_sync_plan_and_reports_for_kind,
     build_local_video_sync_attempt_source_for_kind,
     build_local_video_sync_plan_and_reports_for_kind,
+    set_local_openai_image_execution_exhausted_diagnostic,
 };
 pub(crate) use self::standard::{
     build_local_openai_chat_stream_attempt_source_for_kind,

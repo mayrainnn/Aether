@@ -63,6 +63,7 @@ version = "0.1.0"
 dependencies = [
  "aether-ai-formats",
  "aether-contracts",
+ "aether-data-contracts",
  "aether-scheduler-core",
  "async-trait",
  "http",
@@ -161,6 +162,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-dispatch-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "aether-gateway"
 version = "0.1.0"
 dependencies = [
@@ -173,6 +185,7 @@ dependencies = [
  "aether-crypto",
  "aether-data",
  "aether-data-contracts",
+ "aether-dispatch-core",
  "aether-http",
  "aether-model-fetch",
  "aether-oauth",
@@ -280,9 +293,11 @@ dependencies = [
  "aether-video-tasks-core",
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "http",
  "regex",
  "reqwest",
+ "rsa",
  "serde",
  "serde_json",
  "sha2",
@@ -295,7 +310,7 @@ dependencies = [
 
 [[package]]
 name = "aether-proxy"
-version = "0.3.6"
+version = "0.3.9"
 dependencies = [
  "aether-contracts",
  "aether-gateway",

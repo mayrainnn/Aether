@@ -20,8 +20,7 @@ use crate::ai_serving::GatewayControlDecision;
 use crate::{AiExecutionDecision, AppState, GatewayError};
 
 use super::candidates::{
-    build_local_standard_candidate_attempt_source, materialize_local_standard_candidate_attempts,
-    resolve_local_standard_decision_input,
+    build_local_standard_candidate_attempt_source, resolve_local_standard_decision_input,
 };
 use super::payload::maybe_build_local_standard_decision_payload_for_candidate;
 use super::{LocalStandardDecisionInput, LocalStandardSpec};
@@ -323,12 +322,12 @@ pub(crate) async fn maybe_build_sync_via_standard_family_payload(
         Some(input.requested_model.as_str()),
         "candidate_evaluation_incomplete",
     );
-    let (attempts, candidate_count) =
-        materialize_local_standard_candidate_attempts(state, trace_id, &input, body_json, spec)
+    let (mut source, candidate_count) =
+        build_local_standard_candidate_attempt_source(state, trace_id, &input, body_json, spec)
             .await?;
     apply_local_runtime_candidate_evaluation_progress(state, trace_id, candidate_count);
 
-    for attempt in attempts {
+    while let Some(attempt) = source.next_attempt().await {
         if let Some(payload) = maybe_build_local_standard_decision_payload_for_candidate(
             state, parts, trace_id, body_json, &input, attempt, spec,
         )
@@ -372,12 +371,12 @@ pub(crate) async fn maybe_build_stream_via_standard_family_payload(
         Some(input.requested_model.as_str()),
         "candidate_evaluation_incomplete",
     );
-    let (attempts, candidate_count) =
-        materialize_local_standard_candidate_attempts(state, trace_id, &input, body_json, spec)
+    let (mut source, candidate_count) =
+        build_local_standard_candidate_attempt_source(state, trace_id, &input, body_json, spec)
             .await?;
     apply_local_runtime_candidate_evaluation_progress(state, trace_id, candidate_count);
 
-    for attempt in attempts {
+    while let Some(attempt) = source.next_attempt().await {
         if let Some(payload) = maybe_build_local_standard_decision_payload_for_candidate(
             state, parts, trace_id, body_json, &input, attempt, spec,
         )
@@ -427,15 +426,15 @@ pub(crate) async fn build_local_sync_plan_and_reports(
         Some(input.requested_model.as_str()),
         "candidate_evaluation_incomplete",
     );
-    let (attempts, candidate_count) =
-        materialize_local_standard_candidate_attempts(state, trace_id, &input, body_json, spec)
+    let (mut source, candidate_count) =
+        build_local_standard_candidate_attempt_source(state, trace_id, &input, body_json, spec)
             .await?;
     apply_local_runtime_candidate_evaluation_progress(state, trace_id, candidate_count);
     if candidate_count == 0 {
         return Ok(Vec::new());
     }
     let mut plans = Vec::new();
-    for attempt in attempts {
+    while let Some(attempt) = source.next_attempt().await {
         let Some(payload) = maybe_build_local_standard_decision_payload_for_candidate(
             state, parts, trace_id, body_json, &input, attempt, spec,
         )
@@ -501,15 +500,15 @@ pub(crate) async fn build_local_stream_plan_and_reports(
         Some(input.requested_model.as_str()),
         "candidate_evaluation_incomplete",
     );
-    let (attempts, candidate_count) =
-        materialize_local_standard_candidate_attempts(state, trace_id, &input, body_json, spec)
+    let (mut source, candidate_count) =
+        build_local_standard_candidate_attempt_source(state, trace_id, &input, body_json, spec)
             .await?;
     apply_local_runtime_candidate_evaluation_progress(state, trace_id, candidate_count);
     if candidate_count == 0 {
         return Ok(Vec::new());
     }
     let mut plans = Vec::new();
-    for attempt in attempts {
+    while let Some(attempt) = source.next_attempt().await {
         let Some(payload) = maybe_build_local_standard_decision_payload_for_candidate(
             state, parts, trace_id, body_json, &input, attempt, spec,
         )

@@ -22,6 +22,7 @@ use crate::data::candidate_selection::MinimalCandidateSelectionRowSource;
 use crate::data::GatewayDataState;
 use crate::{AppState, GatewayError};
 
+use super::super::affinity::build_scheduler_affinity_cache_key;
 use super::super::runtime::should_skip_provider_quota;
 use super::super::selection::{
     collect_selectable_candidates as collect_selectable_candidates_impl,
@@ -458,8 +459,8 @@ async fn fixed_order_ignores_cached_scheduler_affinity_promotion() {
         );
 
     let auth_snapshot = sample_auth_snapshot("affinity-key-1");
-    state.scheduler_affinity_cache.insert(
-        "scheduler_affinity:affinity-key-1:openai:chat:gpt-4.1".to_string(),
+    state.remember_scheduler_affinity_target(
+        "scheduler_affinity:affinity-key-1:openai:chat:gpt-4.1",
         SchedulerAffinityTarget {
             provider_id: "provider-b".to_string(),
             endpoint_id: "endpoint-b".to_string(),
@@ -577,8 +578,8 @@ async fn cache_affinity_promotes_cached_scheduler_affinity_candidate_when_enable
         );
 
     let auth_snapshot = sample_auth_snapshot("affinity-key-1");
-    state.scheduler_affinity_cache.insert(
-        "scheduler_affinity:affinity-key-1:openai:chat:gpt-4.1".to_string(),
+    state.remember_scheduler_affinity_target(
+        "scheduler_affinity:affinity-key-1:openai:chat:gpt-4.1",
         SchedulerAffinityTarget {
             provider_id: "provider-b".to_string(),
             endpoint_id: "endpoint-b".to_string(),
@@ -606,7 +607,47 @@ async fn cache_affinity_promotes_cached_scheduler_affinity_candidate_when_enable
 }
 
 #[tokio::test]
-async fn load_balance_rotates_same_priority_group_and_ignores_cached_affinity() {
+async fn load_balance_selection_does_not_remember_scheduler_affinity() {
+    let row = sample_row();
+    let candidates = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+        row,
+    ]));
+    let quotas = Arc::new(InMemoryProviderQuotaRepository::seed(vec![]));
+    let state = AppState::new()
+        .expect("state should build")
+        .with_data_state_for_tests(
+            GatewayDataState::with_candidate_selection_and_quota_for_tests(candidates, quotas)
+                .with_system_config_values_for_tests(vec![(
+                    "scheduling_mode".to_string(),
+                    json!("load_balance"),
+                )]),
+        );
+    let auth_snapshot = sample_auth_snapshot("affinity-key-1");
+    let cache_key =
+        build_scheduler_affinity_cache_key(Some(&auth_snapshot), "openai:chat", "gpt-4.1", None)
+            .expect("scheduler affinity cache key should build");
+
+    let selected = select_candidate(
+        state.data.as_ref(),
+        &state,
+        "openai:chat",
+        "gpt-4.1",
+        false,
+        Some(&auth_snapshot),
+        100,
+    )
+    .await
+    .expect("selection should succeed")
+    .expect("candidate should exist");
+
+    assert_eq!(selected.key_id, "key-1");
+    assert!(state
+        .read_scheduler_affinity_target(cache_key.as_str(), Duration::from_secs(300))
+        .is_none());
+}
+
+#[tokio::test]
+async fn load_balance_ignores_provider_priority_and_cached_affinity() {
     let mut first = sample_row();
     first.provider_id = "provider-a".to_string();
     first.provider_name = "provider-a".to_string();
@@ -623,9 +664,9 @@ async fn load_balance_rotates_same_priority_group_and_ignores_cached_affinity() 
     second.endpoint_id = "endpoint-b".to_string();
     second.key_id = "key-b".to_string();
     second.key_name = "beta".to_string();
-    second.provider_priority = 0;
+    second.provider_priority = 100;
     second.key_internal_priority = 0;
-    second.key_global_priority_by_format = Some(json!({"openai:chat": 0}));
+    second.key_global_priority_by_format = Some(json!({"openai:chat": 100}));
 
     let candidates = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
         first, second,
@@ -642,8 +683,8 @@ async fn load_balance_rotates_same_priority_group_and_ignores_cached_affinity() 
         );
 
     let auth_snapshot = sample_auth_snapshot("affinity-key-1");
-    state.scheduler_affinity_cache.insert(
-        "scheduler_affinity:affinity-key-1:openai:chat:gpt-4.1".to_string(),
+    state.remember_scheduler_affinity_target(
+        "scheduler_affinity:affinity-key-1:openai:chat:gpt-4.1",
         SchedulerAffinityTarget {
             provider_id: "provider-b".to_string(),
             endpoint_id: "endpoint-b".to_string(),
@@ -664,6 +705,29 @@ async fn load_balance_rotates_same_priority_group_and_ignores_cached_affinity() 
     )
     .await
     .expect("first pass should succeed");
+    let mut provider_b_first_seed = None;
+    for seed in 101..600 {
+        let pass = collect_selectable_candidates(
+            state.data.as_ref(),
+            &state,
+            "openai:chat",
+            "gpt-4.1",
+            false,
+            Some(&auth_snapshot),
+            seed,
+        )
+        .await
+        .expect("seeded pass should succeed");
+        if pass
+            .first()
+            .is_some_and(|candidate| candidate.provider_id == "provider-b")
+        {
+            provider_b_first_seed = Some(seed);
+            break;
+        }
+    }
+    let provider_b_first_seed = provider_b_first_seed
+        .expect("test seed should allow provider-b to win despite lower priority");
     let second_pass = collect_selectable_candidates(
         state.data.as_ref(),
         &state,
@@ -671,27 +735,14 @@ async fn load_balance_rotates_same_priority_group_and_ignores_cached_affinity() 
         "gpt-4.1",
         false,
         Some(&auth_snapshot),
-        101,
+        provider_b_first_seed,
     )
     .await
     .expect("second pass should succeed");
 
     assert_eq!(first_pass.len(), 2);
     assert_eq!(second_pass.len(), 2);
-    assert_ne!(first_pass[0].provider_id, second_pass[0].provider_id);
-    assert!(
-        first_pass[0].provider_id != "provider-b" || second_pass[0].provider_id != "provider-b"
-    );
-    assert_ne!(
-        first_pass
-            .iter()
-            .map(|candidate| candidate.provider_id.as_str())
-            .collect::<Vec<_>>(),
-        second_pass
-            .iter()
-            .map(|candidate| candidate.provider_id.as_str())
-            .collect::<Vec<_>>()
-    );
+    assert_eq!(second_pass[0].provider_id, "provider-b");
 }
 
 #[tokio::test]

@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use tracing::warn;
 
 use crate::ai_serving::{GatewayAuthApiKeySnapshot, PlannerAppState};
+use crate::clock::current_unix_ms;
 use crate::handlers::shared::provider_pool::admin_provider_pool_config_from_config_value;
 use crate::scheduler::config::{
     read_scheduler_ordering_config, SchedulerOrderingConfig, SchedulerSchedulingMode,
@@ -176,6 +177,7 @@ fn ai_ranking_context_config(ordering_config: SchedulerOrderingConfig) -> AiRank
     AiRankingContextConfig {
         priority_mode: ordering_config.priority_mode,
         scheduling_mode: ai_ranking_scheduling_mode(ordering_config.scheduling_mode),
+        load_balance_seed: current_unix_ms(),
     }
 }
 

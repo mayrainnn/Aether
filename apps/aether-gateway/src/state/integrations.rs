@@ -236,16 +236,6 @@ impl ModelFetchAssociationStore for AppState {
             .await
             .map_err(|err| format!("{err:?}"))
     }
-
-    async fn delete_admin_provider_model(
-        &self,
-        provider_id: &str,
-        model_id: &str,
-    ) -> Result<bool, Self::Error> {
-        AppState::delete_admin_provider_model(self, provider_id, model_id)
-            .await
-            .map_err(|err| format!("{err:?}"))
-    }
 }
 
 #[async_trait]
@@ -332,6 +322,10 @@ impl SchedulerRuntimeState for AppState {
         AppState::read_scheduler_affinity_target(self, cache_key, ttl)
     }
 
+    fn scheduler_affinity_epoch(&self) -> u64 {
+        AppState::scheduler_affinity_epoch(self)
+    }
+
     fn remember_scheduler_affinity_target(
         &self,
         cache_key: &str,
@@ -340,6 +334,24 @@ impl SchedulerRuntimeState for AppState {
         max_entries: usize,
     ) {
         AppState::remember_scheduler_affinity_target(self, cache_key, target, ttl, max_entries);
+    }
+
+    fn remember_scheduler_affinity_target_for_epoch(
+        &self,
+        cache_key: &str,
+        target: SchedulerAffinityTarget,
+        ttl: Duration,
+        max_entries: usize,
+        expected_epoch: Option<u64>,
+    ) -> bool {
+        AppState::remember_scheduler_affinity_target_for_epoch(
+            self,
+            cache_key,
+            target,
+            ttl,
+            max_entries,
+            expected_epoch,
+        )
     }
 
     async fn read_scheduler_ordering_config(

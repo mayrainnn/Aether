@@ -210,8 +210,8 @@ async fn reuses_cached_scheduler_affinity_candidate_before_sorted_fallback() {
     let cache_key =
         build_scheduler_affinity_cache_key(Some(&auth_snapshot), "openai:chat", "gpt-4.1", None)
             .expect("cache key should build");
-    state.scheduler_affinity_cache.insert(
-        cache_key,
+    state.remember_scheduler_affinity_target(
+        &cache_key,
         SchedulerAffinityTarget {
             provider_id: "provider-b".to_string(),
             endpoint_id: "endpoint-b".to_string(),
@@ -315,8 +315,8 @@ async fn cached_affinity_candidate_cannot_use_reserved_provider_key_rpm_capacity
     let cache_key =
         build_scheduler_affinity_cache_key(Some(&auth_snapshot), "openai:chat", "gpt-4.1", None)
             .expect("cache key should build");
-    state.scheduler_affinity_cache.insert(
-        cache_key,
+    state.remember_scheduler_affinity_target(
+        &cache_key,
         SchedulerAffinityTarget {
             provider_id: "provider-a".to_string(),
             endpoint_id: "endpoint-a".to_string(),

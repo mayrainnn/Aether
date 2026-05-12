@@ -262,6 +262,14 @@ fn admin_monitoring_json_request_count(
     })
 }
 
+fn admin_monitoring_json_scheduler_affinity_epoch(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Option<u64> {
+    object
+        .get("scheduler_affinity_epoch")
+        .and_then(serde_json::Value::as_u64)
+}
+
 pub(super) fn admin_monitoring_cache_affinity_record(
     raw_key: &str,
     raw_value: &str,
@@ -300,12 +308,14 @@ pub(super) fn admin_monitoring_cache_affinity_record(
         expire_at: object.get("expire_at").cloned(),
         request_count: request_count.unwrap_or(0),
         request_count_known: request_count.is_some(),
+        scheduler_affinity_epoch: None,
     })
 }
 
 pub(super) fn admin_monitoring_scheduler_affinity_record(
     cache_key: &str,
     target: &SchedulerAffinityTarget,
+    epoch: u64,
     age: Duration,
     ttl: Duration,
     now_unix_secs: u64,
@@ -329,6 +339,7 @@ pub(super) fn admin_monitoring_scheduler_affinity_record(
         expire_at: Some(serde_json::json!(expire_at)),
         request_count: 0,
         request_count_known: false,
+        scheduler_affinity_epoch: Some(epoch),
     })
 }
 
@@ -371,6 +382,7 @@ pub(super) fn admin_monitoring_scheduler_affinity_record_from_raw(
         expire_at: object.get("expire_at").cloned(),
         request_count: request_count.unwrap_or(0),
         request_count_known: request_count.is_some(),
+        scheduler_affinity_epoch: admin_monitoring_json_scheduler_affinity_epoch(object),
     })
 }
 

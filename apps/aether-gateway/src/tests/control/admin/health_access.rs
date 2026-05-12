@@ -15,14 +15,15 @@ use http::StatusCode;
 use serde_json::json;
 
 use super::super::{
-    build_router_with_state, issue_test_admin_access_token, sample_endpoint, sample_key,
-    sample_ldap_module_config, sample_management_token, sample_oauth_module_provider,
+    build_router_with_state, hash_management_token, issue_test_admin_access_token, sample_endpoint,
+    sample_key, sample_ldap_module_config, sample_management_token, sample_oauth_module_provider,
     sample_provider, sample_request_candidate, start_server, AppState,
 };
 use crate::constants::{
     GATEWAY_HEADER, TRUSTED_ADMIN_SESSION_ID_HEADER, TRUSTED_ADMIN_USER_ID_HEADER,
     TRUSTED_ADMIN_USER_ROLE_HEADER,
 };
+use crate::control::all_assignable_management_token_permissions;
 use crate::data::GatewayDataState;
 
 const ADMIN_ENDPOINT_HEALTH_DATA_UNAVAILABLE_DETAIL: &str =
@@ -1119,4 +1120,77 @@ async fn gateway_handles_admin_management_tokens_locally_with_trusted_admin_prin
 
     gateway_handle.abort();
     upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_allows_full_management_token_to_fetch_permission_catalog() {
+    let upstream_hits = Arc::new(Mutex::new(0usize));
+    let upstream_hits_clone = Arc::clone(&upstream_hits);
+    let upstream = Router::new().route(
+        "/api/admin/management-tokens/permissions/catalog",
+        any(move |_request: Request| {
+            let upstream_hits_inner = Arc::clone(&upstream_hits_clone);
+            async move {
+                *upstream_hits_inner.lock().expect("mutex should lock") += 1;
+                (StatusCode::OK, Body::from("unexpected upstream hit"))
+            }
+        }),
+    );
+
+    let state = AppState::new().expect("gateway should build");
+    let admin_user = state
+        .create_local_auth_user_with_settings(
+            Some("management-full@example.com".to_string()),
+            true,
+            "admin".to_string(),
+            "hash".to_string(),
+            "admin".to_string(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("admin user should be created")
+        .expect("admin user should exist");
+    let raw_token = "ae-management-full-access";
+    let mut management_token =
+        sample_management_token("mt-admin-full", &admin_user.id, "management-full", true);
+    management_token.token.allowed_ips = None;
+    management_token.token.permissions = Some(json!(all_assignable_management_token_permissions()));
+    let management_token_repository =
+        Arc::new(InMemoryManagementTokenRepository::seed_with_hashes(
+            vec![management_token],
+            vec![(
+                hash_management_token(raw_token),
+                "mt-admin-full".to_string(),
+            )],
+        ));
+
+    let (upstream_url, upstream_handle) = start_server(upstream).await;
+    let gateway = build_router_with_state(state.with_data_state_for_tests(
+        GatewayDataState::with_management_token_repository_for_tests(management_token_repository),
+    ));
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{gateway_url}/api/admin/management-tokens/permissions/catalog"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .bearer_auth(raw_token)
+        .send()
+        .await
+        .expect("request should succeed");
+
+    let status = response.status();
+    let body = response.text().await.expect("body should read");
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    let payload: serde_json::Value = serde_json::from_str(&body).expect("json body should parse");
+    assert!(payload["items"].is_array());
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+    drop(upstream_url);
 }

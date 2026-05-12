@@ -635,9 +635,9 @@ fn preserve_quota_window_usage_state(current_status_snapshot: Option<&Value>, qu
 }
 
 fn codex_default_window_minutes(code: &str) -> Option<u64> {
-    if code.eq_ignore_ascii_case("5h") {
+    if code.eq_ignore_ascii_case("5h") || code.eq_ignore_ascii_case("spark_5h") {
         Some(300)
-    } else if code.eq_ignore_ascii_case("weekly") {
+    } else if code.eq_ignore_ascii_case("weekly") || code.eq_ignore_ascii_case("spark_weekly") {
         Some(10_080)
     } else {
         None
@@ -735,6 +735,20 @@ fn build_codex_quota_status_snapshot(
     let windows = [
         codex_quota_window_snapshot(metadata, "primary", "weekly", "周", observed_at_unix_secs),
         codex_quota_window_snapshot(metadata, "secondary", "5h", "5H", observed_at_unix_secs),
+        codex_quota_window_snapshot(
+            metadata,
+            "spark_primary",
+            "spark_5h",
+            "Spark 5H",
+            observed_at_unix_secs,
+        ),
+        codex_quota_window_snapshot(
+            metadata,
+            "spark_secondary",
+            "spark_weekly",
+            "Spark 周",
+            observed_at_unix_secs,
+        ),
     ]
     .into_iter()
     .flatten()
@@ -750,21 +764,34 @@ fn build_codex_quota_status_snapshot(
         return None;
     }
 
-    let usage_ratio = windows
+    let primary_windows = windows
+        .iter()
+        .filter(|window| {
+            window
+                .get("code")
+                .and_then(Value::as_str)
+                .is_some_and(|code| {
+                    code.eq_ignore_ascii_case("weekly") || code.eq_ignore_ascii_case("5h")
+                })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let usage_ratio = primary_windows
         .iter()
         .filter_map(Value::as_object)
         .filter_map(|window| window.get("used_ratio"))
         .filter_map(Value::as_f64)
         .max_by(f64::total_cmp);
-    let reset_seconds = windows
+    let reset_seconds = primary_windows
         .iter()
         .filter_map(Value::as_object)
         .filter_map(|window| window.get("reset_seconds"))
         .filter_map(admin_provider_quota_pure::coerce_json_u64)
         .min();
-    let reset_at = quota_windows_min_reset_at(&windows);
-    let exhausted_by_credits =
-        windows.is_empty() && credits_unlimited != Some(true) && credits_has_credits == Some(false);
+    let reset_at = quota_windows_min_reset_at(&primary_windows);
+    let exhausted_by_credits = primary_windows.is_empty()
+        && credits_unlimited != Some(true)
+        && credits_has_credits == Some(false);
     let exhausted_by_window = usage_ratio.is_some_and(|value| value >= 1.0 - 1e-6);
     let exhausted = exhausted_by_credits || exhausted_by_window;
 
@@ -1924,6 +1951,48 @@ mod tests {
             quota.get("windows").and_then(Value::as_array).map(Vec::len),
             Some(2usize)
         );
+    }
+
+    #[test]
+    fn provider_key_status_snapshot_payload_backfills_codex_spark_windows() {
+        let mut key = sample_catalog_key();
+        key.upstream_metadata = Some(json!({
+            "codex": {
+                "updated_at": 1_775_553_285u64,
+                "plan_type": "plus",
+                "primary_used_percent": 55.0,
+                "primary_reset_at": 1_900_000_000u64,
+                "secondary_used_percent": 12.5,
+                "secondary_reset_at": 1_900_500_000u64,
+                "spark_primary_used_percent": 40.0,
+                "spark_primary_reset_at": 1_900_100_000u64,
+                "spark_primary_window_minutes": 300u64,
+                "spark_secondary_used_percent": 5.0,
+                "spark_secondary_reset_at": 1_900_600_000u64,
+                "spark_secondary_window_minutes": 10_080u64
+            }
+        }));
+
+        let payload = provider_key_status_snapshot_payload(&key, "codex");
+        let windows = payload["quota"]["windows"]
+            .as_array()
+            .expect("quota windows should exist");
+        let spark_5h = windows
+            .iter()
+            .filter_map(Value::as_object)
+            .find(|window| window.get("code") == Some(&json!("spark_5h")))
+            .expect("Spark 5H window should exist");
+        let spark_weekly = windows
+            .iter()
+            .filter_map(Value::as_object)
+            .find(|window| window.get("code") == Some(&json!("spark_weekly")))
+            .expect("Spark weekly window should exist");
+
+        assert_eq!(windows.len(), 4);
+        assert_eq!(spark_5h.get("label"), Some(&json!("Spark 5H")));
+        assert_eq!(spark_5h.get("remaining_ratio"), Some(&json!(0.6)));
+        assert_eq!(spark_weekly.get("label"), Some(&json!("Spark 周")));
+        assert_eq!(spark_weekly.get("remaining_ratio"), Some(&json!(0.95)));
     }
 
     #[test]

@@ -29,10 +29,12 @@ describe('quota selectors', () => {
   it('detects only depleted weekly segments', () => {
     expect(hasNoWeeklyLimit('周剩余 0.0%（5天后重置） | 5H剩余 93.0%（2小时后重置）')).toBe(true)
     expect(hasNoWeeklyLimit('周剩余 45.0%（5天后重置） | 5H剩余 0.0%（2小时后重置）')).toBe(false)
+    expect(hasNoWeeklyLimit('周剩余 45.0% | Spark周剩余 0.0%')).toBe(false)
   })
 
   it('detects only depleted 5h segments', () => {
     expect(hasNoFiveHourLimit('周剩余 45.0%（5天后重置） | 5H剩余 0.0%（2小时后重置）')).toBe(true)
     expect(hasNoFiveHourLimit('周剩余 0.0%（5天后重置） | 5H剩余 93.0%（2小时后重置）')).toBe(false)
+    expect(hasNoFiveHourLimit('5H剩余 93.0% | Spark5H剩余 0.0%')).toBe(false)
   })
 })

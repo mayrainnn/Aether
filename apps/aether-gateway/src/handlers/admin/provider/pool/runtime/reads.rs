@@ -3,10 +3,11 @@ use super::keys::{
     pool_cooldown_keys, pool_cost_keys, pool_latency_keys, pool_lru_key, pool_sticky_key,
     pool_sticky_pattern,
 };
+use crate::handlers::admin::provider::pool::config::admin_provider_pool_cache_affinity_enabled;
 use crate::handlers::admin::provider::shared::support::{
     AdminProviderPoolConfig, AdminProviderPoolRuntimeState,
 };
-use aether_runtime_state::RuntimeState;
+use aether_runtime_state::{DataLayerError, RuntimeState};
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::warn;
@@ -44,11 +45,13 @@ pub(crate) async fn read_admin_provider_pool_runtime_state(
     let cooldown_keys = pool_cooldown_keys(provider_id, key_ids);
     let cost_keys = pool_cost_keys(provider_id, key_ids);
     let latency_keys = pool_latency_keys(provider_id, key_ids);
+    let sticky_sessions_enabled = pool_config.sticky_session_ttl_seconds > 0
+        && admin_provider_pool_cache_affinity_enabled(pool_config);
 
     if let Some(sticky_session_token) = sticky_session_token
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .filter(|_| pool_config.sticky_session_ttl_seconds > 0)
+        .filter(|_| sticky_sessions_enabled)
     {
         let sticky_key = pool_sticky_key(provider_id, sticky_session_token);
         if let Ok(Some(bound_key_id)) = runtime.kv_get(&sticky_key).await {
@@ -77,22 +80,24 @@ pub(crate) async fn read_admin_provider_pool_runtime_state(
         }
     }
 
-    let sticky_keys = runtime
-        .scan_keys(&pool_sticky_pattern(provider_id), 200)
-        .await
-        .unwrap_or_default();
-    state.total_sticky_sessions = sticky_keys.len();
-    if !sticky_keys.is_empty() {
-        let raw_keys = sticky_keys
-            .iter()
-            .map(|key| runtime.strip_namespace(key).to_string())
-            .collect::<Vec<_>>();
-        if let Ok(values) = runtime.kv_get_many(&raw_keys).await {
-            for bound_key_id in values.into_iter().flatten() {
-                *state
-                    .sticky_sessions_by_key
-                    .entry(bound_key_id)
-                    .or_insert(0) += 1;
+    if sticky_sessions_enabled {
+        let sticky_keys = runtime
+            .scan_keys(&pool_sticky_pattern(provider_id), 200)
+            .await
+            .unwrap_or_default();
+        state.total_sticky_sessions = sticky_keys.len();
+        if !sticky_keys.is_empty() {
+            let raw_keys = sticky_keys
+                .iter()
+                .map(|key| runtime.strip_namespace(key).to_string())
+                .collect::<Vec<_>>();
+            if let Ok(values) = runtime.kv_get_many(&raw_keys).await {
+                for bound_key_id in values.into_iter().flatten() {
+                    *state
+                        .sticky_sessions_by_key
+                        .entry(bound_key_id)
+                        .or_insert(0) += 1;
+                }
             }
         }
     }
@@ -196,4 +201,14 @@ pub(crate) async fn read_admin_provider_pool_cooldown_key_ids(
         .set_members(&pool_cooldown_index_key(provider_id))
         .await
         .unwrap_or_default()
+}
+
+pub(crate) async fn read_admin_provider_pool_key_cooldown_reason(
+    runtime: &RuntimeState,
+    provider_id: &str,
+    key_id: &str,
+) -> Result<Option<String>, DataLayerError> {
+    runtime
+        .kv_get(&pool_cooldown_key(provider_id, key_id))
+        .await
 }

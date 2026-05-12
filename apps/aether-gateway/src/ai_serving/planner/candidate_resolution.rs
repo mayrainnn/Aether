@@ -21,7 +21,6 @@ use crate::ai_serving::{
 use crate::orchestration::LocalExecutionCandidateMetadata;
 
 use super::candidate_ranking::rank_eligible_local_execution_candidates;
-use super::pool_scheduler::apply_local_execution_pool_scheduler;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct EligibleLocalExecutionCandidate {
@@ -61,7 +60,6 @@ struct GatewayLocalCandidateResolutionPort<'a> {
     auth_snapshot: Option<&'a GatewayAuthApiKeySnapshot>,
     client_session_affinity: Option<&'a ClientSessionAffinity>,
     required_capabilities: Option<&'a serde_json::Value>,
-    sticky_session_token: Option<&'a str>,
     request_auth_channel: Option<&'a str>,
 }
 
@@ -182,14 +180,7 @@ impl AiCandidateResolutionPort for GatewayLocalCandidateResolutionPort<'_> {
         &self,
         candidates: Vec<Self::Eligible>,
     ) -> Result<(Vec<Self::Eligible>, Vec<Self::Skipped>), Self::Error> {
-        Ok(apply_local_execution_pool_scheduler(
-            self.state,
-            candidates,
-            self.sticky_session_token,
-            self.requested_model,
-            self.request_auth_channel,
-        )
-        .await)
+        Ok((candidates, Vec::new()))
     }
 }
 
@@ -201,7 +192,7 @@ pub(crate) async fn resolve_and_rank_local_execution_candidates(
     auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
     client_session_affinity: Option<&ClientSessionAffinity>,
     required_capabilities: Option<&serde_json::Value>,
-    sticky_session_token: Option<&str>,
+    _sticky_session_token: Option<&str>,
     request_auth_channel: Option<&str>,
 ) -> (
     Vec<EligibleLocalExecutionCandidate>,
@@ -216,7 +207,7 @@ pub(crate) async fn resolve_and_rank_local_execution_candidates(
         auth_snapshot,
         client_session_affinity,
         required_capabilities,
-        sticky_session_token,
+        None,
         request_auth_channel,
         AiCandidateResolutionMode::Standard,
     )
@@ -231,7 +222,7 @@ pub(crate) async fn resolve_and_rank_local_execution_candidates_without_transpor
     auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
     client_session_affinity: Option<&ClientSessionAffinity>,
     required_capabilities: Option<&serde_json::Value>,
-    sticky_session_token: Option<&str>,
+    _sticky_session_token: Option<&str>,
     request_auth_channel: Option<&str>,
 ) -> (
     Vec<EligibleLocalExecutionCandidate>,
@@ -246,7 +237,7 @@ pub(crate) async fn resolve_and_rank_local_execution_candidates_without_transpor
         auth_snapshot,
         client_session_affinity,
         required_capabilities,
-        sticky_session_token,
+        None,
         request_auth_channel,
         AiCandidateResolutionMode::WithoutTransportPairGate,
     )
@@ -261,7 +252,7 @@ pub(crate) async fn resolve_and_rank_logical_local_execution_candidates(
     auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
     client_session_affinity: Option<&ClientSessionAffinity>,
     required_capabilities: Option<&serde_json::Value>,
-    sticky_session_token: Option<&str>,
+    _sticky_session_token: Option<&str>,
     request_auth_channel: Option<&str>,
     mode: AiCandidateResolutionMode,
 ) -> (
@@ -276,7 +267,7 @@ pub(crate) async fn resolve_and_rank_logical_local_execution_candidates(
         auth_snapshot,
         client_session_affinity,
         required_capabilities,
-        sticky_session_token,
+        None,
         request_auth_channel,
         mode,
         false,
@@ -292,7 +283,7 @@ async fn resolve_and_rank_local_execution_candidates_with_mode(
     auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
     client_session_affinity: Option<&ClientSessionAffinity>,
     required_capabilities: Option<&serde_json::Value>,
-    sticky_session_token: Option<&str>,
+    _sticky_session_token: Option<&str>,
     request_auth_channel: Option<&str>,
     mode: AiCandidateResolutionMode,
 ) -> (
@@ -307,10 +298,10 @@ async fn resolve_and_rank_local_execution_candidates_with_mode(
         auth_snapshot,
         client_session_affinity,
         required_capabilities,
-        sticky_session_token,
+        None,
         request_auth_channel,
         mode,
-        true,
+        false,
     )
     .await
 }
@@ -324,7 +315,7 @@ async fn resolve_and_rank_local_execution_candidates_with_pool_expansion(
     auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
     client_session_affinity: Option<&ClientSessionAffinity>,
     required_capabilities: Option<&serde_json::Value>,
-    sticky_session_token: Option<&str>,
+    _sticky_session_token: Option<&str>,
     request_auth_channel: Option<&str>,
     mode: AiCandidateResolutionMode,
     expand_pool_groups: bool,
@@ -332,13 +323,13 @@ async fn resolve_and_rank_local_execution_candidates_with_pool_expansion(
     Vec<EligibleLocalExecutionCandidate>,
     Vec<SkippedLocalExecutionCandidate>,
 ) {
+    let scheduler_affinity_epoch = state.app().scheduler_affinity_epoch();
     let port = GatewayLocalCandidateResolutionPort {
         state,
         requested_model,
         auth_snapshot,
         client_session_affinity,
         required_capabilities,
-        sticky_session_token,
         request_auth_channel,
     };
 
@@ -350,7 +341,12 @@ async fn resolve_and_rank_local_execution_candidates_with_pool_expansion(
     };
 
     match run_ai_candidate_resolution(&port, candidates, request).await {
-        Ok(outcome) => (outcome.eligible_candidates, outcome.skipped_candidates),
+        Ok(mut outcome) => {
+            for candidate in &mut outcome.eligible_candidates {
+                candidate.orchestration.scheduler_affinity_epoch = Some(scheduler_affinity_epoch);
+            }
+            (outcome.eligible_candidates, outcome.skipped_candidates)
+        }
         Err(error) => match error {},
     }
 }

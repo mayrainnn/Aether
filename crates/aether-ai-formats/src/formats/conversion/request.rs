@@ -157,7 +157,7 @@ fn request_context(mapped_model: &str, upstream_is_stream: bool) -> FormatContex
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     use super::{
         convert_openai_chat_request_to_claude_request,
@@ -214,5 +214,340 @@ mod tests {
         assert_eq!(converted["model"], "claude-sonnet");
         assert_eq!(converted["messages"][0]["role"], "user");
         assert_eq!(converted["messages"][0]["content"], "hello");
+    }
+
+    #[test]
+    fn request_normalizer_preserves_multiple_claude_tool_results() {
+        let body = json!({
+            "model": "claude-sonnet",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_1",
+                            "name": "lookup",
+                            "input": {"query": "alpha"}
+                        },
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_2",
+                            "name": "lookup",
+                            "input": {"query": "beta"}
+                        }
+                    ]
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_1",
+                            "content": "alpha result"
+                        },
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_2",
+                            "content": [{"type": "text", "text": "beta result"}]
+                        }
+                    ]
+                }
+            ],
+            "max_tokens": 128,
+        });
+
+        let converted =
+            normalize_claude_request_to_openai_chat_request(&body).expect("openai chat request");
+        let messages = converted["messages"].as_array().expect("messages");
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0]["role"], "assistant");
+        assert_eq!(messages[0]["tool_calls"].as_array().unwrap().len(), 2);
+        assert_eq!(messages[0]["tool_calls"][0]["id"], "toolu_1");
+        assert_eq!(messages[0]["tool_calls"][1]["id"], "toolu_2");
+        assert_eq!(messages[1]["role"], "tool");
+        assert_eq!(messages[1]["tool_call_id"], "toolu_1");
+        assert_eq!(messages[1]["content"], "alpha result");
+        assert_eq!(messages[2]["role"], "tool");
+        assert_eq!(messages[2]["tool_call_id"], "toolu_2");
+        assert_eq!(messages[2]["content"], "beta result");
+    }
+
+    #[test]
+    fn request_normalizer_preserves_claude_tool_result_order_around_text() {
+        let body = json!({
+            "model": "claude-sonnet",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "before"},
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_1",
+                        "content": "first"
+                    },
+                    {"type": "text", "text": "between"},
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_2",
+                        "content": "second"
+                    }
+                ]
+            }],
+            "max_tokens": 128,
+        });
+
+        let converted =
+            normalize_claude_request_to_openai_chat_request(&body).expect("openai chat request");
+        let messages = converted["messages"].as_array().expect("messages");
+
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[0]["content"], "before");
+        assert_eq!(messages[1]["role"], "tool");
+        assert_eq!(messages[1]["tool_call_id"], "toolu_1");
+        assert_eq!(messages[1]["content"], "first");
+        assert_eq!(messages[2]["role"], "user");
+        assert_eq!(messages[2]["content"], "between");
+        assert_eq!(messages[3]["role"], "tool");
+        assert_eq!(messages[3]["tool_call_id"], "toolu_2");
+        assert_eq!(messages[3]["content"], "second");
+    }
+
+    #[test]
+    fn request_normalizer_marks_claude_error_tool_result_string_and_object_content() {
+        let object_result = json!({"code": "ENOENT", "message": "missing"});
+        let body = json!({
+            "model": "claude-sonnet",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_error_string",
+                        "content": "lookup failed",
+                        "is_error": true
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_error_empty",
+                        "content": "",
+                        "is_error": true
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_error_object",
+                        "content": object_result,
+                        "is_error": true
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_ok",
+                        "content": "still ok"
+                    }
+                ]
+            }],
+            "max_tokens": 128,
+        });
+
+        let converted =
+            normalize_claude_request_to_openai_chat_request(&body).expect("openai chat request");
+        let messages = converted["messages"].as_array().expect("messages");
+
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0]["role"], "tool");
+        assert_eq!(messages[0]["tool_call_id"], "toolu_error_string");
+        assert_eq!(messages[0]["content"], "[tool error]\nlookup failed");
+
+        assert_eq!(messages[1]["role"], "tool");
+        assert_eq!(messages[1]["tool_call_id"], "toolu_error_empty");
+        assert_eq!(messages[1]["content"], "[tool error]");
+
+        assert_eq!(messages[2]["role"], "tool");
+        assert_eq!(messages[2]["tool_call_id"], "toolu_error_object");
+        let object_content = messages[2]["content"].as_str().expect("object content");
+        let serialized_object = object_content
+            .strip_prefix("[tool error]\n")
+            .expect("error prefix");
+        assert_eq!(
+            serde_json::from_str::<Value>(serialized_object).expect("serialized object"),
+            object_result
+        );
+
+        assert_eq!(messages[3]["role"], "tool");
+        assert_eq!(messages[3]["tool_call_id"], "toolu_ok");
+        assert_eq!(messages[3]["content"], "still ok");
+    }
+
+    #[test]
+    fn request_normalizer_marks_claude_error_tool_result_multipart_image_content() {
+        let body = json!({
+            "model": "claude-sonnet",
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_error_image",
+                    "content": [
+                        {"type": "text", "text": "preview"},
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": "aW1hZ2U="
+                            }
+                        }
+                    ],
+                    "is_error": true
+                }]
+            }],
+            "max_tokens": 128,
+        });
+
+        let converted =
+            normalize_claude_request_to_openai_chat_request(&body).expect("openai chat request");
+        let messages = converted["messages"].as_array().expect("messages");
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "tool");
+        assert_eq!(messages[0]["tool_call_id"], "toolu_error_image");
+        let content = messages[0]["content"]
+            .as_array()
+            .expect("multipart error content");
+        assert_eq!(
+            content.as_slice(),
+            &[
+                json!({"type": "text", "text": "[tool error]"}),
+                json!({"type": "text", "text": "preview"}),
+                json!({
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,aW1hZ2U="}
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn request_normalizer_preserves_legal_openai_tool_content_for_claude_variants() {
+        let anthropic_blocks = json!([
+            {"type": "text", "text": "preview"},
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/jpeg",
+                    "data": "aGVsbG8="
+                }
+            },
+            {
+                "type": "image",
+                "source": {
+                    "type": "url",
+                    "url": "https://example.com/image.jpg"
+                }
+            },
+            {
+                "type": "document",
+                "source": {
+                    "type": "base64",
+                    "media_type": "application/pdf",
+                    "data": "JVBERi0x"
+                }
+            },
+            {
+                "type": "document",
+                "source": {
+                    "type": "url",
+                    "url": "https://example.com/report.pdf"
+                }
+            },
+            {
+                "type": "document",
+                "source": {
+                    "type": "text",
+                    "media_type": "text/plain",
+                    "data": "document body"
+                }
+            }
+        ]);
+        let object_result = json!({"answer": 42, "ok": true});
+        let body = json!({
+            "model": "claude-sonnet",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_object",
+                        "content": object_result
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_text_blocks",
+                        "content": [
+                            {"type": "text", "text": "line one"},
+                            {"type": "text", "text": "line two"}
+                        ]
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_anthropic_blocks",
+                        "content": anthropic_blocks
+                    }
+                ]
+            }],
+            "max_tokens": 128,
+        });
+
+        let converted =
+            normalize_claude_request_to_openai_chat_request(&body).expect("openai chat request");
+        let messages = converted["messages"].as_array().expect("messages");
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0]["role"], "tool");
+        assert_eq!(messages[0]["tool_call_id"], "toolu_object");
+        let object_content = messages[0]["content"].as_str().expect("object content");
+        assert_eq!(
+            serde_json::from_str::<Value>(object_content).expect("serialized object"),
+            object_result
+        );
+
+        assert_eq!(messages[1]["role"], "tool");
+        assert_eq!(messages[1]["tool_call_id"], "toolu_text_blocks");
+        assert_eq!(messages[1]["content"], "line one\n\nline two");
+
+        assert_eq!(messages[2]["role"], "tool");
+        assert_eq!(messages[2]["tool_call_id"], "toolu_anthropic_blocks");
+        let block_content = messages[2]["content"]
+            .as_array()
+            .expect("multipart anthropic block content");
+        assert_eq!(
+            block_content.as_slice(),
+            &[
+                json!({"type": "text", "text": "preview"}),
+                json!({
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/jpeg;base64,aGVsbG8="}
+                }),
+                json!({
+                    "type": "image_url",
+                    "image_url": {"url": "https://example.com/image.jpg"}
+                }),
+                json!({
+                    "type": "file",
+                    "file": {"file_data": "data:application/pdf;base64,JVBERi0x"}
+                }),
+                json!({"type": "text", "text": "[File: https://example.com/report.pdf]"}),
+                json!({
+                    "type": "text",
+                    "text": "[Claude tool_result document content omitted: text/plain]"
+                }),
+            ]
+        );
+        let block_content_json = Value::Array(block_content.clone()).to_string();
+        assert!(!block_content_json.contains("\"source\""));
+        assert!(!block_content_json.contains("document body"));
     }
 }

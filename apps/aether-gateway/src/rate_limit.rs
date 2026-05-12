@@ -120,6 +120,10 @@ impl FrontdoorUserRpmLimiter {
         self.resolve_system_default_limit(state).await
     }
 
+    pub(crate) fn clear_system_default_cache(&self) {
+        self.system_default_cache.clear();
+    }
+
     pub(crate) fn current_bucket(&self, now_ts: u64) -> u64 {
         self.config.current_bucket(now_ts)
     }
@@ -364,6 +368,9 @@ impl RpmPlan {
         if auth.local_rejection.is_some() || auth.user_id.is_empty() || auth.api_key_id.is_empty() {
             return None;
         }
+        if auth.admin_bypass_limits {
+            return None;
+        }
 
         let now_ts = current_unix_secs();
         let bucket = config.current_bucket(now_ts);
@@ -488,6 +495,7 @@ mod tests {
             user_rate_limit: Some(1),
             api_key_rate_limit: Some(10),
             api_key_is_standalone: false,
+            admin_bypass_limits: false,
             local_rejection: None,
             allowed_models: None,
         });
@@ -526,6 +534,7 @@ mod tests {
             user_rate_limit: None,
             api_key_rate_limit: Some(10),
             api_key_is_standalone: false,
+            admin_bypass_limits: false,
             local_rejection: None,
             allowed_models: None,
         });
@@ -548,6 +557,39 @@ mod tests {
             }
             other => panic!("expected rejection, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn limiter_skips_admin_bypass_context() {
+        let limiter = FrontdoorUserRpmLimiter::new(FrontdoorUserRpmConfig::new(60, 120, false))
+            .with_system_default_limit_for_tests(1);
+        let decision = sample_decision(GatewayControlAuthContext {
+            user_id: "admin-1".to_string(),
+            api_key_id: "key-1".to_string(),
+            username: None,
+            api_key_name: None,
+            balance_remaining: Some(10.0),
+            access_allowed: true,
+            user_rate_limit: Some(1),
+            api_key_rate_limit: Some(1),
+            api_key_is_standalone: false,
+            admin_bypass_limits: true,
+            local_rejection: None,
+            allowed_models: None,
+        });
+        let state = AppState::new().expect("state should build for tests");
+
+        let first = limiter
+            .check_and_consume(&state, Some(&decision))
+            .await
+            .expect("check should succeed");
+        let second = limiter
+            .check_and_consume(&state, Some(&decision))
+            .await
+            .expect("check should succeed");
+
+        assert_eq!(first, FrontdoorUserRpmOutcome::NotApplicable);
+        assert_eq!(second, FrontdoorUserRpmOutcome::NotApplicable);
     }
 
     #[test]
@@ -574,6 +616,7 @@ mod tests {
             user_rate_limit: Some(1),
             api_key_rate_limit: Some(10),
             api_key_is_standalone: false,
+            admin_bypass_limits: false,
             local_rejection: None,
             allowed_models: None,
         });

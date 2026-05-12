@@ -15,13 +15,13 @@ Tunnel 模式下代理节点**无需对外监听端口**，仅需出站连接到
 <!-- DOWNLOAD_TABLE_START -->
 | Platform | Download |
 |----------|----------|
-| Linux x86_64 (GNU) | [aether-proxy-linux-amd64.tar.gz](https://github.com/fawney19/Aether/releases/download/proxy-v0.3.6/aether-proxy-linux-amd64.tar.gz) |
-| Linux ARM64 (GNU) | [aether-proxy-linux-arm64.tar.gz](https://github.com/fawney19/Aether/releases/download/proxy-v0.3.6/aether-proxy-linux-arm64.tar.gz) |
-| Linux x86_64 (musl) | [aether-proxy-linux-musl-amd64.tar.gz](https://github.com/fawney19/Aether/releases/download/proxy-v0.3.6/aether-proxy-linux-musl-amd64.tar.gz) |
-| Linux ARM64 (musl) | [aether-proxy-linux-musl-arm64.tar.gz](https://github.com/fawney19/Aether/releases/download/proxy-v0.3.6/aether-proxy-linux-musl-arm64.tar.gz) |
-| macOS x86_64 | [aether-proxy-macos-amd64.tar.gz](https://github.com/fawney19/Aether/releases/download/proxy-v0.3.6/aether-proxy-macos-amd64.tar.gz) |
-| macOS ARM64 | [aether-proxy-macos-arm64.tar.gz](https://github.com/fawney19/Aether/releases/download/proxy-v0.3.6/aether-proxy-macos-arm64.tar.gz) |
-| Windows x86_64 | [aether-proxy-windows-amd64.zip](https://github.com/fawney19/Aether/releases/download/proxy-v0.3.6/aether-proxy-windows-amd64.zip) |
+| Linux x86_64 (GNU) | [aether-proxy-linux-amd64.tar.gz](https://github.com/fawney19/Aether/releases/download/proxy-v0.3.9/aether-proxy-linux-amd64.tar.gz) |
+| Linux ARM64 (GNU) | [aether-proxy-linux-arm64.tar.gz](https://github.com/fawney19/Aether/releases/download/proxy-v0.3.9/aether-proxy-linux-arm64.tar.gz) |
+| Linux x86_64 (musl) | [aether-proxy-linux-musl-amd64.tar.gz](https://github.com/fawney19/Aether/releases/download/proxy-v0.3.9/aether-proxy-linux-musl-amd64.tar.gz) |
+| Linux ARM64 (musl) | [aether-proxy-linux-musl-arm64.tar.gz](https://github.com/fawney19/Aether/releases/download/proxy-v0.3.9/aether-proxy-linux-musl-arm64.tar.gz) |
+| macOS x86_64 | [aether-proxy-macos-amd64.tar.gz](https://github.com/fawney19/Aether/releases/download/proxy-v0.3.9/aether-proxy-macos-amd64.tar.gz) |
+| macOS ARM64 | [aether-proxy-macos-arm64.tar.gz](https://github.com/fawney19/Aether/releases/download/proxy-v0.3.9/aether-proxy-macos-arm64.tar.gz) |
+| Windows x86_64 | [aether-proxy-windows-amd64.zip](https://github.com/fawney19/Aether/releases/download/proxy-v0.3.9/aether-proxy-windows-amd64.zip) |
 <!-- DOWNLOAD_TABLE_END -->
 
 上表展示的是最新已发布版本的下载链接。从下一次 `proxy-v*` 发布开始，表格会自动补上 `Linux x86_64 (musl)` / `Linux ARM64 (musl)` 包，供 Alpine 等 musl 系统直接使用。
@@ -87,19 +87,19 @@ sudo aether-proxy uninstall
 | `--tunnel-connections` | `AETHER_PROXY_TUNNEL_CONNECTIONS` | 自动（硬件估算） | 最小连接池大小；显式设置后默认固定为该值 |
 | `--tunnel-connections-max` | `AETHER_PROXY_TUNNEL_CONNECTIONS_MAX` | 自动（硬件估算） | 连接池自动扩容上限；大于 `tunnel_connections` 时启用 autoscale |
 | `--tunnel-max-streams` | `AETHER_PROXY_TUNNEL_MAX_STREAMS` | 自动（硬件估算） | 单连接最大并发 stream 数 |
-| `--tunnel-ping-interval-ms` | `AETHER_PROXY_TUNNEL_PING_INTERVAL_MS` | `250` | fast-fail 探测周期（毫秒） |
-| `--tunnel-connect-timeout-ms` | `AETHER_PROXY_TUNNEL_CONNECT_TIMEOUT_MS` | `800` | fast-reconnect 建连超时（毫秒） |
-| `--tunnel-stale-timeout-ms` | `AETHER_PROXY_TUNNEL_STALE_TIMEOUT_MS` | `900` | 无入站数据断连阈值（毫秒） |
+| `--tunnel-ping-interval-ms` | `AETHER_PROXY_TUNNEL_PING_INTERVAL_MS` | `10000` | WebSocket ping 周期（毫秒） |
+| `--tunnel-connect-timeout-ms` | `AETHER_PROXY_TUNNEL_CONNECT_TIMEOUT_MS` | `3000` | tunnel 建连超时（毫秒） |
+| `--tunnel-stale-timeout-ms` | `AETHER_PROXY_TUNNEL_STALE_TIMEOUT_MS` | `30000` | 无入站数据断连阈值（毫秒） |
 | `--tunnel-scale-check-interval-ms` | `AETHER_PROXY_TUNNEL_SCALE_CHECK_INTERVAL_MS` | `1000` | autoscale 采样周期（毫秒） |
-| `--tunnel-scale-up-threshold-percent` | `AETHER_PROXY_TUNNEL_SCALE_UP_THRESHOLD_PERCENT` | `70` | 单 tunnel 占用率超过该值时扩容 |
+| `--tunnel-scale-up-threshold-percent` | `AETHER_PROXY_TUNNEL_SCALE_UP_THRESHOLD_PERCENT` | `50` | 单 tunnel 占用率超过该值时扩容 |
 | `--tunnel-scale-down-threshold-percent` | `AETHER_PROXY_TUNNEL_SCALE_DOWN_THRESHOLD_PERCENT` | `35` | 单 tunnel 占用率持续低于该值时允许缩容 |
 | `--tunnel-scale-down-grace-secs` | `AETHER_PROXY_TUNNEL_SCALE_DOWN_GRACE_SECS` | `15` | 低负载持续时间达到该值后才回收次级 tunnel |
 | `--tunnel-tcp-keepalive-secs` | `AETHER_PROXY_TUNNEL_TCP_KEEPALIVE_SECS` | `30` | TCP keepalive 初始延迟（秒） |
 | `--tunnel-tcp-nodelay` | `AETHER_PROXY_TUNNEL_TCP_NODELAY` | `true` | 禁用 Nagle 算法 |
 | `--tunnel-reconnect-base-ms` | `AETHER_PROXY_TUNNEL_RECONNECT_BASE_MS` | `50` | 指数退避基础延迟（毫秒） |
-| `--tunnel-reconnect-max-ms` | `AETHER_PROXY_TUNNEL_RECONNECT_MAX_MS` | `30000` | 指数退避上限（毫秒） |
+| `--tunnel-reconnect-max-ms` | `AETHER_PROXY_TUNNEL_RECONNECT_MAX_MS` | `250` | 指数退避上限（毫秒） |
 
-省略 `tunnel_connections` 时，proxy 会按设备能力自动计算一个基线值和扩容上限；如果显式设置了 `tunnel_connections` 但没有设置 `tunnel_connections_max`，则保持固定连接池，不自动扩缩。
+省略 `tunnel_connections` 时，proxy 会按设备能力自动计算一个基线值和偏单机上限的扩容上限：默认至少保留 2 条常驻 tunnel，并会更早触发扩容；如果显式设置了 `tunnel_connections` 但没有设置 `tunnel_connections_max`，则保持固定连接池，不自动扩缩。
 
 #### 上游 HTTP 请求
 

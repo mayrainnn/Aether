@@ -41,6 +41,26 @@ pub(crate) fn remember_scheduler_affinity_for_candidate(
     requested_model: &str,
     candidate: &SchedulerMinimalCandidateSelectionCandidate,
 ) {
+    remember_scheduler_affinity_for_candidate_at_epoch(
+        state,
+        auth_snapshot,
+        client_session_affinity,
+        client_api_format,
+        requested_model,
+        candidate,
+        None,
+    );
+}
+
+pub(crate) fn remember_scheduler_affinity_for_candidate_at_epoch(
+    state: PlannerAppState<'_>,
+    auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
+    client_session_affinity: Option<&ClientSessionAffinity>,
+    client_api_format: &str,
+    requested_model: &str,
+    candidate: &SchedulerMinimalCandidateSelectionCandidate,
+    expected_epoch: Option<u64>,
+) {
     let Some(api_key_id) = auth_snapshot
         .map(|snapshot| snapshot.api_key_id.trim())
         .filter(|value| !value.is_empty())
@@ -56,7 +76,7 @@ pub(crate) fn remember_scheduler_affinity_for_candidate(
         return;
     };
 
-    state.app().remember_scheduler_affinity_target(
+    let _ = state.app().remember_scheduler_affinity_target_for_epoch(
         &cache_key,
         SchedulerAffinityTarget {
             provider_id: candidate.provider_id.clone(),
@@ -65,5 +85,6 @@ pub(crate) fn remember_scheduler_affinity_for_candidate(
         },
         SCHEDULER_AFFINITY_TTL,
         PLANNER_SCHEDULER_AFFINITY_MAX_ENTRIES,
+        expected_epoch,
     );
 }

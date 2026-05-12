@@ -11,6 +11,7 @@ use crate::ai_serving::planner::plan_builders::{
     build_passthrough_sync_plan_from_decision, build_standard_stream_plan_from_decision,
     AiStreamAttempt, AiSyncAttempt,
 };
+use crate::ai_serving::planner::runtime_miss::set_local_runtime_execution_exhausted_diagnostic;
 use crate::ai_serving::planner::spec_metadata::local_openai_image_spec_metadata;
 use crate::ai_serving::GatewayControlDecision;
 use crate::ai_serving::{
@@ -48,6 +49,35 @@ pub(crate) struct LocalOpenAiImageStreamAttemptSource<'a> {
     input: LocalOpenAiImageDecisionInput,
     spec: LocalOpenAiImageSpec,
     candidates: LocalOpenAiImageCandidateAttemptSource<'a>,
+}
+
+pub(crate) fn set_local_openai_image_execution_exhausted_diagnostic(
+    state: &AppState,
+    trace_id: &str,
+    decision: &GatewayControlDecision,
+    plan_kind: &str,
+    body_json: &serde_json::Value,
+    candidate_count: usize,
+) {
+    warn!(
+        event_name = "local_openai_image_candidates_exhausted",
+        log_type = "event",
+        trace_id = %trace_id,
+        plan_kind,
+        route_class = decision.route_class.as_deref().unwrap_or("passthrough"),
+        route_family = decision.route_family.as_deref().unwrap_or("unknown"),
+        candidate_count,
+        model = body_json.get("model").and_then(|value| value.as_str()).unwrap_or(""),
+        "gateway local openai image execution exhausted all candidates"
+    );
+    set_local_runtime_execution_exhausted_diagnostic(
+        state,
+        trace_id,
+        decision,
+        plan_kind,
+        body_json.get("model").and_then(|value| value.as_str()),
+        candidate_count,
+    );
 }
 
 pub(crate) async fn build_local_image_sync_plan_and_reports_for_kind(
@@ -375,7 +405,7 @@ pub(crate) async fn maybe_build_sync_local_image_decision_payload(
         return Ok(None);
     };
 
-    let Some(attempts) = list_local_openai_image_candidate_attempts(
+    let Some((mut source, _)) = build_local_openai_image_candidate_attempt_source(
         state,
         trace_id,
         &input,
@@ -383,12 +413,12 @@ pub(crate) async fn maybe_build_sync_local_image_decision_payload(
         spec_metadata.api_format,
         spec_metadata.decision_kind,
     )
-    .await
+    .await?
     else {
         return Ok(None);
     };
 
-    for attempt in attempts {
+    while let Some(attempt) = source.next_attempt().await {
         if let Some(payload) = maybe_build_local_openai_image_decision_payload_for_candidate(
             state,
             parts,
@@ -435,7 +465,7 @@ pub(crate) async fn maybe_build_stream_local_image_decision_payload(
         return Ok(None);
     };
 
-    let Some(attempts) = list_local_openai_image_candidate_attempts(
+    let Some((mut source, _)) = build_local_openai_image_candidate_attempt_source(
         state,
         trace_id,
         &input,
@@ -443,12 +473,12 @@ pub(crate) async fn maybe_build_stream_local_image_decision_payload(
         spec_metadata.api_format,
         spec_metadata.decision_kind,
     )
-    .await
+    .await?
     else {
         return Ok(None);
     };
 
-    for attempt in attempts {
+    while let Some(attempt) = source.next_attempt().await {
         if let Some(payload) = maybe_build_local_openai_image_decision_payload_for_candidate(
             state,
             parts,
@@ -491,7 +521,7 @@ async fn build_local_sync_plan_and_reports(
         return Ok(Vec::new());
     };
 
-    let Some(attempts) = list_local_openai_image_candidate_attempts(
+    let Some((mut source, _)) = build_local_openai_image_candidate_attempt_source(
         state,
         trace_id,
         &input,
@@ -499,13 +529,13 @@ async fn build_local_sync_plan_and_reports(
         spec_metadata.api_format,
         spec_metadata.decision_kind,
     )
-    .await
+    .await?
     else {
         return Ok(Vec::new());
     };
 
     let mut plans = Vec::new();
-    for attempt in attempts {
+    while let Some(attempt) = source.next_attempt().await {
         let Some(payload) = maybe_build_local_openai_image_decision_payload_for_candidate(
             state,
             parts,
@@ -567,7 +597,7 @@ async fn build_local_stream_plan_and_reports(
         return Ok(Vec::new());
     };
 
-    let Some(attempts) = list_local_openai_image_candidate_attempts(
+    let Some((mut source, _)) = build_local_openai_image_candidate_attempt_source(
         state,
         trace_id,
         &input,
@@ -575,13 +605,13 @@ async fn build_local_stream_plan_and_reports(
         spec_metadata.api_format,
         spec_metadata.decision_kind,
     )
-    .await
+    .await?
     else {
         return Ok(Vec::new());
     };
 
     let mut plans = Vec::new();
-    for attempt in attempts {
+    while let Some(attempt) = source.next_attempt().await {
         let Some(payload) = maybe_build_local_openai_image_decision_payload_for_candidate(
             state,
             parts,

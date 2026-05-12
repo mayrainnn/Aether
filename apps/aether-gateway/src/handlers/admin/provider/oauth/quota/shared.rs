@@ -50,6 +50,25 @@ pub(crate) fn normalize_string_id_list(values: Option<Vec<String>>) -> Option<Ve
     admin_provider_quota_pure::normalize_string_id_list(values)
 }
 
+pub(crate) fn provider_type_supports_quota_refresh(provider_type: &str) -> bool {
+    matches!(
+        provider_type.trim().to_ascii_lowercase().as_str(),
+        "codex" | "kiro" | "antigravity" | "chatgpt_web"
+    )
+}
+
+pub(crate) fn unsupported_provider_quota_refresh_message(provider_type: &str) -> String {
+    match provider_type.trim().to_ascii_lowercase().as_str() {
+        "claude_code" => "Claude Code 暂不支持自动刷新额度：上游没有稳定可用的账号额度查询接口",
+        "gemini_cli" => {
+            "Gemini CLI 暂不支持自动刷新额度：当前只能通过模型同步/缓存快照展示已知配额信息"
+        }
+        "vertex_ai" => "Vertex AI 暂不支持自动刷新额度：额度属于 Google Cloud 项目/区域配额",
+        _ => "该 Provider 暂不支持自动刷新额度",
+    }
+    .to_string()
+}
+
 pub(super) fn coerce_json_u64(value: &serde_json::Value) -> Option<u64> {
     admin_provider_quota_pure::coerce_json_u64(value)
 }

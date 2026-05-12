@@ -58,6 +58,22 @@ fn report_context_key_id(report_context: Option<&Value>) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn report_context_provider_response_headers(
+    report_context: Option<&Value>,
+) -> Option<BTreeMap<String, String>> {
+    let headers = report_context
+        .and_then(|context| context.get("provider_response_headers"))
+        .and_then(Value::as_object)?;
+    let mut out = BTreeMap::new();
+    for (key, value) in headers {
+        let Some(value) = value.as_str() else {
+            continue;
+        };
+        out.insert(key.clone(), value.to_string());
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 fn is_volatile_compare_field(key: &str) -> bool {
     key == "updated_at" || key.ends_with("_reset_seconds") || key.ends_with("_reset_after_seconds")
 }
@@ -333,7 +349,12 @@ async fn sync_codex_quota_from_response_headers(
     };
 
     let now_unix_secs = current_unix_secs();
-    let Some(parsed) = admin_provider_quota_pure::parse_codex_usage_headers(headers, now_unix_secs)
+    let provider_headers = report_context_provider_response_headers(report_context);
+    let parsed_from_provider_headers = provider_headers.as_ref().and_then(|headers| {
+        admin_provider_quota_pure::parse_codex_usage_headers(headers, now_unix_secs)
+    });
+    let Some(parsed) = parsed_from_provider_headers
+        .or_else(|| admin_provider_quota_pure::parse_codex_usage_headers(headers, now_unix_secs))
     else {
         return Ok(false);
     };

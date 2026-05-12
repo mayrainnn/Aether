@@ -12,11 +12,6 @@ export const TIMELINE_STATUS: CandidateRecord['status'][] = [
   'stream_interrupted',
 ]
 
-const POOL_HIDDEN_STATUS = new Set<CandidateRecord['status']>([
-  'available',
-  'unused',
-])
-
 const PROVIDER_TYPE_LIKE_NAMES = new Set<string>([
   'codex',
   'kiro',
@@ -40,9 +35,7 @@ export const makeAttemptKey = (candidateIndex: number, retryIndex: number): stri
 }
 
 export const isPoolParticipatedCandidate = (candidate: CandidateRecord): boolean => {
-  if (POOL_HIDDEN_STATUS.has(candidate.status)) return false
-  if (candidate.status === 'pending' && !candidate.started_at) return false
-  return true
+  return TIMELINE_STATUS.includes(candidate.status)
 }
 
 export const isAttemptedCandidate = (

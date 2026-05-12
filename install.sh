@@ -15,18 +15,31 @@ CONFIG_DIR="${CONFIG_DIR:-/etc/aether}"
 COMPOSE_DIR="${AETHER_COMPOSE_DIR:-${INSTALL_ROOT}/compose}"
 IMAGE_REPO="${AETHER_IMAGE_REPO:-ghcr.io/fawney19/aether}"
 APP_IMAGE="${AETHER_APP_IMAGE:-}"
+SERVICE_USER_EXPLICIT="false"
+SERVICE_GROUP_EXPLICIT="false"
+if [[ -n "${SERVICE_USER:-}" ]]; then
+    SERVICE_USER_EXPLICIT="true"
+fi
+if [[ -n "${SERVICE_GROUP:-}" ]]; then
+    SERVICE_GROUP_EXPLICIT="true"
+fi
 SERVICE_USER="${SERVICE_USER:-aether}"
 SERVICE_GROUP="${SERVICE_GROUP:-aether}"
 SERVICE_NAME="aether-gateway"
+LAUNCHD_LABEL="${AETHER_LAUNCHD_LABEL:-com.aether.gateway}"
+LAUNCHD_LOG_DIR="${AETHER_LAUNCHD_LOG_DIR:-/var/log/aether}"
 ENV_TARGET="${CONFIG_DIR}/aether-gateway.env"
 SYSTEMD_UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
+LAUNCHD_PLIST_PATH="/Library/LaunchDaemons/${LAUNCHD_LABEL}.plist"
 TMP_ROOT=""
 ARCHIVE_PATH=""
+BUNDLE_DIR=""
 ENV_SOURCE=""
 SKIP_START="false"
 GENERATED_ENV=""
 ADMIN_PASSWORD_SOURCE=""
 UI_LANG="${AETHER_LANG:-${AETHER_LANGUAGE:-auto}}"
+RELEASE_KEEP="${AETHER_RELEASE_KEEP:-3}"
 RELEASE_ARCHIVE_URL="${AETHER_RELEASE_ARCHIVE_URL:-${AETHER_DOWNLOAD_URL:-}}"
 
 usage() {
@@ -38,8 +51,9 @@ Install Aether Gateway.
 Options:
   --mode MODE          Deployment mode: compose, single, or cluster
                       compose: Docker Compose app + Postgres + Redis
-                      single: systemd service with SQLite + in-process runtime
-                      cluster: systemd service connected to shared database + Redis
+                      single: system service with SQLite + in-process runtime
+                      cluster: system service connected to shared database + Redis
+                      Linux services use systemd; macOS services use launchd
   --channel CHANNEL    Release channel to resolve when --version is omitted: pre or rc
                       pre resolves the latest semver prerelease tag (default)
                       rc restricts resolution to tags like v0.7.0-rc23
@@ -54,12 +68,14 @@ Options:
   --config-dir PATH    Config directory (default: /etc/aether)
   --lang LANG          Installer language: zh or en
   --skip-start         Install files and unit, but do not restart the service
+  --keep-releases N    Keep the latest N releases, prune older ones (default: 3, 0=disable)
   -h, --help           Show this help
 
 Environment overrides:
   AETHER_REPO, AETHER_SOURCE_REF, AETHER_INSTALL_MODE, AETHER_CHANNEL, AETHER_VERSION
   AETHER_LANG or AETHER_LANGUAGE
   AETHER_RELEASE_ARCHIVE_URL or AETHER_DOWNLOAD_URL
+  AETHER_LAUNCHD_LABEL, AETHER_LAUNCHD_LOG_DIR, AETHER_RELEASE_KEEP
   AETHER_IMAGE_REPO, AETHER_APP_IMAGE
   INSTALL_ROOT, AETHER_COMPOSE_DIR, CONFIG_DIR, SERVICE_USER, SERVICE_GROUP
   ADMIN_PASSWORD (required for non-interactive first install when generating a new env)
@@ -236,6 +252,11 @@ parse_args() {
                 SKIP_START="true"
                 shift
                 ;;
+            --keep-releases)
+                [[ $# -ge 2 ]] || die "--keep-releases requires a number"
+                RELEASE_KEEP="$2"
+                shift 2
+                ;;
             -h|--help)
                 usage
                 exit 0
@@ -247,14 +268,41 @@ parse_args() {
     done
 }
 
-require_linux() {
-    if [[ "$(uname -s)" != "Linux" ]]; then
-        if ui_is_zh; then
-            die "Aether 二进制安装仅支持 Linux"
-        else
-            die "Aether binary install is only supported on Linux"
+install_os() {
+    case "$(uname -s)" in
+        Linux)
+            echo "linux"
+            ;;
+        Darwin)
+            echo "macos"
+            ;;
+        *)
+            if ui_is_zh; then
+                die "Aether 二进制安装仅支持 Linux 和 macOS"
+            else
+                die "Aether binary install is only supported on Linux and macOS"
+            fi
+            ;;
+    esac
+}
+
+is_darwin() {
+    [[ "$(install_os)" == "macos" ]]
+}
+
+apply_platform_defaults() {
+    if is_darwin; then
+        if [[ "${SERVICE_USER_EXPLICIT}" != "true" ]]; then
+            SERVICE_USER="_aether"
+        fi
+        if [[ "${SERVICE_GROUP_EXPLICIT}" != "true" ]]; then
+            SERVICE_GROUP="_aether"
         fi
     fi
+}
+
+require_supported_os() {
+    install_os >/dev/null
 }
 
 require_root() {
@@ -275,6 +323,38 @@ require_systemd() {
             die "systemctl not found"
         fi
     fi
+}
+
+require_launchd() {
+    if ! command -v launchctl >/dev/null 2>&1; then
+        if ui_is_zh; then
+            die "未找到 launchctl"
+        else
+            die "launchctl not found"
+        fi
+    fi
+}
+
+require_service_manager() {
+    case "$(install_os)" in
+        linux)
+            require_systemd
+            ;;
+        macos)
+            require_launchd
+            ;;
+    esac
+}
+
+service_manager_name() {
+    case "$(install_os)" in
+        linux)
+            echo "systemd"
+            ;;
+        macos)
+            echo "launchd"
+            ;;
+    esac
 }
 
 select_version() {
@@ -344,7 +424,7 @@ select_mode() {
             MODE="compose"
             return
             ;;
-        single|service|systemd|sqlite)
+        single|service|systemd|launchd|sqlite)
             MODE="single"
             return
             ;;
@@ -360,23 +440,25 @@ select_mode() {
     esac
 
     if interactive_tty_available; then
+        local service_manager
+        service_manager="$(service_manager_name)"
         if ui_is_zh; then
-            cat >/dev/tty <<'EOF'
+            cat >/dev/tty <<EOF
 
 请选择 Aether 部署模式:
   1) Docker Compose: 应用 + Postgres + Redis
-  2) 单机服务: systemd + SQLite + 进程内运行时
-  3) 集群节点服务: systemd + 共享数据库 + Redis
+  2) 单机服务: ${service_manager} + SQLite + 进程内运行时
+  3) 集群节点服务: ${service_manager} + 共享数据库 + Redis
 
 请输入选项 [2]:
 EOF
         else
-            cat >/dev/tty <<'EOF'
+            cat >/dev/tty <<EOF
 
 Choose Aether deployment mode:
   1) Docker Compose: app + Postgres + Redis
-  2) Single-node service: systemd + SQLite + in-process runtime
-  3) Cluster node service: systemd + shared database + Redis
+  2) Single-node service: ${service_manager} + SQLite + in-process runtime
+  3) Cluster node service: ${service_manager} + shared database + Redis
 
 Enter choice [2]:
 EOF
@@ -661,20 +743,18 @@ download_or_unpack_bundle() {
     TMP_ROOT="$(mktemp -d)"
     if [[ -n "${ARCHIVE_PATH}" ]]; then
         [[ -f "${ARCHIVE_PATH}" ]] || die "archive not found: ${ARCHIVE_PATH}"
-        if [[ -z "${VERSION}" ]]; then
-            VERSION="$(basename "${ARCHIVE_PATH}" .tar.gz)"
-        fi
         info "using local archive ${ARCHIVE_PATH}"
         tar -xzf "${ARCHIVE_PATH}" -C "${TMP_ROOT}"
     else
-        local arch
+        local os arch
+        os="$(install_os)"
         arch="$(detect_arch)"
 
         local tag asset base_url archive_url archive_file
         tag="$(resolve_version)"
         [[ -n "${tag}" ]] || die "could not resolve ${CHANNEL} release tag for ${REPO}"
         VERSION="${tag}"
-        asset="aether-${tag}-linux-${arch}.tar.gz"
+        asset="aether-${tag}-${os}-${arch}.tar.gz"
         base_url="https://github.com/${REPO}/releases/download/${tag}"
         archive_url="${base_url}/${asset}"
         archive_file="${TMP_ROOT}/${asset}"
@@ -696,7 +776,10 @@ download_or_unpack_bundle() {
     [[ -n "${bundle}" ]] || die "release archive did not contain a bundle directory"
     [[ -x "${bundle}/bin/aether-gateway" ]] || die "bundle is missing bin/aether-gateway"
     [[ -d "${bundle}/frontend" ]] || die "bundle is missing frontend"
-    echo "${bundle}"
+    if [[ -z "${VERSION}" ]]; then
+        VERSION="$(derive_local_bundle_version "${bundle}")"
+    fi
+    BUNDLE_DIR="${bundle}"
 }
 
 urlsafe_rand() {
@@ -710,7 +793,17 @@ urlsafe_rand() {
 
 write_generate_keys_script() {
     local output="$1"
-    install -d -m 0755 "$(dirname "${output}")"
+    local output_dir output_dir_normalized config_dir_normalized
+    output_dir="$(dirname "${output}")"
+    output_dir_normalized="${output_dir%/}"
+    config_dir_normalized="${CONFIG_DIR%/}"
+    [[ -n "${output_dir_normalized}" ]] || output_dir_normalized="/"
+    [[ -n "${config_dir_normalized}" ]] || config_dir_normalized="/"
+    if is_darwin && [[ "${output_dir_normalized}" == "${config_dir_normalized}" ]]; then
+        install_config_dir
+    else
+        install -d -m 0755 "${output_dir}"
+    fi
     cat > "${output}" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -794,9 +887,10 @@ derive_local_bundle_version() {
     local name
     name="$(basename "${bundle}")"
     case "${name}" in
-        aether-*-linux-*)
+        aether-*-linux-*|aether-*-macos-*)
             name="${name#aether-}"
             name="${name%-linux-*}"
+            name="${name%-macos-*}"
             ;;
     esac
     if [[ -z "${name}" || "${name}" == "." || "${name}" == "/" ]]; then
@@ -930,8 +1024,32 @@ generate_compose_env() {
     replace_or_append_env "${output}" "AETHER_GATEWAY_AUTO_PREPARE_DATABASE" "true"
 }
 
+install_config_dir() {
+    if is_darwin; then
+        install -d -o root -g "${SERVICE_GROUP}" -m 0750 "${CONFIG_DIR}"
+    else
+        install -d -m 0750 "${CONFIG_DIR}"
+    fi
+}
+
+install_env_target_from() {
+    local source="$1"
+    if is_darwin; then
+        install -o root -g "${SERVICE_GROUP}" -m 0640 "${source}" "${ENV_TARGET}"
+    else
+        install -m 0600 "${source}" "${ENV_TARGET}"
+    fi
+}
+
+ensure_env_target_permissions() {
+    if is_darwin && [[ -f "${ENV_TARGET}" ]]; then
+        chown root:"${SERVICE_GROUP}" "${ENV_TARGET}"
+        chmod 0640 "${ENV_TARGET}"
+    fi
+}
+
 install_systemd_support_files() {
-    install -d -m 0750 "${CONFIG_DIR}"
+    install_config_dir
     write_generate_keys_script "${CONFIG_DIR}/generate_keys.sh"
 }
 
@@ -959,6 +1077,66 @@ ensure_service_account() {
             --home-dir "${INSTALL_ROOT}" \
             --shell "$(find_nologin_shell)" \
             "${SERVICE_USER}"
+    fi
+}
+
+macos_next_system_id() {
+    local record_type="$1"
+    local id_attr="$2"
+    dscl . -list "/${record_type}" "${id_attr}" 2>/dev/null |
+        awk '
+            $NF ~ /^[0-9]+$/ && $NF >= 350 && $NF < 500 { used[$NF] = 1 }
+            END {
+                for (i = 350; i < 500; i++) {
+                    if (!(i in used)) {
+                        print i
+                        exit
+                    }
+                }
+            }
+        '
+}
+
+macos_group_id() {
+    dscl . -read "/Groups/${SERVICE_GROUP}" PrimaryGroupID 2>/dev/null |
+        awk '/PrimaryGroupID:/ { print $2 }'
+}
+
+ensure_macos_service_account() {
+    local gid uid
+
+    if ! command -v dscl >/dev/null 2>&1; then
+        if ui_is_zh; then
+            die "未找到 dscl，无法创建 macOS 服务账号"
+        else
+            die "dscl not found; cannot create macOS service account"
+        fi
+    fi
+
+    if ! dscl . -read "/Groups/${SERVICE_GROUP}" >/dev/null 2>&1; then
+        gid="$(macos_next_system_id Groups PrimaryGroupID)"
+        [[ -n "${gid}" ]] || die "could not allocate a macOS service group id"
+        info "creating macOS group ${SERVICE_GROUP}"
+        dscl . -create "/Groups/${SERVICE_GROUP}"
+        dscl . -create "/Groups/${SERVICE_GROUP}" PrimaryGroupID "${gid}"
+        dscl . -create "/Groups/${SERVICE_GROUP}" Password "*"
+    fi
+
+    gid="$(macos_group_id)"
+    [[ -n "${gid}" ]] || die "could not resolve macOS group id for ${SERVICE_GROUP}"
+
+    if ! dscl . -read "/Users/${SERVICE_USER}" >/dev/null 2>&1; then
+        uid="$(macos_next_system_id Users UniqueID)"
+        [[ -n "${uid}" ]] || die "could not allocate a macOS service user id"
+        info "creating macOS user ${SERVICE_USER}"
+        dscl . -create "/Users/${SERVICE_USER}"
+        dscl . -create "/Users/${SERVICE_USER}" UserShell /usr/bin/false
+        dscl . -create "/Users/${SERVICE_USER}" RealName "Aether Gateway"
+        dscl . -create "/Users/${SERVICE_USER}" UniqueID "${uid}"
+        dscl . -create "/Users/${SERVICE_USER}" PrimaryGroupID "${gid}"
+        dscl . -create "/Users/${SERVICE_USER}" NFSHomeDirectory "${INSTALL_ROOT}"
+        dscl . -create "/Users/${SERVICE_USER}" IsHidden 1
+        dscl . -create "/Users/${SERVICE_USER}" Password "*"
     fi
 }
 
@@ -1157,7 +1335,7 @@ validate_env_file() {
     fi
 }
 
-resolve_systemd_env_source() {
+resolve_service_env_source() {
     local mode="$1"
     if [[ -n "${ENV_SOURCE}" ]]; then
         [[ -f "${ENV_SOURCE}" ]] || die "env file not found: ${ENV_SOURCE}"
@@ -1181,8 +1359,8 @@ resolve_systemd_env_source() {
         info "generating multi-node env file"
         generate_cluster_env "${GENERATED_ENV}"
         if ! cluster_env_has_required_backends "${GENERATED_ENV}"; then
-            install -d -m 0750 "${CONFIG_DIR}"
-            install -m 0600 "${GENERATED_ENV}" "${ENV_TARGET}"
+            install_config_dir
+            install_env_target_from "${GENERATED_ENV}"
             cat <<EOF
 
 Multi-node env scaffolded:
@@ -1242,11 +1420,13 @@ EOF
 
 install_env_file() {
     local env_file="$1"
-    install -d -m 0750 "${CONFIG_DIR}"
+    install_config_dir
 
     if [[ -n "${env_file}" ]]; then
         info "installing env file to ${ENV_TARGET}"
-        install -m 0600 "${env_file}" "${ENV_TARGET}"
+        install_env_target_from "${env_file}"
+    else
+        ensure_env_target_permissions
     fi
 }
 
@@ -1260,16 +1440,75 @@ install_release() {
 
     info "installing release ${VERSION} into ${release_dir}"
     install -d -m 0755 "${INSTALL_ROOT}" "${INSTALL_ROOT}/releases" "${INSTALL_ROOT}/data" "${INSTALL_ROOT}/logs"
-    install -d -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" -m 0750 \
-        "${INSTALL_ROOT}/data" \
-        "${INSTALL_ROOT}/logs"
+    if is_darwin; then
+        install -d -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" -m 0750 \
+            "${INSTALL_ROOT}/data" \
+            "${INSTALL_ROOT}/logs"
+    else
+        install -d -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" -m 0750 \
+            "${INSTALL_ROOT}/data" \
+            "${INSTALL_ROOT}/logs"
+    fi
     rm -rf "${release_dir}"
     install -d -m 0755 "${release_dir}/bin" "${release_dir}/frontend"
     install -m 0755 "${bundle}/bin/aether-gateway" "${release_dir}/bin/aether-gateway"
     cp -R "${bundle}/frontend/." "${release_dir}/frontend/"
     chmod -R u=rwX,go=rX "${release_dir}"
-    chown -R root:root "${release_dir}"
+    if is_darwin; then
+        chown -R root:wheel "${release_dir}"
+    else
+        chown -R root:root "${release_dir}"
+    fi
     ln -sfn "${release_dir}" "${current_link}"
+}
+
+prune_old_releases() {
+    local keep="${RELEASE_KEEP}"
+    [[ "${keep}" =~ ^[0-9]+$ ]] || return 0
+    [[ "${keep}" -gt 0 ]] || return 0
+
+    local releases_dir="${INSTALL_ROOT}/releases"
+    [[ -d "${releases_dir}" ]] || return 0
+
+    local current_target
+    current_target="$(readlink "${INSTALL_ROOT}/current" 2>/dev/null || true)"
+    current_target="$(basename "${current_target}" 2>/dev/null || true)"
+
+    local count=0
+    local dir
+    while IFS= read -r dir; do
+        [[ -n "${dir}" ]] || continue
+        local name
+        name="$(basename "${dir}")"
+        [[ "${name}" != "${current_target}" ]] || continue
+        count=$((count + 1))
+    done < <(ls -1dt "${releases_dir}"/*/ 2>/dev/null)
+
+    if [[ "${count}" -ge "${keep}" ]]; then
+        local to_remove
+        to_remove="$(ls -1dt "${releases_dir}"/*/ 2>/dev/null | while IFS= read -r d; do
+            local n
+            n="$(basename "${d}")"
+            [[ "${n}" != "${current_target}" ]] || continue
+            printf '%s\n' "${d}"
+        done | tail -n +$((keep)))"
+
+        local removed=0
+        while IFS= read -r dir; do
+            [[ -n "${dir}" ]] || continue
+            info "pruning old release: $(basename "${dir}")"
+            rm -rf "${dir}"
+            removed=$((removed + 1))
+        done <<< "${to_remove}"
+
+        if [[ "${removed}" -gt 0 ]]; then
+            if ui_is_zh; then
+                info "已清理 ${removed} 个旧版本（保留最新 ${keep} 个）"
+            else
+                info "pruned ${removed} old release(s), keeping latest ${keep}"
+            fi
+        fi
+    fi
 }
 
 render_systemd_unit() {
@@ -1368,6 +1607,190 @@ Current release:
 EOF
 }
 
+launchd_wrapper_path() {
+    printf '%s/bin/%s-launchd\n' "${INSTALL_ROOT}" "${SERVICE_NAME}"
+}
+
+install_launchd_support_files() {
+    install_config_dir
+    write_generate_keys_script "${CONFIG_DIR}/generate_keys.sh"
+}
+
+write_launchd_wrapper() {
+    local wrapper
+    wrapper="$(launchd_wrapper_path)"
+    install -d -o root -g wheel -m 0755 "$(dirname "${wrapper}")"
+    cat > "${wrapper}" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+ENV_TARGET="${ENV_TARGET}"
+AETHER_BIN="${INSTALL_ROOT}/current/bin/aether-gateway"
+EOF
+    cat >> "${wrapper}" <<'EOF'
+
+trim_whitespace() {
+    local value="$1"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    printf '%s' "${value}"
+}
+
+strip_optional_quotes() {
+    local value="$1"
+    if [[ ${#value} -ge 2 ]]; then
+        if [[ "${value:0:1}" == "\"" && "${value: -1}" == "\"" ]]; then
+            value="${value:1:${#value}-2}"
+        elif [[ "${value:0:1}" == "'" && "${value: -1}" == "'" ]]; then
+            value="${value:1:${#value}-2}"
+        fi
+    fi
+    printf '%s' "${value}"
+}
+
+if [[ ! -r "${ENV_TARGET}" ]]; then
+    echo "Aether env file not found or not readable: ${ENV_TARGET}" >&2
+    exit 1
+fi
+
+while IFS= read -r raw_line || [[ -n "${raw_line}" ]]; do
+    line="${raw_line%$'\r'}"
+    line="$(trim_whitespace "${line}")"
+    [[ -z "${line}" ]] && continue
+    [[ "${line:0:1}" == "#" ]] && continue
+
+    if [[ "${line}" == export\ * || ! "${line}" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+        echo "Invalid Aether env line: ${line}" >&2
+        exit 1
+    fi
+
+    key="${line%%=*}"
+    value="${line#*=}"
+    value="$(strip_optional_quotes "${value}")"
+    export "${key}=${value}"
+done < "${ENV_TARGET}"
+
+exec "${AETHER_BIN}"
+EOF
+    chmod 0755 "${wrapper}"
+    chown root:wheel "${wrapper}"
+}
+
+render_launchd_plist() {
+    local wrapper
+    wrapper="$(launchd_wrapper_path)"
+    cat <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${LAUNCHD_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${wrapper}</string>
+    </array>
+    <key>UserName</key>
+    <string>${SERVICE_USER}</string>
+    <key>GroupName</key>
+    <string>${SERVICE_GROUP}</string>
+    <key>WorkingDirectory</key>
+    <string>${INSTALL_ROOT}/current</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>${LAUNCHD_LOG_DIR}/${SERVICE_NAME}.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>${LAUNCHD_LOG_DIR}/${SERVICE_NAME}.err.log</string>
+    <key>Umask</key>
+    <integer>23</integer>
+</dict>
+</plist>
+EOF
+}
+
+install_launchd_log_files() {
+    install -d -o root -g wheel -m 0755 "${LAUNCHD_LOG_DIR}"
+    touch "${LAUNCHD_LOG_DIR}/${SERVICE_NAME}.out.log" "${LAUNCHD_LOG_DIR}/${SERVICE_NAME}.err.log"
+    chown "${SERVICE_USER}:${SERVICE_GROUP}" "${LAUNCHD_LOG_DIR}/${SERVICE_NAME}.out.log" "${LAUNCHD_LOG_DIR}/${SERVICE_NAME}.err.log"
+    chmod 0640 "${LAUNCHD_LOG_DIR}/${SERVICE_NAME}.out.log" "${LAUNCHD_LOG_DIR}/${SERVICE_NAME}.err.log"
+}
+
+install_launchd_unit() {
+    local rendered_plist
+    rendered_plist="$(mktemp)"
+    render_launchd_plist > "${rendered_plist}"
+    info "installing launchd plist to ${LAUNCHD_PLIST_PATH}"
+    install_launchd_log_files
+    install -d -o root -g wheel -m 0755 "$(dirname "${LAUNCHD_PLIST_PATH}")"
+    install -o root -g wheel -m 0644 "${rendered_plist}" "${LAUNCHD_PLIST_PATH}"
+    rm -f "${rendered_plist}"
+}
+
+restart_launchd_if_requested() {
+    if [[ "${SKIP_START}" == "true" ]]; then
+        info "skipping launchd service restart"
+        return
+    fi
+
+    info "restarting ${LAUNCHD_LABEL} with launchd"
+    launchctl bootout system "${LAUNCHD_PLIST_PATH}" >/dev/null 2>&1 || true
+    launchctl bootstrap system "${LAUNCHD_PLIST_PATH}"
+    launchctl kickstart -k "system/${LAUNCHD_LABEL}"
+}
+
+print_launchd_next_steps() {
+    local gateway_port
+    local database_driver
+    local database_url
+    gateway_port="$(awk -F= '/^[[:space:]]*APP_PORT=/{print $2}' "${ENV_TARGET}" | tail -n1 | tr -d '[:space:]')"
+    gateway_port="${gateway_port:-8084}"
+    database_driver="$(awk -F= '/^[[:space:]]*AETHER_DATABASE_DRIVER=/{print tolower($2)}' "${ENV_TARGET}" | tail -n1 | tr -d '[:space:]')"
+    database_url="$(awk -F= '/^[[:space:]]*(AETHER_DATABASE_URL|DATABASE_URL|AETHER_GATEWAY_DATA_POSTGRES_URL)=/{print $2}' "${ENV_TARGET}" | tail -n1 | tr -d '[:space:]')"
+
+    cat <<EOF
+
+Install complete.
+
+Gateway service:
+  sudo launchctl print system/${LAUNCHD_LABEL}
+  sudo launchctl kickstart -k system/${LAUNCHD_LABEL}
+  sudo launchctl bootout system ${LAUNCHD_PLIST_PATH}
+
+Logs:
+  tail -f ${LAUNCHD_LOG_DIR}/${SERVICE_NAME}.out.log ${LAUNCHD_LOG_DIR}/${SERVICE_NAME}.err.log
+
+Health checks:
+  curl -fsS http://127.0.0.1:${gateway_port}/_gateway/health
+  curl -fsS http://127.0.0.1:${gateway_port}/readyz
+
+Install directory:
+  ${INSTALL_ROOT}
+  data: ${INSTALL_ROOT}/data
+  logs: ${INSTALL_ROOT}/logs
+
+EOF
+
+    if [[ "${database_driver}" == "sqlite" || "${database_url}" == sqlite:* ]]; then
+        cat <<EOF
+SQLite data:
+  ${database_url#sqlite://}
+
+EOF
+    fi
+
+    cat <<EOF
+Database:
+  empty database: first service start auto-bootstraps to the current baseline
+  later schema upgrades: ${INSTALL_ROOT}/current/bin/aether-gateway --migrate
+
+Current release:
+  ${INSTALL_ROOT}/current
+EOF
+}
+
 install_systemd_mode() {
     local bundle="$1"
     local env_file="$2"
@@ -1377,9 +1800,26 @@ install_systemd_mode() {
     install_env_file "${env_file}"
     validate_env_file "${ENV_TARGET}"
     install_release "${bundle}"
+    prune_old_releases
     install_systemd_unit
     restart_service_if_requested
     print_systemd_next_steps
+}
+
+install_launchd_mode() {
+    local bundle="$1"
+    local env_file="$2"
+
+    ensure_macos_service_account
+    install_launchd_support_files
+    install_env_file "${env_file}"
+    validate_env_file "${ENV_TARGET}"
+    install_release "${bundle}"
+    prune_old_releases
+    write_launchd_wrapper
+    install_launchd_unit
+    restart_launchd_if_requested
+    print_launchd_next_steps
 }
 
 main() {
@@ -1387,7 +1827,8 @@ main() {
 
     parse_args "$@"
     select_language
-    require_linux
+    require_supported_os
+    apply_platform_defaults
     select_version
     select_mode
 
@@ -1395,10 +1836,11 @@ main() {
         install_compose_mode
     else
         require_root
-        require_systemd
+        require_service_manager
         bundle="$(local_bundle_dir || true)"
         if [[ -z "${bundle}" ]]; then
-            bundle="$(download_or_unpack_bundle)"
+            download_or_unpack_bundle
+            bundle="${BUNDLE_DIR}"
         else
             if [[ -z "${VERSION}" ]]; then
                 VERSION="$(derive_local_bundle_version "${bundle}")"
@@ -1406,8 +1848,18 @@ main() {
             info "installing from local extracted bundle ${bundle}"
         fi
 
-        env_file="$(resolve_systemd_env_source "${MODE}")"
-        install_systemd_mode "${bundle}" "${env_file}"
+        if is_darwin; then
+            ensure_macos_service_account
+        fi
+        env_file="$(resolve_service_env_source "${MODE}")"
+        case "$(install_os)" in
+            linux)
+                install_systemd_mode "${bundle}" "${env_file}"
+                ;;
+            macos)
+                install_launchd_mode "${bundle}" "${env_file}"
+                ;;
+        esac
     fi
 
     if [[ -n "${ADMIN_PASSWORD_SOURCE}" ]]; then

@@ -22,7 +22,7 @@ pub(super) use self::sync::{
     build_local_openai_chat_sync_attempt_source, build_local_openai_chat_sync_plan_and_reports,
 };
 
-fn openai_chat_upstream_is_stream_for_candidate(
+pub(super) fn openai_chat_upstream_is_stream_for_candidate(
     transport: &GatewayProviderTransportSnapshot,
     provider_api_format: &str,
     client_is_stream: bool,

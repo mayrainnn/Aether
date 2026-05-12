@@ -4,6 +4,7 @@
 # AI Assistant Configuration
 .codex/
 .claude/
+.deepseek/
 .serena/
 .gemini*/
 .plans

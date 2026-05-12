@@ -9,7 +9,7 @@ use crate::{AiExecutionDecision, AppState, GatewayError};
 
 use super::super::plans::{resolve_stream_spec, resolve_sync_spec};
 use super::candidates::{
-    materialize_local_same_format_provider_candidate_attempts,
+    build_local_same_format_provider_candidate_attempt_source,
     resolve_local_same_format_provider_decision_input,
 };
 use super::payload::maybe_build_local_same_format_provider_decision_payload_for_candidate;
@@ -55,7 +55,7 @@ pub(crate) async fn maybe_build_sync_local_same_format_provider_decision_payload
         Some(input.requested_model.as_str()),
         "candidate_evaluation_incomplete",
     );
-    let (attempts, candidate_count) = materialize_local_same_format_provider_candidate_attempts(
+    let (mut source, candidate_count) = build_local_same_format_provider_candidate_attempt_source(
         state, trace_id, &input, body_json, spec,
     )
     .await?;
@@ -65,7 +65,7 @@ pub(crate) async fn maybe_build_sync_local_same_format_provider_decision_payload
         candidate_count,
     );
 
-    for attempt in attempts {
+    while let Some(attempt) = source.next_attempt().await {
         if let Some(payload) =
             maybe_build_local_same_format_provider_decision_payload_for_candidate(
                 state, parts, trace_id, body_json, &input, attempt, spec,
@@ -122,7 +122,7 @@ pub(crate) async fn maybe_build_stream_local_same_format_provider_decision_paylo
         Some(input.requested_model.as_str()),
         "candidate_evaluation_incomplete",
     );
-    let (attempts, candidate_count) = materialize_local_same_format_provider_candidate_attempts(
+    let (mut source, candidate_count) = build_local_same_format_provider_candidate_attempt_source(
         state, trace_id, &input, body_json, spec,
     )
     .await?;
@@ -132,7 +132,7 @@ pub(crate) async fn maybe_build_stream_local_same_format_provider_decision_paylo
         candidate_count,
     );
 
-    for attempt in attempts {
+    while let Some(attempt) = source.next_attempt().await {
         if let Some(payload) =
             maybe_build_local_same_format_provider_decision_payload_for_candidate(
                 state, parts, trace_id, body_json, &input, attempt, spec,

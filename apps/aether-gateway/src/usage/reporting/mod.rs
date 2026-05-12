@@ -802,6 +802,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submit_sync_report_updates_codex_quota_from_provider_response_headers() {
+        crate::orchestration::clear_local_report_effect_caches_for_tests();
+
+        let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![sample_provider_catalog_provider(
+                "provider-codex-sync-provider-headers",
+                "codex",
+            )],
+            Vec::new(),
+            vec![sample_provider_catalog_key(
+                "key-codex-sync-provider-headers",
+                "provider-codex-sync-provider-headers",
+            )],
+        ));
+        let state = build_provider_catalog_test_state(Arc::clone(&provider_catalog_repository));
+
+        submit_sync_report(
+            &state,
+            GatewaySyncReportRequest {
+                trace_id: "trace-codex-reporting-sync-provider-headers".to_string(),
+                report_kind: "openai_responses_sync_success".to_string(),
+                report_context: Some(json!({
+                    "request_id": "req-codex-reporting-sync-provider-headers",
+                    "key_id": "key-codex-sync-provider-headers",
+                    "provider_response_headers": sample_codex_paid_headers()
+                })),
+                status_code: 200,
+                headers: BTreeMap::new(),
+                body_json: None,
+                client_body_json: None,
+                body_base64: None,
+                telemetry: None,
+            },
+        )
+        .await
+        .expect("sync report should stay local");
+
+        let reloaded = provider_catalog_repository
+            .list_keys_by_ids(&["key-codex-sync-provider-headers".to_string()])
+            .await
+            .expect("keys should list");
+        let codex = reloaded[0]
+            .upstream_metadata
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .and_then(|metadata| metadata.get("codex"))
+            .and_then(serde_json::Value::as_object)
+            .expect("codex metadata should exist");
+        assert_eq!(codex.get("primary_used_percent"), Some(&json!(31.0)));
+        assert_eq!(codex.get("secondary_used_percent"), Some(&json!(100.0)));
+    }
+
+    #[tokio::test]
     async fn submit_stream_report_updates_codex_quota_from_response_headers() {
         crate::orchestration::clear_local_report_effect_caches_for_tests();
 
@@ -864,6 +917,61 @@ mod tests {
         assert_eq!(quota.get("source"), Some(&json!("response_headers")));
         assert_eq!(quota.get("code"), Some(&json!("exhausted")));
         assert_eq!(quota.get("updated_at"), quota.get("observed_at"));
+    }
+
+    #[tokio::test]
+    async fn submit_stream_report_updates_codex_quota_from_provider_response_headers() {
+        crate::orchestration::clear_local_report_effect_caches_for_tests();
+
+        let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![sample_provider_catalog_provider(
+                "provider-codex-stream-provider-headers",
+                "codex",
+            )],
+            Vec::new(),
+            vec![sample_provider_catalog_key(
+                "key-codex-stream-provider-headers",
+                "provider-codex-stream-provider-headers",
+            )],
+        ));
+        let state = build_provider_catalog_test_state(Arc::clone(&provider_catalog_repository));
+
+        submit_stream_report(
+            &state,
+            GatewayStreamReportRequest {
+                trace_id: "trace-codex-reporting-stream-provider-headers".to_string(),
+                report_kind: "openai_responses_stream_success".to_string(),
+                report_context: Some(json!({
+                    "request_id": "req-codex-reporting-stream-provider-headers",
+                    "key_id": "key-codex-stream-provider-headers",
+                    "provider_response_headers": sample_codex_paid_headers()
+                })),
+                status_code: 200,
+                headers: BTreeMap::new(),
+                provider_body_base64: None,
+                provider_body_state: None,
+                client_body_base64: None,
+                client_body_state: None,
+                terminal_summary: None,
+                telemetry: None,
+            },
+        )
+        .await
+        .expect("stream report should stay local");
+
+        let reloaded = provider_catalog_repository
+            .list_keys_by_ids(&["key-codex-stream-provider-headers".to_string()])
+            .await
+            .expect("keys should list");
+        let codex = reloaded[0]
+            .upstream_metadata
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .and_then(|metadata| metadata.get("codex"))
+            .and_then(serde_json::Value::as_object)
+            .expect("codex metadata should exist");
+        assert_eq!(codex.get("primary_used_percent"), Some(&json!(31.0)));
+        assert_eq!(codex.get("secondary_used_percent"), Some(&json!(100.0)));
     }
 
     #[tokio::test]

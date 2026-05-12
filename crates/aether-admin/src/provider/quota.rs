@@ -9,6 +9,7 @@ const OAUTH_ACCOUNT_BLOCK_PREFIX: &str = "[ACCOUNT_BLOCK] ";
 const OAUTH_REFRESH_FAILED_PREFIX: &str = "[REFRESH_FAILED] ";
 const OAUTH_EXPIRED_PREFIX: &str = "[OAUTH_EXPIRED] ";
 const OAUTH_REQUEST_FAILED_PREFIX: &str = "[REQUEST_FAILED] ";
+const CODEX_SPARK_LIMIT_NAME: &str = "GPT-5.3-Codex-Spark";
 
 pub fn provider_auto_remove_banned_keys(config: Option<&serde_json::Value>) -> bool {
     config
@@ -214,6 +215,29 @@ fn codex_write_window(
     if let Some(value) = source.get("window_minutes").and_then(coerce_json_u64) {
         target.insert(format!("{target_prefix}_window_minutes"), json!(value));
     }
+    if let Some(value) = source
+        .get("limit_window_seconds")
+        .and_then(coerce_json_u64)
+        .map(|seconds| seconds / 60)
+    {
+        target.insert(format!("{target_prefix}_window_minutes"), json!(value));
+    }
+}
+
+fn codex_find_spark_rate_limit(
+    root: &serde_json::Map<String, serde_json::Value>,
+) -> Option<&serde_json::Map<String, serde_json::Value>> {
+    root.get("additional_rate_limits")
+        .and_then(serde_json::Value::as_array)?
+        .iter()
+        .filter_map(serde_json::Value::as_object)
+        .find(|item| {
+            item.get("limit_name")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|name| name.trim() == CODEX_SPARK_LIMIT_NAME)
+        })?
+        .get("rate_limit")
+        .and_then(serde_json::Value::as_object)
 }
 
 pub fn parse_codex_wham_usage_response(
@@ -254,6 +278,21 @@ pub fn parse_codex_wham_usage_response(
         codex_write_window(&mut result, &primary_window, "secondary");
     } else {
         codex_write_window(&mut result, &primary_window, "primary");
+    }
+
+    if let Some(spark_rate_limit) = codex_find_spark_rate_limit(root) {
+        if let Some(primary_window) = spark_rate_limit
+            .get("primary_window")
+            .and_then(serde_json::Value::as_object)
+        {
+            codex_write_window(&mut result, primary_window, "spark_primary");
+        }
+        if let Some(secondary_window) = spark_rate_limit
+            .get("secondary_window")
+            .and_then(serde_json::Value::as_object)
+        {
+            codex_write_window(&mut result, secondary_window, "spark_secondary");
+        }
     }
 
     if let Some(credits) = root.get("credits").and_then(serde_json::Value::as_object) {
@@ -874,8 +913,9 @@ pub fn parse_chatgpt_web_conversation_init_response(
 mod tests {
     use super::{
         codex_build_invalid_state, codex_runtime_invalid_reason,
-        parse_chatgpt_web_conversation_init_response, OAUTH_ACCOUNT_BLOCK_PREFIX,
-        OAUTH_EXPIRED_PREFIX, OAUTH_REFRESH_FAILED_PREFIX, OAUTH_REQUEST_FAILED_PREFIX,
+        parse_chatgpt_web_conversation_init_response, parse_codex_wham_usage_response,
+        OAUTH_ACCOUNT_BLOCK_PREFIX, OAUTH_EXPIRED_PREFIX, OAUTH_REFRESH_FAILED_PREFIX,
+        OAUTH_REQUEST_FAILED_PREFIX,
     };
     use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
     use serde_json::json;
@@ -967,6 +1007,63 @@ mod tests {
                     "{OAUTH_ACCOUNT_BLOCK_PREFIX}account has been deactivated"
                 ))
             )
+        );
+    }
+
+    #[test]
+    fn parses_codex_spark_quota_from_additional_rate_limits() {
+        let parsed = parse_codex_wham_usage_response(
+            &json!({
+                "plan_type": "plus",
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 25.0,
+                        "reset_after_seconds": 604800,
+                        "reset_at": 1_900_000_000u64
+                    },
+                    "secondary_window": {
+                        "used_percent": 10.0,
+                        "reset_after_seconds": 18000,
+                        "reset_at": 1_800_000_000u64
+                    }
+                },
+                "additional_rate_limits": [{
+                    "limit_name": "GPT-5.3-Codex-Spark",
+                    "metered_feature": "codex_bengalfox",
+                    "rate_limit": {
+                        "primary_window": {
+                            "used_percent": 40.0,
+                            "limit_window_seconds": 18000,
+                            "reset_after_seconds": 9000,
+                            "reset_at": 1_780_000_000u64
+                        },
+                        "secondary_window": {
+                            "used_percent": 5.0,
+                            "limit_window_seconds": 604800,
+                            "reset_after_seconds": 300000,
+                            "reset_at": 1_790_000_000u64
+                        }
+                    }
+                }]
+            }),
+            1_777_000_000,
+        )
+        .expect("codex wham usage should parse");
+
+        assert_eq!(parsed.get("primary_used_percent"), Some(&json!(10.0)));
+        assert_eq!(parsed.get("secondary_used_percent"), Some(&json!(25.0)));
+        assert_eq!(parsed.get("spark_primary_used_percent"), Some(&json!(40.0)));
+        assert_eq!(
+            parsed.get("spark_primary_window_minutes"),
+            Some(&json!(300u64))
+        );
+        assert_eq!(
+            parsed.get("spark_secondary_used_percent"),
+            Some(&json!(5.0))
+        );
+        assert_eq!(
+            parsed.get("spark_secondary_window_minutes"),
+            Some(&json!(10_080u64))
         );
     }
 

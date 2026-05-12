@@ -182,10 +182,15 @@ impl AppState {
         record: aether_data::repository::auth::CreateUserApiKeyRecord,
     ) -> Result<Option<aether_data::repository::auth::StoredAuthApiKeyExportRecord>, GatewayError>
     {
-        self.data
+        let api_key = self
+            .data
             .create_user_api_key(record)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if api_key.is_some() {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(api_key)
     }
 
     pub(crate) async fn create_standalone_api_key(
@@ -193,10 +198,15 @@ impl AppState {
         record: aether_data::repository::auth::CreateStandaloneApiKeyRecord,
     ) -> Result<Option<aether_data::repository::auth::StoredAuthApiKeyExportRecord>, GatewayError>
     {
-        self.data
+        let api_key = self
+            .data
             .create_standalone_api_key(record)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if api_key.is_some() {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(api_key)
     }
 
     pub(crate) async fn update_user_api_key_basic(
@@ -204,10 +214,15 @@ impl AppState {
         record: aether_data::repository::auth::UpdateUserApiKeyBasicRecord,
     ) -> Result<Option<aether_data::repository::auth::StoredAuthApiKeyExportRecord>, GatewayError>
     {
-        self.data
+        let api_key = self
+            .data
             .update_user_api_key_basic(record)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if api_key.is_some() {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(api_key)
     }
 
     pub(crate) async fn update_standalone_api_key_basic(
@@ -215,10 +230,15 @@ impl AppState {
         record: aether_data::repository::auth::UpdateStandaloneApiKeyBasicRecord,
     ) -> Result<Option<aether_data::repository::auth::StoredAuthApiKeyExportRecord>, GatewayError>
     {
-        self.data
+        let api_key = self
+            .data
             .update_standalone_api_key_basic(record)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if api_key.is_some() {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(api_key)
     }
 
     pub(crate) async fn set_user_api_key_active(
@@ -228,10 +248,15 @@ impl AppState {
         is_active: bool,
     ) -> Result<Option<aether_data::repository::auth::StoredAuthApiKeyExportRecord>, GatewayError>
     {
-        self.data
+        let api_key = self
+            .data
             .set_user_api_key_active(user_id, api_key_id, is_active)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if api_key.is_some() {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(api_key)
     }
 
     pub(crate) async fn set_standalone_api_key_active(
@@ -240,10 +265,15 @@ impl AppState {
         is_active: bool,
     ) -> Result<Option<aether_data::repository::auth::StoredAuthApiKeyExportRecord>, GatewayError>
     {
-        self.data
+        let api_key = self
+            .data
             .set_standalone_api_key_active(api_key_id, is_active)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if api_key.is_some() {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(api_key)
     }
 
     pub(crate) async fn set_user_api_key_locked(
@@ -252,10 +282,15 @@ impl AppState {
         api_key_id: &str,
         is_locked: bool,
     ) -> Result<bool, GatewayError> {
-        self.data
+        let updated = self
+            .data
             .set_user_api_key_locked(user_id, api_key_id, is_locked)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if updated {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(updated)
     }
 
     pub(crate) async fn set_user_api_key_allowed_providers(
@@ -265,10 +300,15 @@ impl AppState {
         allowed_providers: Option<Vec<String>>,
     ) -> Result<Option<aether_data::repository::auth::StoredAuthApiKeyExportRecord>, GatewayError>
     {
-        self.data
+        let api_key = self
+            .data
             .set_user_api_key_allowed_providers(user_id, api_key_id, allowed_providers)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if api_key.is_some() {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(api_key)
     }
 
     pub(crate) async fn set_user_api_key_force_capabilities(
@@ -278,10 +318,15 @@ impl AppState {
         force_capabilities: Option<serde_json::Value>,
     ) -> Result<Option<aether_data::repository::auth::StoredAuthApiKeyExportRecord>, GatewayError>
     {
-        self.data
+        let api_key = self
+            .data
             .set_user_api_key_force_capabilities(user_id, api_key_id, force_capabilities)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if api_key.is_some() {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(api_key)
     }
 
     pub(crate) async fn delete_user_api_key(
@@ -289,19 +334,29 @@ impl AppState {
         user_id: &str,
         api_key_id: &str,
     ) -> Result<bool, GatewayError> {
-        self.data
+        let deleted = self
+            .data
             .delete_user_api_key(user_id, api_key_id)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if deleted {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(deleted)
     }
 
     pub(crate) async fn delete_standalone_api_key(
         &self,
         api_key_id: &str,
     ) -> Result<bool, GatewayError> {
-        self.data
+        let deleted = self
+            .data
             .delete_standalone_api_key(api_key_id)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if deleted {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(deleted)
     }
 }

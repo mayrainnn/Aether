@@ -1,5 +1,7 @@
 use http::Uri;
 
+use crate::control::management_token_required_permission;
+
 use super::{classify_control_route, headers};
 
 #[test]
@@ -66,7 +68,11 @@ fn classifies_admin_provider_oauth_batch_import_task_status_as_admin_proxy_route
     );
     assert_eq!(
         decision.auth_endpoint_signature.as_deref(),
-        Some("admin:provider_oauth")
+        Some("admin:pool")
+    );
+    assert_eq!(
+        management_token_required_permission(&http::Method::GET, &decision).as_deref(),
+        Some("admin:pool:read")
     );
     assert!(!decision.is_execution_runtime_candidate());
 }
@@ -74,51 +80,69 @@ fn classifies_admin_provider_oauth_batch_import_task_status_as_admin_proxy_route
 #[test]
 fn classifies_admin_provider_oauth_maintenance_routes_as_admin_proxy_route() {
     let headers = headers(&[]);
-    for (method, path, route_kind) in [
+    for (method, path, route_kind, expected_signature, expected_required_permission) in [
         (
             http::Method::POST,
             "/api/admin/provider-oauth/keys/key-123/complete",
             "complete_key_oauth",
+            "admin:provider_oauth",
+            "admin:provider_oauth:write",
         ),
         (
             http::Method::POST,
             "/api/admin/provider-oauth/keys/key-123/refresh",
             "refresh_key_oauth",
+            "admin:provider_oauth",
+            "admin:provider_oauth:write",
         ),
         (
             http::Method::POST,
             "/api/admin/provider-oauth/providers/provider-123/complete",
             "complete_provider_oauth",
+            "admin:provider_oauth",
+            "admin:provider_oauth:write",
         ),
         (
             http::Method::POST,
             "/api/admin/provider-oauth/providers/provider-123/import-refresh-token",
             "import_refresh_token",
+            "admin:provider_oauth",
+            "admin:provider_oauth:write",
         ),
         (
             http::Method::POST,
             "/api/admin/provider-oauth/providers/provider-123/batch-import",
             "batch_import_oauth",
+            "admin:pool",
+            "admin:pool:write",
         ),
         (
             http::Method::POST,
             "/api/admin/provider-oauth/providers/provider-123/batch-import/tasks",
             "start_batch_import_oauth_task",
+            "admin:pool",
+            "admin:pool:write",
         ),
         (
             http::Method::GET,
             "/api/admin/provider-oauth/providers/provider-123/batch-import/tasks/task-123",
             "get_batch_import_task_status",
+            "admin:pool",
+            "admin:pool:read",
         ),
         (
             http::Method::POST,
             "/api/admin/provider-oauth/providers/provider-123/device-authorize",
             "device_authorize",
+            "admin:provider_oauth",
+            "admin:provider_oauth:write",
         ),
         (
             http::Method::POST,
             "/api/admin/provider-oauth/providers/provider-123/device-poll",
             "device_poll",
+            "admin:provider_oauth",
+            "admin:provider_oauth:write",
         ),
     ] {
         let uri: Uri = path.parse().expect("uri should parse");
@@ -133,7 +157,11 @@ fn classifies_admin_provider_oauth_maintenance_routes_as_admin_proxy_route() {
         assert_eq!(decision.route_kind.as_deref(), Some(route_kind));
         assert_eq!(
             decision.auth_endpoint_signature.as_deref(),
-            Some("admin:provider_oauth")
+            Some(expected_signature)
+        );
+        assert_eq!(
+            management_token_required_permission(&method, &decision).as_deref(),
+            Some(expected_required_permission)
         );
         assert!(!decision.is_execution_runtime_candidate());
     }

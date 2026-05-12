@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use crate::{
     formats::context::FormatContext,
     protocol::canonical::{
-        canonical_extension_object_mut, canonical_message_to_openai_chat,
+        canonical_extension_object_mut, canonical_message_to_openai_chat_messages,
         canonical_response_format_to_openai, canonical_tool_choice_to_openai,
         canonical_tool_to_openai, namespace_extension_object, openai_content_text,
         openai_extensions, openai_generation_config, openai_message_content_blocks,
@@ -148,7 +148,7 @@ pub fn to_raw(canonical: &CanonicalRequest) -> Value {
         }
     }
     for message in &canonical.messages {
-        messages.push(canonical_message_to_openai_chat(message));
+        messages.extend(canonical_message_to_openai_chat_messages(message));
     }
     output.insert("messages".to_string(), Value::Array(messages));
 

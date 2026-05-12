@@ -1002,6 +1002,7 @@ fn admin_usage_active_request_json(
     item: &StoredRequestUsageAudit,
     api_key_name: Option<String>,
     provider_key_name: Option<String>,
+    image_progress: Option<&Value>,
 ) -> Value {
     let cache_creation_input_tokens = admin_usage_cache_creation_tokens(item);
     let client_is_stream = admin_usage_client_is_stream(item);
@@ -1040,6 +1041,9 @@ fn admin_usage_active_request_json(
     value["has_format_conversion"] = json!(item.has_format_conversion);
     if let Some(target_model) = item.target_model.as_ref() {
         value["target_model"] = json!(target_model);
+    }
+    if let Some(image_progress) = image_progress {
+        value["image_progress"] = image_progress.clone();
     }
     value
 }
@@ -1131,7 +1135,7 @@ pub fn admin_usage_record_json(
 }
 
 pub fn admin_usage_total_tokens(item: &StoredRequestUsageAudit) -> u64 {
-    item.input_tokens
+    admin_usage_effective_input_tokens(item)
         .saturating_add(item.output_tokens)
         .saturating_add(admin_usage_cache_creation_tokens(item))
         .saturating_add(item.cache_read_input_tokens)
@@ -2038,6 +2042,7 @@ pub fn build_admin_usage_active_requests_response(
     api_key_names: &BTreeMap<String, String>,
     auth_api_key_reader_available: bool,
     provider_key_names: &BTreeMap<String, String>,
+    image_progress_by_request_id: &BTreeMap<String, Value>,
 ) -> Response<Body> {
     let payload: Vec<_> = items
         .iter()
@@ -2045,7 +2050,12 @@ pub fn build_admin_usage_active_requests_response(
             let provider_key_name = admin_usage_provider_key_name(item, provider_key_names);
             let api_key_name =
                 admin_usage_api_key_name(item, api_key_names, auth_api_key_reader_available);
-            admin_usage_active_request_json(item, api_key_name, provider_key_name)
+            admin_usage_active_request_json(
+                item,
+                api_key_name,
+                provider_key_name,
+                image_progress_by_request_id.get(&item.request_id),
+            )
         })
         .collect();
 
@@ -2282,7 +2292,7 @@ mod tests {
         admin_usage_has_fallback, admin_usage_is_failed, admin_usage_is_success,
         admin_usage_matches_search, admin_usage_matches_status, admin_usage_matches_username,
         admin_usage_record_json, admin_usage_resolve_request_capture_body,
-        admin_usage_upstream_is_stream, build_admin_usage_detail_payload,
+        admin_usage_total_tokens, admin_usage_upstream_is_stream, build_admin_usage_detail_payload,
     };
     use aether_data_contracts::repository::usage::{StoredRequestUsageAudit, UsageBodyField};
 
@@ -2410,7 +2420,7 @@ mod tests {
 
         assert!(!admin_usage_client_is_stream(&item));
 
-        let active = admin_usage_active_request_json(&item, None, None);
+        let active = admin_usage_active_request_json(&item, None, None, None);
         assert_eq!(active["is_stream"], true);
         assert_eq!(active["upstream_is_stream"], true);
         assert_eq!(active["client_requested_stream"], false);
@@ -3042,6 +3052,22 @@ mod tests {
         assert_eq!(payload["cache_creation_ephemeral_5m_input_tokens"], 12);
         assert_eq!(payload["cache_creation_ephemeral_1h_input_tokens"], 8);
         assert_eq!(payload["total_tokens"], 50);
+    }
+
+    #[test]
+    fn admin_usage_total_tokens_uses_effective_input_for_cached_openai_usage() {
+        let item = StoredRequestUsageAudit {
+            input_tokens: 100,
+            output_tokens: 20,
+            total_tokens: 999,
+            cache_creation_input_tokens: 0,
+            cache_creation_ephemeral_5m_input_tokens: 12,
+            cache_creation_ephemeral_1h_input_tokens: 8,
+            cache_read_input_tokens: 80,
+            ..sample_usage("completed", Some(200), None)
+        };
+
+        assert_eq!(admin_usage_total_tokens(&item), 140);
     }
 
     #[test]

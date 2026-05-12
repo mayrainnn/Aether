@@ -838,20 +838,25 @@ async fn execute_upstream_request(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn relay_upstream_response(
+async fn relay_upstream_response<B>(
     server: &ServerContext,
     stream_id: u32,
     method: &hyper::Method,
     request_url: &url::Url,
     frame_tx: &FrameSender,
-    response: hyper::Response<hyper::body::Incoming>,
+    response: hyper::Response<B>,
     total_dns_ms: u64,
     total_elapsed: Duration,
     request_timing: upstream_client::RequestTiming,
     request_body_size: &AtomicUsize,
     redirect_count: usize,
     request_body_mode: &'static str,
-) -> Option<Duration> {
+    deadline: Instant,
+) -> Option<Duration>
+where
+    B: hyper::body::Body<Data = Bytes> + Send + Unpin + 'static,
+    B::Error: std::fmt::Display,
+{
     let status = response.status().as_u16();
     let ttfb_ms = total_elapsed.as_millis() as u64;
     let mut resp_headers: Vec<(String, String)> = Vec::with_capacity(response.headers().len() + 1);
@@ -911,7 +916,52 @@ async fn relay_upstream_response(
     }
 
     let mut stream = response.into_body().into_data_stream();
-    while let Some(chunk_result) = stream.next().await {
+    loop {
+        let Some(remaining) = remaining_timeout(deadline) else {
+            server.metrics.stream_errors.fetch_add(1, Ordering::Release);
+            let error_message = "upstream response body timeout".to_string();
+            log_stream_failure(
+                stream_log_context(
+                    server,
+                    stream_id,
+                    method,
+                    Some(request_url),
+                    redirect_count,
+                    request_body_size.load(Ordering::Relaxed),
+                ),
+                &error_message,
+                total_elapsed,
+            );
+            send_error(frame_tx, stream_id, &error_message).await;
+            return Some(total_elapsed);
+        };
+
+        let chunk_result = match tokio::time::timeout(remaining, stream.next()).await {
+            Ok(chunk_result) => chunk_result,
+            Err(_) => {
+                server.metrics.stream_errors.fetch_add(1, Ordering::Release);
+                let error_message = "upstream response body timeout".to_string();
+                log_stream_failure(
+                    stream_log_context(
+                        server,
+                        stream_id,
+                        method,
+                        Some(request_url),
+                        redirect_count,
+                        request_body_size.load(Ordering::Relaxed),
+                    ),
+                    &error_message,
+                    total_elapsed,
+                );
+                send_error(frame_tx, stream_id, &error_message).await;
+                return Some(total_elapsed);
+            }
+        };
+
+        let Some(chunk_result) = chunk_result else {
+            break;
+        };
+
         match chunk_result {
             Ok(chunk) => {
                 if chunk.len() <= MAX_CHUNK_SIZE {
@@ -1304,6 +1354,7 @@ async fn handle_stream_inner(
                         request_body_size.as_ref(),
                         redirects_followed,
                         request_body_mode,
+                        deadline,
                     )
                     .await;
                 }
@@ -1341,6 +1392,7 @@ async fn handle_stream_inner(
                             request_body_size.as_ref(),
                             redirects_followed,
                             request_body_mode,
+                            deadline,
                         )
                         .await;
                     }
@@ -1394,6 +1446,7 @@ async fn handle_stream_inner(
             request_body_size.as_ref(),
             redirects_followed,
             request_body_mode,
+            deadline,
         )
         .await;
     }
@@ -1923,6 +1976,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn response_body_timeout_emits_stream_error() {
+        let state = sample_state(None, None);
+        let server = sample_server(&state);
+        let (frame_tx, sent, writer_handle) = spawn_test_writer();
+        let request_url = url::Url::parse("https://example.com/slow").expect("url");
+        let request_body_size = AtomicUsize::new(0);
+        let body = Body::from_stream(futures_util::stream::pending::<
+            Result<Bytes, std::convert::Infallible>,
+        >());
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .body(body)
+            .expect("response");
+
+        relay_upstream_response(
+            &server,
+            13,
+            &hyper::Method::GET,
+            &request_url,
+            &frame_tx,
+            response,
+            0,
+            Duration::ZERO,
+            upstream_client::RequestTiming::default(),
+            &request_body_size,
+            0,
+            "empty",
+            Instant::now(),
+        )
+        .await;
+
+        let result = collect_stream_result(frame_tx, sent, writer_handle).await;
+        assert_eq!(result.response.expect("response metadata").status, 200);
+        assert_eq!(
+            result.error.as_deref(),
+            Some("upstream response body timeout")
+        );
+        assert_eq!(server.metrics.stream_errors.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
     async fn follows_redirects_when_explicitly_enabled_for_replayable_post_requests() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -2284,6 +2378,7 @@ mod tests {
             dns_cache,
             upstream_client_pool,
             tunnel_tls_config: Arc::new(build_tls_config()),
+            resource_monitor: Arc::new(crate::hardware::RuntimeResourceMonitor::new()),
             stream_gate,
             distributed_stream_gate,
         })
@@ -2314,6 +2409,7 @@ mod tests {
             dns_cache,
             upstream_client_pool,
             tunnel_tls_config: Arc::new(build_tls_config()),
+            resource_monitor: Arc::new(crate::hardware::RuntimeResourceMonitor::new()),
             stream_gate: None,
             distributed_stream_gate: None,
         })

@@ -20,7 +20,7 @@ pub(crate) struct SchedulerSkippedCandidate {
     pub(crate) skip_reason: &'static str,
 }
 
-pub(super) const API_KEY_CONCURRENCY_LIMIT_SKIP_REASON: &str = "api_key_concurrency_limit_reached";
+pub(crate) const API_KEY_CONCURRENCY_LIMIT_SKIP_REASON: &str = "api_key_concurrency_limit_reached";
 
 pub(super) fn is_exact_all_skipped_by_auth_limit(
     selected: &[SchedulerMinimalCandidateSelectionCandidate],
@@ -46,29 +46,51 @@ pub(super) async fn select_minimal_candidate(
     now_unix_secs: u64,
     enable_model_directives: bool,
 ) -> Result<Option<SchedulerMinimalCandidateSelectionCandidate>, GatewayError> {
+    let affinity_epoch = runtime_state.scheduler_affinity_epoch();
+    let ordering_config = runtime_state.read_scheduler_ordering_config().await?;
     let affinity_cache_key = build_scheduler_affinity_cache_key(
         auth_snapshot,
         api_format,
         global_model_name,
         client_session_affinity,
     );
-    let selected = collect_selectable_candidates(
+    let priority_affinity_key =
+        scheduling_priority_affinity_key(auth_snapshot, ordering_config.scheduling_mode);
+    let candidates = enumerate_scheduler_candidates(
         selection_row_source,
-        runtime_state,
         api_format,
         global_model_name,
         require_streaming,
         required_capabilities,
         auth_snapshot,
-        client_session_affinity,
-        now_unix_secs,
         enable_model_directives,
     )
+    .await?;
+    let selected = collect_selectable_enumerated_candidates_with_skip_reasons(
+        runtime_state,
+        api_format,
+        global_model_name,
+        candidates,
+        required_capabilities,
+        auth_snapshot,
+        client_session_affinity,
+        now_unix_secs,
+        ordering_config,
+        priority_affinity_key,
+    )
     .await?
+    .0
     .into_iter()
     .next();
-    if let Some(candidate) = selected.as_ref() {
-        remember_scheduler_affinity(affinity_cache_key.as_deref(), runtime_state, candidate);
+    if ordering_config.scheduling_mode == SchedulerSchedulingMode::CacheAffinity {
+        if let Some(candidate) = selected.as_ref() {
+            remember_scheduler_affinity(
+                affinity_cache_key.as_deref(),
+                runtime_state,
+                candidate,
+                Some(affinity_epoch),
+            );
+        }
     }
     Ok(selected)
 }

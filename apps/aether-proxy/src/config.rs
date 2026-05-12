@@ -59,12 +59,15 @@ pub const DEFAULT_TUNNEL_PING_INTERVAL_MS: u64 = 10_000;
 pub const DEFAULT_TUNNEL_CONNECT_TIMEOUT_MS: u64 = 3_000;
 pub const DEFAULT_TUNNEL_STALE_TIMEOUT_MS: u64 = 30_000;
 pub const DEFAULT_TUNNEL_SCALE_CHECK_INTERVAL_MS: u64 = 1_000;
-pub const DEFAULT_TUNNEL_SCALE_UP_THRESHOLD_PERCENT: u32 = 70;
+pub const DEFAULT_TUNNEL_SCALE_UP_THRESHOLD_PERCENT: u32 = 50;
 pub const DEFAULT_TUNNEL_SCALE_DOWN_THRESHOLD_PERCENT: u32 = 35;
 pub const DEFAULT_TUNNEL_SCALE_DOWN_GRACE_SECS: u64 = 15;
 const AUTO_TUNNEL_CONNECTIONS_REDUNDANT_FLOOR: u64 = 2;
 const AUTO_TUNNEL_CONNECTIONS_BASE_CAP: u64 = 4;
-const AUTO_TUNNEL_CONNECTIONS_MAX_CAP: u64 = 8;
+// Bias the automatic pool toward a per-device upper band without letting
+// tiny nodes fan out into too many idle tunnels.
+const AUTO_TUNNEL_CONNECTIONS_PER_CPU_CAP: u64 = 4;
+const AUTO_TUNNEL_CONNECTIONS_MAX_CAP: u64 = 32;
 
 const TUNNEL_PING_INTERVAL_MS_ENV: &str = "AETHER_PROXY_TUNNEL_PING_INTERVAL_MS";
 const TUNNEL_CONNECT_TIMEOUT_MS_ENV: &str = "AETHER_PROXY_TUNNEL_CONNECT_TIMEOUT_MS";
@@ -753,16 +756,32 @@ impl Config {
         hw_info: &HardwareInfo,
     ) -> anyhow::Result<TunnelPoolSizing> {
         let per_tunnel_capacity = u64::from(self.tunnel_max_streams.unwrap_or(128).max(1));
-        let estimated = hw_info.estimated_max_concurrency.max(per_tunnel_capacity);
-        let cpu_cap = u64::from(hw_info.cpu_cores).clamp(1, AUTO_TUNNEL_CONNECTIONS_MAX_CAP);
-        let auto_initial_floor = AUTO_TUNNEL_CONNECTIONS_REDUNDANT_FLOOR.min(cpu_cap);
+        let estimated = self
+            .max_in_flight_streams
+            .and_then(|limit| u64::try_from(limit).ok())
+            .unwrap_or(hw_info.estimated_max_concurrency)
+            .max(per_tunnel_capacity);
+        let cpu_soft_cap = u64::from(hw_info.cpu_cores.max(1))
+            .saturating_mul(AUTO_TUNNEL_CONNECTIONS_PER_CPU_CAP)
+            .clamp(
+                AUTO_TUNNEL_CONNECTIONS_BASE_CAP,
+                AUTO_TUNNEL_CONNECTIONS_MAX_CAP,
+            );
+        let auto_initial_floor = AUTO_TUNNEL_CONNECTIONS_REDUNDANT_FLOOR.min(cpu_soft_cap);
+        let auto_initial_cap = AUTO_TUNNEL_CONNECTIONS_BASE_CAP
+            .min(cpu_soft_cap)
+            .max(auto_initial_floor);
 
         let auto_initial = div_ceil_u64(estimated, per_tunnel_capacity.saturating_mul(8))
-            .clamp(auto_initial_floor, AUTO_TUNNEL_CONNECTIONS_BASE_CAP)
-            .min(cpu_cap);
-        let auto_max = div_ceil_u64(estimated, per_tunnel_capacity.saturating_mul(4))
-            .clamp(auto_initial, AUTO_TUNNEL_CONNECTIONS_MAX_CAP)
-            .min(cpu_cap.max(auto_initial));
+            .clamp(auto_initial_floor, auto_initial_cap);
+        let high_water_per_tunnel = div_ceil_u64(
+            per_tunnel_capacity.saturating_mul(u64::from(self.tunnel_scale_up_threshold_percent)),
+            100,
+        )
+        .max(1);
+        let auto_max_floor = auto_initial.max(AUTO_TUNNEL_CONNECTIONS_BASE_CAP.min(cpu_soft_cap));
+        let auto_max =
+            div_ceil_u64(estimated, high_water_per_tunnel).clamp(auto_max_floor, cpu_soft_cap);
 
         let initial_connections = u64::from(self.tunnel_connections.unwrap_or(auto_initial as u32));
         let max_connections = match self.tunnel_connections_max {
@@ -1539,7 +1558,7 @@ node_name = "proxy-test"
             .resolve_tunnel_pool_sizing(&hw)
             .expect("sizing should resolve");
         assert_eq!(sizing.initial_connections, 3);
-        assert_eq!(sizing.max_connections, 6);
+        assert_eq!(sizing.max_connections, 32);
     }
 
     #[test]
@@ -1567,7 +1586,65 @@ node_name = "proxy-test"
             .resolve_tunnel_pool_sizing(&hw)
             .expect("sizing should resolve");
         assert_eq!(sizing.initial_connections, 2);
-        assert_eq!(sizing.max_connections, 2);
+        assert_eq!(sizing.max_connections, 4);
+    }
+
+    #[test]
+    fn auto_tunnel_pool_sizing_keeps_single_core_nodes_redundant() {
+        let config = Config::parse_from([
+            "aether-proxy",
+            "--aether-url",
+            "https://example.com",
+            "--management-token",
+            "ae_test",
+            "--node-name",
+            "proxy-test",
+            "--tunnel-max-streams",
+            "200",
+        ]);
+        let hw = HardwareInfo {
+            cpu_cores: 1,
+            total_memory_mb: 183,
+            os_info: "test".to_string(),
+            fd_limit: 65_535,
+            estimated_max_concurrency: 2_000,
+        };
+
+        let sizing = config
+            .resolve_tunnel_pool_sizing(&hw)
+            .expect("sizing should resolve");
+        assert_eq!(sizing.initial_connections, 2);
+        assert_eq!(sizing.max_connections, 4);
+    }
+
+    #[test]
+    fn auto_tunnel_pool_sizing_respects_stream_admission_limit() {
+        let config = Config::parse_from([
+            "aether-proxy",
+            "--aether-url",
+            "https://example.com",
+            "--management-token",
+            "ae_test",
+            "--node-name",
+            "proxy-test",
+            "--tunnel-max-streams",
+            "45",
+            "--max-in-flight-streams",
+            "45",
+        ]);
+        let hw = HardwareInfo {
+            cpu_cores: 1,
+            total_memory_mb: 183,
+            os_info: "test".to_string(),
+            fd_limit: 65_535,
+            estimated_max_concurrency: 2_000,
+        };
+
+        let sizing = config
+            .resolve_tunnel_pool_sizing(&hw)
+            .expect("sizing should resolve");
+        assert_eq!(sizing.initial_connections, 2);
+        assert_eq!(sizing.max_connections, 4);
     }
 
     #[test]

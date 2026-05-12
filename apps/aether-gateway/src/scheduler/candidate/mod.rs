@@ -31,7 +31,9 @@ use regex::Regex;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
-pub(crate) use self::selection::SchedulerSkippedCandidate;
+pub(crate) use self::selection::{
+    SchedulerSkippedCandidate, API_KEY_CONCURRENCY_LIMIT_SKIP_REASON,
+};
 
 use crate::data::auth::GatewayAuthApiKeySnapshot;
 use crate::data::candidate_selection::{

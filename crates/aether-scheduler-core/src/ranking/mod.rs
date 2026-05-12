@@ -4,7 +4,7 @@ mod priority;
 mod reasons;
 mod types;
 
-use modes::{apply_load_balance_rotation, compare_rankable_candidates};
+use modes::compare_rankable_candidates;
 use priority::candidate_priority_slot;
 use reasons::{demoted_by as ranking_demoted_by, promoted_by as ranking_promoted_by};
 pub use reasons::{
@@ -37,7 +37,6 @@ fn scheduler_candidate_ranking_order(
     order.sort_by(|left, right| {
         compare_rankable_candidates(&candidates[*left], &candidates[*right], context)
     });
-    apply_load_balance_rotation(&mut order, candidates, context);
     order
 }
 
@@ -136,6 +135,16 @@ mod tests {
         scheduler_candidate_ranking_order(candidates, context)
             .into_iter()
             .map(|index| candidates[index].provider_id.clone())
+            .collect()
+    }
+
+    fn ranked_keys(
+        candidates: &[SchedulerRankableCandidate],
+        context: SchedulerRankingContext,
+    ) -> Vec<String> {
+        scheduler_candidate_ranking_order(candidates, context)
+            .into_iter()
+            .map(|index| candidates[index].key_id.clone())
             .collect()
     }
 
@@ -336,6 +345,40 @@ mod tests {
     }
 
     #[test]
+    fn fixed_order_randomizes_equal_priority_ties_without_crossing_priority_slots() {
+        let first = candidate("first", 0, 0, Some(0));
+        let second = candidate("second", 0, 0, Some(0));
+        let lower_priority = candidate("lower", 10, 0, Some(10));
+
+        let first_seed_order = ranked_ids(
+            &[first.clone(), second.clone(), lower_priority.clone()],
+            SchedulerRankingContext {
+                priority_mode: SchedulerPriorityMode::Provider,
+                ranking_mode: SchedulerRankingMode::FixedOrder,
+                include_health: false,
+                load_balance_seed: 0,
+            },
+        );
+        let alternate_order = (1..128)
+            .map(|seed| {
+                ranked_ids(
+                    &[first.clone(), second.clone(), lower_priority.clone()],
+                    SchedulerRankingContext {
+                        priority_mode: SchedulerPriorityMode::Provider,
+                        ranking_mode: SchedulerRankingMode::FixedOrder,
+                        include_health: false,
+                        load_balance_seed: seed,
+                    },
+                )
+            })
+            .find(|order| order[0] != first_seed_order[0])
+            .expect("equal priority tie should vary by seed");
+
+        assert_eq!(first_seed_order[2], "provider-lower");
+        assert_eq!(alternate_order[2], "provider-lower");
+    }
+
+    #[test]
     fn load_balance_does_not_rotate_across_cross_format_demotion_group() {
         let same_format = candidate("same", 0, 0, Some(0));
         let mut cross_format = candidate("cross", 0, 0, Some(0));
@@ -356,22 +399,89 @@ mod tests {
     }
 
     #[test]
-    fn load_balance_rotates_only_within_same_priority_group() {
-        let first = candidate("first", 0, 0, Some(0));
-        let second = candidate("second", 0, 0, Some(0));
-        let third = candidate("third", 10, 0, Some(10));
+    fn load_balance_provider_mode_randomizes_providers_then_uses_internal_key_priority() {
+        let mut provider_a_primary = candidate("a-primary", 0, 0, Some(0));
+        provider_a_primary.provider_id = "provider-a".to_string();
+        provider_a_primary.key_id = "key-a-primary".to_string();
+        let mut provider_a_secondary = candidate("a-secondary", 0, 10, Some(10));
+        provider_a_secondary.provider_id = "provider-a".to_string();
+        provider_a_secondary.key_id = "key-a-secondary".to_string();
+        let mut provider_b = candidate("b", 100, 0, Some(100));
+        provider_b.provider_id = "provider-b".to_string();
+        provider_b.key_id = "key-b".to_string();
+        let candidates = vec![provider_a_secondary, provider_b, provider_a_primary];
+
+        let seed = (0..512)
+            .find(|seed| {
+                ranked_keys(
+                    &candidates,
+                    SchedulerRankingContext {
+                        priority_mode: SchedulerPriorityMode::Provider,
+                        ranking_mode: SchedulerRankingMode::LoadBalance,
+                        include_health: false,
+                        load_balance_seed: *seed,
+                    },
+                )
+                .first()
+                .is_some_and(|key| key == "key-b")
+            })
+            .expect("test seed should put provider-b first");
+
+        let order = ranked_keys(
+            &candidates,
+            SchedulerRankingContext {
+                priority_mode: SchedulerPriorityMode::Provider,
+                ranking_mode: SchedulerRankingMode::LoadBalance,
+                include_health: false,
+                load_balance_seed: seed,
+            },
+        );
+
+        assert_eq!(order[0], "key-b");
+        let primary_index = order
+            .iter()
+            .position(|key| key == "key-a-primary")
+            .expect("primary key should be ranked");
+        let secondary_index = order
+            .iter()
+            .position(|key| key == "key-a-secondary")
+            .expect("secondary key should be ranked");
+        assert!(primary_index < secondary_index);
+    }
+
+    #[test]
+    fn load_balance_global_key_mode_randomizes_keys_ignoring_global_priority() {
+        let high_priority = candidate("high", 100, 0, Some(0));
+        let low_priority = candidate("low", 0, 0, Some(100));
+        let candidates = vec![high_priority, low_priority];
+
+        let seed = (0..512)
+            .find(|seed| {
+                ranked_ids(
+                    &candidates,
+                    SchedulerRankingContext {
+                        priority_mode: SchedulerPriorityMode::GlobalKey,
+                        ranking_mode: SchedulerRankingMode::LoadBalance,
+                        include_health: false,
+                        load_balance_seed: *seed,
+                    },
+                )
+                .first()
+                .is_some_and(|provider| provider == "provider-low")
+            })
+            .expect("test seed should put lower global-priority key first");
 
         assert_eq!(
             ranked_ids(
-                &[first, second, third],
+                &candidates,
                 SchedulerRankingContext {
-                    priority_mode: SchedulerPriorityMode::Provider,
+                    priority_mode: SchedulerPriorityMode::GlobalKey,
                     ranking_mode: SchedulerRankingMode::LoadBalance,
                     include_health: false,
-                    load_balance_seed: 1,
+                    load_balance_seed: seed,
                 },
             ),
-            vec!["provider-second", "provider-first", "provider-third"]
+            vec!["provider-low", "provider-high"]
         );
     }
 }

@@ -315,6 +315,16 @@ export interface CodexUpstreamMetadata {
   secondary_reset_after_seconds?: number  // 5H限额重置剩余秒数（兼容字段）
   secondary_reset_at?: number  // 5H限额重置时间（Unix 时间戳）
   secondary_window_minutes?: number  // 5H限额窗口大小（分钟）
+  spark_primary_used_percent?: number  // Spark 5H限额窗口使用百分比
+  spark_primary_reset_seconds?: number  // Spark 5H限额重置剩余秒数
+  spark_primary_reset_after_seconds?: number  // Spark 5H限额重置剩余秒数（兼容字段）
+  spark_primary_reset_at?: number  // Spark 5H限额重置时间（Unix 时间戳）
+  spark_primary_window_minutes?: number  // Spark 5H限额窗口大小（分钟）
+  spark_secondary_used_percent?: number  // Spark 周限额窗口使用百分比
+  spark_secondary_reset_seconds?: number  // Spark 周限额重置剩余秒数
+  spark_secondary_reset_after_seconds?: number  // Spark 周限额重置剩余秒数（兼容字段）
+  spark_secondary_reset_at?: number  // Spark 周限额重置时间（Unix 时间戳）
+  spark_secondary_window_minutes?: number  // Spark 周限额窗口大小（分钟）
   has_credits?: boolean  // 是否有积分
   credits_balance?: number  // 积分余额
 }
@@ -511,6 +521,24 @@ export interface SchedulingPresetItem {
   mode?: string | null
 }
 
+export interface PoolScoreWeights {
+  manual_priority?: number | null
+  health?: number | null
+  probe_freshness?: number | null
+  quota_remaining?: number | null
+  latency?: number | null
+  cost_lru?: number | null
+}
+
+export interface PoolScoreRules {
+  weights?: PoolScoreWeights | null
+  probe_freshness_ttl_seconds?: number | null
+  unschedulable_score_cap?: number | null
+  probe_failure_penalty?: number | null
+  request_failure_penalty?: number | null
+  probe_failure_cooldown_threshold?: number | null
+}
+
 export interface PoolAdvancedConfig {
   global_priority?: number | null
   sticky_session_ttl_seconds?: number | null
@@ -538,6 +566,10 @@ export interface PoolAdvancedConfig {
   health_policy_enabled?: boolean
   unschedulable_rules?: Array<Record<string, unknown>> | null
   batch_concurrency?: number | null
+  probe_concurrency?: number | null
+  score_top_n?: number | null
+  score_fallback_scan_limit?: number | null
+  score_rules?: PoolScoreRules | null
   probing_enabled?: boolean
   probing_interval_minutes?: number | null
   auto_remove_banned_keys?: boolean

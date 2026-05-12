@@ -393,6 +393,285 @@ async fn gateway_executes_openai_chat_sync_via_local_decision_gate_without_execu
 }
 
 #[tokio::test]
+async fn gateway_executes_openai_chat_sync_with_regex_model_mapping_in_execution_runtime_request() {
+    #[derive(Debug, Clone)]
+    struct SeenExecutionRuntimeSyncRequest {
+        model: String,
+        authorization: String,
+    }
+
+    fn hash_api_key(value: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(value.as_bytes());
+        format!("{:x}", hasher.finalize())
+    }
+
+    fn sample_auth_snapshot(api_key_id: &str, user_id: &str) -> StoredAuthApiKeySnapshot {
+        StoredAuthApiKeySnapshot::new(
+            user_id.to_string(),
+            "alice".to_string(),
+            Some("alice@example.com".to_string()),
+            "user".to_string(),
+            "local".to_string(),
+            true,
+            false,
+            Some(serde_json::json!(["openai"])),
+            Some(serde_json::json!(["openai:chat"])),
+            Some(serde_json::json!(["gpt-5"])),
+            api_key_id.to_string(),
+            Some("default".to_string()),
+            true,
+            false,
+            false,
+            Some(60),
+            Some(5),
+            Some(4_102_444_800),
+            Some(serde_json::json!(["openai"])),
+            Some(serde_json::json!(["openai:chat"])),
+            Some(serde_json::json!(["gpt-5"])),
+        )
+        .expect("auth snapshot should build")
+    }
+
+    fn sample_candidate_row() -> StoredMinimalCandidateSelectionRow {
+        StoredMinimalCandidateSelectionRow {
+            provider_id: "provider-openai-regex-mapping-1".to_string(),
+            provider_name: "openai".to_string(),
+            provider_type: "custom".to_string(),
+            provider_priority: 10,
+            provider_is_active: true,
+            endpoint_id: "endpoint-openai-regex-mapping-1".to_string(),
+            endpoint_api_format: "openai:chat".to_string(),
+            endpoint_api_family: Some("openai".to_string()),
+            endpoint_kind: Some("chat".to_string()),
+            endpoint_is_active: true,
+            key_id: "key-openai-regex-mapping-1".to_string(),
+            key_name: "prod".to_string(),
+            key_auth_type: "api_key".to_string(),
+            key_is_active: true,
+            key_api_formats: Some(vec!["openai:chat".to_string()]),
+            key_allowed_models: Some(vec!["gpt-5.4".to_string()]),
+            key_capabilities: None,
+            key_internal_priority: 5,
+            key_global_priority_by_format: Some(serde_json::json!({"openai:chat": 1})),
+            model_id: "model-openai-regex-mapping-1".to_string(),
+            global_model_id: "global-model-openai-regex-mapping-1".to_string(),
+            global_model_name: "gpt-5".to_string(),
+            global_model_mappings: Some(vec!["gpt-5(?:\\.\\d+)?".to_string()]),
+            global_model_supports_streaming: Some(true),
+            model_provider_model_name: "gpt-5-upstream".to_string(),
+            model_provider_model_mappings: Some(vec![StoredProviderModelMapping {
+                name: "gpt-5-canonical-upstream".to_string(),
+                priority: 1,
+                api_formats: Some(vec!["openai:chat".to_string()]),
+                endpoint_ids: None,
+            }]),
+            model_supports_streaming: Some(true),
+            model_is_active: true,
+            model_is_available: true,
+        }
+    }
+
+    fn sample_provider_catalog_provider() -> StoredProviderCatalogProvider {
+        StoredProviderCatalogProvider::new(
+            "provider-openai-regex-mapping-1".to_string(),
+            "openai".to_string(),
+            Some("https://example.com".to_string()),
+            "custom".to_string(),
+        )
+        .expect("provider should build")
+        .with_transport_fields(
+            true,
+            false,
+            true,
+            None,
+            Some(2),
+            None,
+            Some(20.0),
+            None,
+            None,
+        )
+    }
+
+    fn sample_provider_catalog_endpoint() -> StoredProviderCatalogEndpoint {
+        StoredProviderCatalogEndpoint::new(
+            "endpoint-openai-regex-mapping-1".to_string(),
+            "provider-openai-regex-mapping-1".to_string(),
+            "openai:chat".to_string(),
+            Some("openai".to_string()),
+            Some("chat".to_string()),
+            true,
+        )
+        .expect("endpoint should build")
+        .with_transport_fields(
+            "https://api.openai.example".to_string(),
+            None,
+            None,
+            Some(2),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("endpoint transport should build")
+    }
+
+    fn sample_provider_catalog_key() -> StoredProviderCatalogKey {
+        StoredProviderCatalogKey::new(
+            "key-openai-regex-mapping-1".to_string(),
+            "provider-openai-regex-mapping-1".to_string(),
+            "prod".to_string(),
+            "api_key".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build")
+        .with_transport_fields(
+            Some(serde_json::json!(["openai:chat"])),
+            encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "sk-upstream-openai-regex")
+                .expect("api key should encrypt"),
+            None,
+            None,
+            Some(serde_json::json!({"openai:chat": 1})),
+            Some(serde_json::json!(["gpt-5.4"])),
+            None,
+            None,
+            None,
+        )
+        .expect("key transport should build")
+    }
+
+    let seen_execution_runtime = Arc::new(Mutex::new(None::<SeenExecutionRuntimeSyncRequest>));
+    let seen_execution_runtime_clone = Arc::clone(&seen_execution_runtime);
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |request: Request| {
+            let seen_execution_runtime_inner = Arc::clone(&seen_execution_runtime_clone);
+            async move {
+                let (_parts, body) = request.into_parts();
+                let raw_body = to_bytes(body, usize::MAX).await.expect("body should read");
+                let payload: serde_json::Value = serde_json::from_slice(&raw_body)
+                    .expect("execution runtime payload should parse");
+                *seen_execution_runtime_inner
+                    .lock()
+                    .expect("mutex should lock") = Some(SeenExecutionRuntimeSyncRequest {
+                    model: payload
+                        .pointer("/body/json_body/model")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    authorization: payload
+                        .pointer("/headers/authorization")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                });
+                Json(json!({
+                    "request_id": "trace-openai-chat-regex-mapping-123",
+                    "status_code": 200,
+                    "headers": {
+                        "content-type": "application/json"
+                    },
+                    "body": {
+                        "json_body": {
+                            "id": "chatcmpl-regex-mapping-123",
+                            "object": "chat.completion",
+                            "model": "gpt-5.4",
+                            "choices": [],
+                            "usage": {
+                                "prompt_tokens": 2,
+                                "completion_tokens": 3,
+                                "total_tokens": 5
+                            }
+                        }
+                    },
+                    "telemetry": {
+                        "elapsed_ms": 25
+                    }
+                }))
+            }
+        }),
+    );
+
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key("sk-client-openai-regex-mapping")),
+        sample_auth_snapshot(
+            "api-key-openai-regex-mapping-1",
+            "user-openai-regex-mapping-1",
+        ),
+    )]));
+    let candidate_selection_repository =
+        Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+            sample_candidate_row(),
+        ]));
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![sample_provider_catalog_provider()],
+        vec![sample_provider_catalog_endpoint()],
+        vec![sample_provider_catalog_key()],
+    ));
+    let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let gateway_state = build_state_with_execution_runtime_override(execution_runtime_url)
+        .with_data_state_for_tests(
+            crate::data::GatewayDataState::with_auth_candidate_selection_provider_catalog_and_request_candidate_repository_for_tests(
+                auth_repository,
+                candidate_selection_repository,
+                provider_catalog_repository,
+                Arc::clone(&request_candidate_repository),
+                DEVELOPMENT_ENCRYPTION_KEY,
+            ),
+        );
+    let gateway = build_router_with_state(gateway_state);
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/v1/chat/completions"))
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .header(
+            http::header::AUTHORIZATION,
+            "Bearer sk-client-openai-regex-mapping",
+        )
+        .header(TRACE_ID_HEADER, "trace-openai-chat-regex-mapping-123")
+        .body("{\"model\":\"gpt-5\",\"messages\":[]}")
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(EXECUTION_PATH_HEADER)
+            .and_then(|value| value.to_str().ok()),
+        Some(EXECUTION_PATH_EXECUTION_RUNTIME_SYNC)
+    );
+    let response_json: serde_json::Value = response.json().await.expect("body should parse");
+    assert_eq!(response_json["model"], "gpt-5.4");
+
+    let seen_execution_runtime_request = seen_execution_runtime
+        .lock()
+        .expect("mutex should lock")
+        .clone()
+        .expect("execution runtime sync should be captured");
+    assert_eq!(seen_execution_runtime_request.model, "gpt-5.4");
+    assert_eq!(
+        seen_execution_runtime_request.authorization,
+        "Bearer sk-upstream-openai-regex"
+    );
+
+    let stored_candidates = request_candidate_repository
+        .list_by_request_id("trace-openai-chat-regex-mapping-123")
+        .await
+        .expect("request candidate trace should read");
+    assert_eq!(stored_candidates.len(), 1);
+    assert_eq!(stored_candidates[0].status, RequestCandidateStatus::Success);
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_executes_openai_chat_sync_via_local_cross_format_gemini_candidate_without_external_control_config(
 ) {
     #[derive(Debug, Clone)]

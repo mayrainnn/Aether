@@ -351,7 +351,8 @@ CREATE TABLE IF NOT EXISTS public.management_tokens (
     token_prefix character varying(12),
     name character varying(100) NOT NULL,
     description text,
-    allowed_ips json,
+    allowed_ips jsonb,
+    permissions jsonb,
     expires_at timestamp with time zone,
     last_used_at timestamp with time zone,
     last_used_ip character varying(45),
@@ -359,7 +360,7 @@ CREATE TABLE IF NOT EXISTS public.management_tokens (
     is_active boolean DEFAULT true NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT check_allowed_ips_not_empty CHECK (((allowed_ips IS NULL) OR ((allowed_ips)::text = 'null'::text) OR (json_array_length(allowed_ips) > 0)))
+    CONSTRAINT check_allowed_ips_not_empty CHECK (CASE WHEN ((allowed_ips IS NULL) OR (allowed_ips = 'null'::jsonb)) THEN true WHEN (jsonb_typeof(allowed_ips) = 'array'::text) THEN (jsonb_array_length(allowed_ips) > 0) ELSE false END)
 );
 
 
@@ -529,6 +530,38 @@ CREATE TABLE IF NOT EXISTS public.provider_api_keys (
     status character varying(64) DEFAULT 'active'::character varying NOT NULL,
     weight bigint DEFAULT 1 NOT NULL,
     metadata json
+);
+
+
+
+--
+-- Name: pool_member_scores; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE IF NOT EXISTS public.pool_member_scores (
+    id character varying(192) NOT NULL,
+    pool_kind character varying(64) NOT NULL,
+    pool_id character varying(64) NOT NULL,
+    member_kind character varying(64) NOT NULL,
+    member_id character varying(64) NOT NULL,
+    capability character varying(64) NOT NULL,
+    scope_kind character varying(64) NOT NULL,
+    scope_id character varying(128),
+    score double precision DEFAULT 0 NOT NULL,
+    hard_state character varying(64) DEFAULT 'unknown'::character varying NOT NULL,
+    score_version bigint DEFAULT 1 NOT NULL,
+    score_reason jsonb NOT NULL,
+    last_ranked_at bigint,
+    last_scheduled_at bigint,
+    last_success_at bigint,
+    last_failure_at bigint,
+    failure_count bigint DEFAULT 0 NOT NULL,
+    last_probe_attempt_at bigint,
+    last_probe_success_at bigint,
+    last_probe_failure_at bigint,
+    probe_failure_count bigint DEFAULT 0 NOT NULL,
+    probe_status character varying(64) DEFAULT 'never'::character varying NOT NULL,
+    updated_at bigint NOT NULL
 );
 
 
@@ -1659,6 +1692,21 @@ END $mig$;
 
 
 --
+-- Name: pool_member_scores pool_member_scores_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+DO $mig$ BEGIN
+  ALTER TABLE ONLY public.pool_member_scores
+    ADD CONSTRAINT pool_member_scores_pkey PRIMARY KEY (id);
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+  WHEN duplicate_table THEN NULL;
+  WHEN invalid_table_definition THEN NULL;
+END $mig$;
+
+
+
+--
 -- Name: provider_endpoints provider_endpoints_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2657,6 +2705,22 @@ CREATE INDEX IF NOT EXISTS idx_provider_api_keys_provider_active ON public.provi
 
 
 --
+-- Name: idx_provider_api_keys_provider_created_at_desc; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX IF NOT EXISTS idx_provider_api_keys_provider_created_at_desc ON public.provider_api_keys USING btree (provider_id, created_at DESC NULLS LAST, name, id);
+
+
+
+--
+-- Name: idx_provider_api_keys_provider_last_used_at_desc; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX IF NOT EXISTS idx_provider_api_keys_provider_last_used_at_desc ON public.provider_api_keys USING btree (provider_id, last_used_at DESC NULLS LAST, name, id);
+
+
+
+--
 -- Name: idx_provider_api_keys_provider_id; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -3381,6 +3445,38 @@ CREATE INDEX IF NOT EXISTS ix_provider_api_keys_health_by_format ON public.provi
 --
 
 CREATE INDEX IF NOT EXISTS ix_provider_api_keys_id ON public.provider_api_keys USING btree (id);
+
+
+
+--
+-- Name: pool_member_scores_rank_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX IF NOT EXISTS pool_member_scores_rank_idx ON public.pool_member_scores USING btree (pool_kind, pool_id, capability, scope_kind, scope_id, hard_state, score DESC);
+
+
+
+--
+-- Name: pool_member_scores_member_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX IF NOT EXISTS pool_member_scores_member_idx ON public.pool_member_scores USING btree (pool_kind, pool_id, member_kind, member_id);
+
+
+
+--
+-- Name: pool_member_scores_probe_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX IF NOT EXISTS pool_member_scores_probe_idx ON public.pool_member_scores USING btree (pool_kind, pool_id, probe_status, last_probe_success_at);
+
+
+
+--
+-- Name: pool_member_scores_updated_at_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX IF NOT EXISTS pool_member_scores_updated_at_idx ON public.pool_member_scores USING btree (updated_at);
 
 
 

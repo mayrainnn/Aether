@@ -18,6 +18,24 @@ use super::super::oauth::quota::chatgpt_web::refresh_chatgpt_web_provider_quota_
 use super::super::oauth::quota::codex::refresh_codex_provider_quota_locally;
 use super::super::oauth::quota::kiro::refresh_kiro_provider_quota_locally;
 use super::super::oauth::quota::shared::normalize_string_id_list;
+use super::super::oauth::quota::shared::{
+    provider_type_supports_quota_refresh, unsupported_provider_quota_refresh_message,
+};
+use super::super::oauth::runtime::provider_oauth_runtime_endpoint_for_provider;
+use super::super::write::provider::reconcile_admin_fixed_provider_template_endpoints;
+
+fn unsupported_provider_quota_refresh_response(provider_type: &str) -> Response<Body> {
+    let message = unsupported_provider_quota_refresh_message(provider_type);
+    Json(json!({
+        "success": 0,
+        "failed": 0,
+        "total": 0,
+        "results": [],
+        "message": message,
+        "auto_removed": 0,
+    }))
+    .into_response()
+}
 
 pub(super) async fn maybe_handle(
     state: &AdminAppState<'_>,
@@ -85,41 +103,48 @@ pub(super) async fn maybe_handle(
     let raw_key_ids = payload.key_ids;
     let selected_key_ids = normalize_string_id_list(raw_key_ids.clone());
     let explicit_key_ids_requested = raw_key_ids.is_some();
-    let endpoints = state
+
+    let is_fixed_provider = state
+        .fixed_provider_template(&provider.provider_type)
+        .is_some();
+    if !is_fixed_provider && !provider_type_supports_quota_refresh(&normalized_provider_type) {
+        return Ok(None);
+    }
+
+    let mut endpoints = state
         .list_provider_catalog_endpoints_by_provider_ids(std::slice::from_ref(&provider_id))
         .await?;
-    let endpoint = match normalized_provider_type.as_str() {
-        "codex" => endpoints.into_iter().find(|endpoint| {
-            endpoint.is_active
-                && crate::ai_serving::is_openai_responses_format(&endpoint.api_format)
-        }),
-        "antigravity" => endpoints.into_iter().find(|endpoint| {
-            endpoint.is_active
-                && endpoint
-                    .api_format
-                    .trim()
-                    .eq_ignore_ascii_case("gemini:generate_content")
-        }),
-        "kiro" => endpoints
-            .iter()
-            .find(|endpoint| {
-                endpoint.is_active
-                    && endpoint
-                        .api_format
-                        .trim()
-                        .eq_ignore_ascii_case("claude:messages")
-            })
-            .cloned()
-            .or_else(|| endpoints.into_iter().find(|endpoint| endpoint.is_active)),
-        "chatgpt_web" => endpoints.into_iter().find(|endpoint| {
-            endpoint.is_active
-                && endpoint
-                    .api_format
-                    .trim()
-                    .eq_ignore_ascii_case("openai:image")
-        }),
-        _ => return Ok(None),
-    };
+    let mut endpoint =
+        provider_oauth_runtime_endpoint_for_provider(&normalized_provider_type, &endpoints);
+
+    if endpoint.is_none() && is_fixed_provider {
+        if !state.has_provider_catalog_data_writer() {
+            if !provider_type_supports_quota_refresh(&normalized_provider_type) {
+                return Ok(Some(unsupported_provider_quota_refresh_response(
+                    &normalized_provider_type,
+                )));
+            }
+            return Ok(Some(
+                (
+                    http::StatusCode::BAD_REQUEST,
+                    Json(json!({ "detail": "固定 Provider 端点缺失，且 provider catalog writer 不可用，无法自动补全端点" })),
+                )
+                    .into_response(),
+            ));
+        }
+        reconcile_admin_fixed_provider_template_endpoints(state, &provider).await?;
+        endpoints = state
+            .list_provider_catalog_endpoints_by_provider_ids(std::slice::from_ref(&provider_id))
+            .await?;
+        endpoint =
+            provider_oauth_runtime_endpoint_for_provider(&normalized_provider_type, &endpoints);
+    }
+
+    if !provider_type_supports_quota_refresh(&normalized_provider_type) {
+        return Ok(Some(unsupported_provider_quota_refresh_response(
+            &normalized_provider_type,
+        )));
+    }
 
     let Some(endpoint) = endpoint else {
         let detail = match normalized_provider_type.as_str() {
@@ -127,6 +152,8 @@ pub(super) async fn maybe_handle(
             "antigravity" => "找不到有效的 gemini:generate_content 端点",
             "kiro" => "找不到有效的 Kiro 端点",
             "chatgpt_web" => "找不到有效的 openai:image 端点",
+            "claude_code" => "找不到有效的 claude:messages 端点",
+            "gemini_cli" | "vertex_ai" => "找不到有效的 gemini:generate_content 端点",
             _ => "找不到有效端点",
         };
         return Ok(Some(

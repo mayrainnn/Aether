@@ -79,15 +79,15 @@ git pull
 
 ### 一键安装（可选部署方式）
 
-安装脚本先从 `aether-rust-pioneer` 分支下载，不依赖 GitHub Release 的 `latest` 脚本地址。运行后会先选择语言，再选择版本和部署方式。
+安装脚本先从 `aether-rust-pioneer` 分支下载，不依赖 GitHub Release 的 `latest` 脚本地址。运行后会先选择语言，再选择版本和部署方式。Linux 单机 / 集群服务使用 systemd，macOS 单机 / 集群服务使用系统级 launchd；脚本会按当前系统自动下载 `linux-*` 或 `macos-*` Release 压缩包。
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/fawney19/Aether/aether-rust-pioneer/install.sh | sudo bash
 ```
 
 运行后按提示输入语言、版本和部署方式。固定安装某个 tag 时，版本选择选 `2`，再输入类似 `v0.7.0-rc23` 的 tag。默认会安装最新预发布版本；Docker Compose 模式默认使用 `pre` 镜像通道。
-systemd 二进制安装在下载 Release 压缩包前会询问是否使用下载加速源；选择使用时会先打印原始 GitHub URL，再要求输入新的压缩包下载 URL。非交互式安装可用 `AETHER_RELEASE_ARCHIVE_URL` 指定压缩包 URL。
-如果安装目录里已经有配置，脚本会优先复用：Docker Compose 保留已有 `.env`，systemd 保留已有 `/etc/aether/aether-gateway.env`。只有首次生成新配置时才会提示输入管理员密码。
+二进制安装在下载 Release 压缩包前会询问是否使用下载加速源；选择使用时会先打印原始 GitHub URL，再要求输入新的压缩包下载 URL。非交互式安装可用 `AETHER_RELEASE_ARCHIVE_URL` 指定压缩包 URL。
+如果安装目录里已经有配置，脚本会优先复用：Docker Compose 保留已有 `.env`，二进制服务模式保留已有 `/etc/aether/aether-gateway.env`。只有首次生成新配置时才会提示输入管理员密码。
 
 ```text
 请选择安装语言 / Choose installer language:
@@ -104,8 +104,8 @@ systemd 二进制安装在下载 Release 压缩包前会询问是否使用下载
 
 请选择 Aether 部署模式:
   1) Docker Compose: 应用 + Postgres + Redis
-  2) 单机服务: systemd + SQLite + 进程内运行时
-  3) 集群节点服务: systemd + 共享数据库 + Redis
+  2) 单机服务: systemd/launchd + SQLite + 进程内运行时
+  3) 集群节点服务: systemd/launchd + 共享数据库 + Redis
 
 请输入选项 [2]:
 
@@ -116,7 +116,7 @@ systemd 二进制安装在下载 Release 压缩包前会询问是否使用下载
 请输入选项 [1]:
 ```
 
-安装后的常用命令：
+安装后的常用命令（Linux systemd）：
 
 ```bash
 sudo systemctl status aether-gateway --no-pager
@@ -124,7 +124,18 @@ sudo journalctl -u aether-gateway -f
 sudo systemctl restart aether-gateway
 ```
 
-默认单机数据和日志都在安装目录内：
+安装后的常用命令（macOS launchd）：
+
+```bash
+sudo launchctl print system/com.aether.gateway
+sudo launchctl kickstart -k system/com.aether.gateway
+sudo launchctl bootout system /Library/LaunchDaemons/com.aether.gateway.plist
+tail -f /var/log/aether/aether-gateway.out.log /var/log/aether/aether-gateway.err.log
+```
+
+macOS 原生安装使用系统级 LaunchDaemon，默认以专用 `_aether` 服务账号运行；配置和密钥写入 `/etc/aether/aether-gateway.env`，数据和应用日志仍在 `/opt/aether`，launchd stdout/stderr 在 `/var/log/aether`。
+
+默认单机数据和应用日志都在安装目录内：
 
 ```text
 /opt/aether/data/aether.db

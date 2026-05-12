@@ -3,7 +3,6 @@ use tracing::warn;
 
 use super::decision::{
     build_local_openai_responses_candidate_attempt_source,
-    materialize_local_openai_responses_candidate_attempts,
     maybe_build_local_openai_responses_decision_payload_for_candidate,
     resolve_local_openai_responses_decision_input, LocalOpenAiResponsesCandidateAttempt,
     LocalOpenAiResponsesCandidateAttemptSource, LocalOpenAiResponsesDecisionInput,
@@ -312,7 +311,7 @@ pub(super) async fn build_local_sync_plan_and_reports(
         "candidate_evaluation_incomplete",
     );
 
-    let (attempts, candidate_count) = materialize_local_openai_responses_candidate_attempts(
+    let (mut source, candidate_count) = build_local_openai_responses_candidate_attempt_source(
         state, trace_id, &input, body_json, spec,
     )
     .await?;
@@ -322,7 +321,7 @@ pub(super) async fn build_local_sync_plan_and_reports(
     }
 
     let mut plans = Vec::new();
-    for attempt in attempts {
+    while let Some(attempt) = source.next_attempt().await {
         let Some(payload) = maybe_build_local_openai_responses_decision_payload_for_candidate(
             state, parts, trace_id, body_json, &input, attempt, spec,
         )
@@ -384,7 +383,7 @@ pub(super) async fn build_local_stream_plan_and_reports(
         "candidate_evaluation_incomplete",
     );
 
-    let (attempts, candidate_count) = materialize_local_openai_responses_candidate_attempts(
+    let (mut source, candidate_count) = build_local_openai_responses_candidate_attempt_source(
         state, trace_id, &input, body_json, spec,
     )
     .await?;
@@ -394,7 +393,7 @@ pub(super) async fn build_local_stream_plan_and_reports(
     }
 
     let mut plans = Vec::new();
-    for attempt in attempts {
+    while let Some(attempt) = source.next_attempt().await {
         let Some(payload) = maybe_build_local_openai_responses_decision_payload_for_candidate(
             state, parts, trace_id, body_json, &input, attempt, spec,
         )

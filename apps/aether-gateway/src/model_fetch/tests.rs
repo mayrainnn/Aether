@@ -300,12 +300,12 @@ async fn gateway_model_fetch_updates_key_and_syncs_provider_model_whitelist_asso
         })
         .await
         .expect("provider models should load");
-    assert_eq!(provider_models.len(), 1);
-    assert_eq!(
-        provider_models[0].global_model_name.as_deref(),
-        Some("gpt-5")
-    );
-    assert_eq!(provider_models[0].provider_model_name, "gpt-5");
+    let mut provider_model_names = provider_models
+        .iter()
+        .map(|model| model.provider_model_name.as_str())
+        .collect::<Vec<_>>();
+    provider_model_names.sort_unstable();
+    assert_eq!(provider_model_names, vec!["gpt-4.1", "gpt-5"]);
 
     execution_runtime_handle.abort();
 }
@@ -526,11 +526,12 @@ async fn gateway_background_model_fetch_updates_key_and_syncs_provider_model_whi
         })
         .await
         .expect("provider models should load");
-    assert_eq!(provider_models.len(), 1);
-    assert_eq!(
-        provider_models[0].global_model_name.as_deref(),
-        Some("gpt-5")
-    );
+    let mut provider_model_names = provider_models
+        .iter()
+        .map(|model| model.provider_model_name.as_str())
+        .collect::<Vec<_>>();
+    provider_model_names.sort_unstable();
+    assert_eq!(provider_model_names, vec!["gpt-4.1", "gpt-5"]);
 
     let seen_plan = seen_execution_runtime_plan
         .lock()

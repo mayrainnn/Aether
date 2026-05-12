@@ -307,7 +307,11 @@ pub(crate) fn admin_proxy_local_requires_buffered_body(
                 | (Some("payments_manage"), http::Method::POST, Some("credit_order"))
                 | (Some("payments_manage"), http::Method::POST, Some("create_redeem_code_batch"))
                 | (Some("payments_manage"), http::Method::POST, Some("delete_redeem_code_batch"))
-                | (Some("api_keys_manage"), http::Method::POST, Some("create_api_key"))
+                | (
+                    Some("api_keys_manage"),
+                    http::Method::POST,
+                    Some("create_api_key" | "create_api_key_install_session"),
+                )
                 | (Some("api_keys_manage"), http::Method::PUT, Some("update_api_key"))
                 | (Some("api_keys_manage"), http::Method::PATCH, Some("toggle_api_key"))
                 | (Some("adaptive_manage"), http::Method::PATCH, Some("toggle_mode"))
@@ -325,6 +329,13 @@ pub(crate) fn admin_proxy_local_requires_buffered_body(
                 | (Some("users_manage"), http::Method::POST, Some("resolve_user_selection"))
                 | (Some("users_manage"), http::Method::POST, Some("batch_action_users"))
                 | (Some("users_manage"), http::Method::PUT, Some("update_user"))
+                | (Some("users_manage"), http::Method::POST, Some("create_user_group"))
+                | (Some("users_manage"), http::Method::PUT, Some("update_user_group"))
+                | (
+                    Some("users_manage"),
+                    http::Method::PUT,
+                    Some("replace_user_group_members" | "set_default_user_group"),
+                )
                 | (Some("users_manage"), http::Method::POST, Some("create_user_api_key"))
                 | (Some("users_manage"), http::Method::PUT, Some("update_user_api_key"))
                 | (Some("users_manage"), http::Method::PATCH, Some("lock_user_api_key"))

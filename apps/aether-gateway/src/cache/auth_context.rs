@@ -28,4 +28,8 @@ impl AuthContextCache {
         self.entries
             .insert(cache_key, auth_context, ttl, max_entries);
     }
+
+    pub(crate) fn clear(&self) {
+        self.entries.clear();
+    }
 }

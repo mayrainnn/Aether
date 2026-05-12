@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 
@@ -60,6 +61,7 @@ pub struct AppState {
     pub(crate) oauth_refresh: Arc<provider_transport::LocalOAuthRefreshCoordinator>,
     pub(crate) direct_plan_bypass_cache: Arc<DirectPlanBypassCache>,
     pub(crate) scheduler_affinity_cache: Arc<SchedulerAffinityCache>,
+    pub(crate) scheduler_affinity_epoch: Arc<AtomicU64>,
     pub(crate) dashboard_response_cache: Arc<DashboardResponseCache>,
     pub(crate) system_config_cache: Arc<SystemConfigCache>,
     pub(crate) fallback_metrics: Arc<fallback_metrics::GatewayFallbackMetrics>,

@@ -180,7 +180,7 @@ pub(crate) async fn maybe_build_sync_local_video_decision_payload(
         return Ok(None);
     };
 
-    let Some(attempts) = list_local_video_create_candidate_attempts(
+    let Some((mut source, _)) = build_local_video_create_candidate_attempt_source(
         state,
         trace_id,
         &input,
@@ -188,12 +188,12 @@ pub(crate) async fn maybe_build_sync_local_video_decision_payload(
         spec_metadata.api_format,
         spec_metadata.decision_kind,
     )
-    .await
+    .await?
     else {
         return Ok(None);
     };
 
-    for attempt in attempts {
+    while let Some(attempt) = source.next_attempt().await {
         if let Some(payload) = maybe_build_local_video_create_decision_payload_for_candidate(
             state, parts, body_json, trace_id, &input, attempt, spec,
         )
@@ -223,7 +223,7 @@ async fn build_local_sync_plan_and_reports(
         return Ok(Vec::new());
     };
 
-    let Some(attempts) = list_local_video_create_candidate_attempts(
+    let Some((mut source, _)) = build_local_video_create_candidate_attempt_source(
         state,
         trace_id,
         &input,
@@ -231,13 +231,13 @@ async fn build_local_sync_plan_and_reports(
         spec_metadata.api_format,
         spec_metadata.decision_kind,
     )
-    .await
+    .await?
     else {
         return Ok(Vec::new());
     };
 
     let mut plans = Vec::new();
-    for attempt in attempts {
+    while let Some(attempt) = source.next_attempt().await {
         let Some(payload) = maybe_build_local_video_create_decision_payload_for_candidate(
             state, parts, body_json, trace_id, &input, attempt, spec,
         )

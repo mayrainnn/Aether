@@ -549,14 +549,6 @@ mod tests {
                 .cloned()
                 .collect())
         }
-
-        async fn delete_admin_provider_model(
-            &self,
-            _provider_id: &str,
-            _model_id: &str,
-        ) -> Result<bool, Self::Error> {
-            Ok(false)
-        }
     }
 
     #[async_trait]

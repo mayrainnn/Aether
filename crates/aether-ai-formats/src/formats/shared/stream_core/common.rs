@@ -1,5 +1,7 @@
 use serde_json::{json, Map, Value};
 
+use crate::formats::shared::model_directives::model_directive_display_model_from_report_context;
+
 pub use aether_ai_formats::protocol::stream::{
     CanonicalContentPart, CanonicalStreamEvent, CanonicalStreamFrame, CanonicalUsage,
 };
@@ -27,6 +29,9 @@ pub fn resolve_identity(
         .filter(|value| !value.is_empty())
         .unwrap_or(default_id)
         .to_string();
+    if let Some(display_model) = model_directive_display_model_from_report_context(report_context) {
+        return (id, display_model);
+    }
     let model = model
         .filter(|value| !value.is_empty())
         .or_else(|| report_context.get("mapped_model").and_then(Value::as_str))

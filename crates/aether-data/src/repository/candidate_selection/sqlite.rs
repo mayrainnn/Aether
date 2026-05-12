@@ -5,6 +5,7 @@ use sqlx::{sqlite::SqliteRow, QueryBuilder, Row, Sqlite};
 
 use super::{
     MinimalCandidateSelectionReadRepository, StoredMinimalCandidateSelectionRow,
+    StoredPoolKeyCandidateOrder, StoredPoolKeyCandidateRowsByKeyIdsQuery,
     StoredPoolKeyCandidateRowsQuery, StoredProviderModelMapping,
     StoredRequestedModelCandidateRowsQuery,
 };
@@ -35,6 +36,7 @@ SELECT
   pak.capabilities AS key_capabilities,
   pak.internal_priority AS key_internal_priority,
   pak.global_priority_by_format AS key_global_priority_by_format,
+  pak.last_used_at AS key_last_used_at_unix_secs,
   m.id AS model_id,
   m.global_model_id AS global_model_id,
   gm.name AS global_model_name,
@@ -67,6 +69,7 @@ struct CandidateSelectionRow {
     row: StoredMinimalCandidateSelectionRow,
     provider_pool_enabled: bool,
     key_auth_config: Option<String>,
+    key_last_used_at_unix_secs: Option<u64>,
 }
 
 impl SqliteMinimalCandidateSelectionReadRepository {
@@ -180,19 +183,53 @@ impl MinimalCandidateSelectionReadRepository for SqliteMinimalCandidateSelection
             .load_rows_for_api_format(&query.api_format)
             .await?
             .into_iter()
-            .map(|item| item.row)
             .filter(|row| {
-                row.provider_id == query.provider_id
-                    && row.endpoint_id == query.endpoint_id
-                    && row.model_id == query.model_id
+                row.row.provider_id == query.provider_id
+                    && row.row.endpoint_id == query.endpoint_id
+                    && row.row.model_id == query.model_id
             })
             .collect::<Vec<_>>();
-        let mut rows = sort_pool_key_rows(rows);
+        let mut rows = sort_pool_key_rows(rows, &query.order);
         Ok(rows
             .drain(..)
             .skip(query.offset as usize)
             .take(query.limit as usize)
+            .map(|item| item.row)
             .collect())
+    }
+
+    async fn list_pool_key_rows_for_group_key_ids(
+        &self,
+        query: &StoredPoolKeyCandidateRowsByKeyIdsQuery,
+    ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
+        if query.key_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let key_order = query
+            .key_ids
+            .iter()
+            .enumerate()
+            .map(|(index, key_id)| (key_id.as_str(), index))
+            .collect::<BTreeMap<_, _>>();
+        let mut rows = self
+            .load_rows_for_api_format(&query.api_format)
+            .await?
+            .into_iter()
+            .filter(|row| {
+                row.row.provider_id == query.provider_id
+                    && row.row.endpoint_id == query.endpoint_id
+                    && row.row.model_id == query.model_id
+                    && key_order.contains_key(row.row.key_id.as_str())
+            })
+            .map(|item| item.row)
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| {
+            key_order
+                .get(left.key_id.as_str())
+                .cmp(&key_order.get(right.key_id.as_str()))
+                .then(left.key_id.cmp(&right.key_id))
+        });
+        Ok(dedupe_candidate_selection_rows(rows))
     }
 }
 
@@ -246,14 +283,64 @@ fn sort_rows(
 }
 
 fn sort_pool_key_rows(
-    mut rows: Vec<StoredMinimalCandidateSelectionRow>,
-) -> Vec<StoredMinimalCandidateSelectionRow> {
-    rows.sort_by(|left, right| {
-        left.key_internal_priority
-            .cmp(&right.key_internal_priority)
-            .then(left.key_id.cmp(&right.key_id))
+    mut rows: Vec<CandidateSelectionRow>,
+    order: &StoredPoolKeyCandidateOrder,
+) -> Vec<CandidateSelectionRow> {
+    rows.sort_by(|left, right| match order {
+        StoredPoolKeyCandidateOrder::InternalPriority => compare_pool_key_internal(left, right),
+        StoredPoolKeyCandidateOrder::Lru => left
+            .key_last_used_at_unix_secs
+            .cmp(&right.key_last_used_at_unix_secs)
+            .then_with(|| compare_pool_key_internal(left, right)),
+        StoredPoolKeyCandidateOrder::CacheAffinity => right
+            .key_last_used_at_unix_secs
+            .cmp(&left.key_last_used_at_unix_secs)
+            .then_with(|| compare_pool_key_internal(left, right)),
+        StoredPoolKeyCandidateOrder::SingleAccount => left
+            .row
+            .key_internal_priority
+            .cmp(&right.row.key_internal_priority)
+            .then_with(|| {
+                right
+                    .key_last_used_at_unix_secs
+                    .cmp(&left.key_last_used_at_unix_secs)
+            })
+            .then(left.row.key_id.cmp(&right.row.key_id)),
+        StoredPoolKeyCandidateOrder::LoadBalance { seed } => {
+            stable_pool_key_hash(seed.as_str(), left.row.key_id.as_str())
+                .cmp(&stable_pool_key_hash(
+                    seed.as_str(),
+                    right.row.key_id.as_str(),
+                ))
+                .then(left.row.key_id.cmp(&right.row.key_id))
+        }
     });
     rows
+}
+
+fn compare_pool_key_internal(
+    left: &CandidateSelectionRow,
+    right: &CandidateSelectionRow,
+) -> std::cmp::Ordering {
+    left.row
+        .key_internal_priority
+        .cmp(&right.row.key_internal_priority)
+        .then(left.row.key_id.cmp(&right.row.key_id))
+}
+
+fn stable_pool_key_hash(seed: &str, key_id: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in seed
+        .as_bytes()
+        .iter()
+        .copied()
+        .chain(std::iter::once(b':'))
+        .chain(key_id.as_bytes().iter().copied())
+    {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 fn row_matches_requested_model(
@@ -261,24 +348,73 @@ fn row_matches_requested_model(
     requested_model_name: &str,
     api_format: &str,
 ) -> bool {
-    row.global_model_name == requested_model_name
-        || row.model_provider_model_name == requested_model_name
+    (row_has_available_provider_model(row, api_format)
+        && row.global_model_name == requested_model_name)
+        || (row_default_provider_model_name_available(row, api_format)
+            && row.model_provider_model_name == requested_model_name)
         || row
             .model_provider_model_mappings
             .as_ref()
             .is_some_and(|mappings| {
                 mappings.iter().any(|mapping| {
-                    mapping.api_formats.as_ref().is_none_or(|formats| {
-                        formats
-                            .iter()
-                            .any(|value| api_format_matches(value, api_format))
-                    }) && mapping.endpoint_ids.as_ref().is_none_or(|endpoint_ids| {
-                        endpoint_ids
-                            .iter()
-                            .any(|endpoint_id| endpoint_id == &row.endpoint_id)
-                    }) && mapping.name == requested_model_name
+                    mapping_scope_matches(mapping, row, api_format)
+                        && mapping.name == requested_model_name
                 })
             })
+}
+
+fn row_has_available_provider_model(
+    row: &StoredMinimalCandidateSelectionRow,
+    api_format: &str,
+) -> bool {
+    row_mapping_matches_scope(row, api_format)
+        || row_default_provider_model_name_available(row, api_format)
+}
+
+fn row_default_provider_model_name_available(
+    row: &StoredMinimalCandidateSelectionRow,
+    api_format: &str,
+) -> bool {
+    let Some(mappings) = row.model_provider_model_mappings.as_ref() else {
+        return true;
+    };
+    let mut has_explicit_default_mapping = false;
+    for mapping in mappings {
+        if mapping.name != row.model_provider_model_name {
+            continue;
+        }
+        has_explicit_default_mapping = true;
+        if mapping_scope_matches(mapping, row, api_format) {
+            return true;
+        }
+    }
+    !has_explicit_default_mapping
+}
+
+fn row_mapping_matches_scope(row: &StoredMinimalCandidateSelectionRow, api_format: &str) -> bool {
+    row.model_provider_model_mappings
+        .as_ref()
+        .is_some_and(|mappings| {
+            mappings
+                .iter()
+                .any(|mapping| mapping_scope_matches(mapping, row, api_format))
+        })
+}
+
+fn mapping_scope_matches(
+    mapping: &super::StoredProviderModelMapping,
+    row: &StoredMinimalCandidateSelectionRow,
+    api_format: &str,
+) -> bool {
+    mapping.api_formats.as_ref().is_none_or(|formats| {
+        formats
+            .iter()
+            .any(|value| api_format_matches(value, api_format))
+    }) && mapping.endpoint_ids.as_ref().is_none_or(|endpoint_ids| {
+        endpoint_ids
+            .iter()
+            .any(|endpoint_id| endpoint_id == &row.endpoint_id)
+    })
 }
 
 fn key_auth_channel_matches(row: &CandidateSelectionRow, api_format: &str) -> bool {
@@ -394,6 +530,10 @@ fn map_candidate_selection_row(row: &SqliteRow) -> Result<CandidateSelectionRow,
         },
         provider_pool_enabled,
         key_auth_config: row.try_get("key_auth_config").map_sql_err()?,
+        key_last_used_at_unix_secs: row
+            .try_get::<Option<i64>, _>("key_last_used_at_unix_secs")
+            .map_sql_err()?
+            .and_then(|value| u64::try_from(value).ok()),
     })
 }
 
@@ -620,8 +760,8 @@ mod tests {
     use super::SqliteMinimalCandidateSelectionReadRepository;
     use crate::lifecycle::migrate::run_sqlite_migrations;
     use crate::repository::candidate_selection::{
-        MinimalCandidateSelectionReadRepository, StoredPoolKeyCandidateRowsQuery,
-        StoredRequestedModelCandidateRowsQuery,
+        MinimalCandidateSelectionReadRepository, StoredPoolKeyCandidateOrder,
+        StoredPoolKeyCandidateRowsQuery, StoredRequestedModelCandidateRowsQuery,
     };
 
     #[tokio::test]
@@ -673,6 +813,7 @@ mod tests {
                 endpoint_id: "endpoint-1".to_string(),
                 model_id: "model-1".to_string(),
                 selected_provider_model_name: "provider-model".to_string(),
+                order: StoredPoolKeyCandidateOrder::InternalPriority,
                 offset: 1,
                 limit: 1,
             })

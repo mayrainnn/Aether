@@ -516,6 +516,10 @@ pub enum ProviderCatalogKeyListOrder {
     #[default]
     Name,
     CreatedAt,
+    CreatedAtAsc,
+    CreatedAtDesc,
+    LastUsedAtAsc,
+    LastUsedAtDesc,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

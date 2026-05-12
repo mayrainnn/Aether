@@ -239,8 +239,8 @@ async fn admin_monitoring_cache_affinities_and_delete_use_runtime_scheduler_affi
             "model-alpha",
         )
         .expect("scheduler affinity cache key should build");
-    state.scheduler_affinity_cache.insert(
-        affinity_cache_key.clone(),
+    state.remember_scheduler_affinity_target(
+        &affinity_cache_key,
         crate::cache::SchedulerAffinityTarget {
             provider_id: "provider-1".to_string(),
             endpoint_id: "endpoint-1".to_string(),
@@ -393,8 +393,8 @@ async fn admin_monitoring_cache_affinities_parse_session_scoped_scheduler_affini
         .next()
         .expect("session hash should exist")
         .to_string();
-    state.scheduler_affinity_cache.insert(
-        affinity_cache_key.clone(),
+    state.remember_scheduler_affinity_target(
+        &affinity_cache_key,
         crate::cache::SchedulerAffinityTarget {
             provider_id: "provider-1".to_string(),
             endpoint_id: "endpoint-1".to_string(),
@@ -403,8 +403,8 @@ async fn admin_monitoring_cache_affinities_parse_session_scoped_scheduler_affini
         crate::scheduler::affinity::SCHEDULER_AFFINITY_TTL,
         128,
     );
-    state.scheduler_affinity_cache.insert(
-        other_affinity_cache_key.clone(),
+    state.remember_scheduler_affinity_target(
+        &other_affinity_cache_key,
         crate::cache::SchedulerAffinityTarget {
             provider_id: "provider-1".to_string(),
             endpoint_id: "endpoint-1".to_string(),

@@ -19,7 +19,8 @@ vi.mock('@/api/endpoints', () => ({
 }))
 
 vi.mock('@/components/ui', async () => {
-  const { defineComponent, h } = await import('vue')
+  const { defineComponent, h, inject, provide } = await import('vue')
+  const SelectContextKey = Symbol('SelectContext')
 
   const passthrough = (name: string, tag = 'div') => defineComponent({
     name,
@@ -104,17 +105,56 @@ vi.mock('@/components/ui', async () => {
     },
   })
 
+  const Select = defineComponent({
+    name: 'SelectStub',
+    props: {
+      modelValue: String,
+    },
+    emits: ['update:modelValue'],
+    setup(props, { emit, slots }) {
+      provide(SelectContextKey, {
+        select: (value: string) => emit('update:modelValue', value),
+        modelValue: props.modelValue,
+      })
+
+      return () => h('div', {
+        'data-select': 'true',
+        'data-value': props.modelValue,
+      }, slots.default?.())
+    },
+  })
+
+  const SelectItem = defineComponent({
+    name: 'SelectItemStub',
+    inheritAttrs: false,
+    props: {
+      value: {
+        type: String,
+        required: true,
+      },
+    },
+    setup(props, { attrs, slots }) {
+      const context = inject<{ select: (value: string) => void } | null>(SelectContextKey, null)
+      return () => h('button', {
+        ...attrs,
+        type: 'button',
+        'data-select-item': props.value,
+        onClick: () => context?.select(props.value),
+      }, slots.default?.())
+    },
+  })
+
   return {
     Dialog,
     Button,
     Input,
     Label,
     Switch,
-    Select: passthrough('SelectStub'),
+    Select,
     SelectTrigger: passthrough('SelectTriggerStub'),
     SelectValue: passthrough('SelectValueStub', 'span'),
     SelectContent: passthrough('SelectContentStub'),
-    SelectItem: passthrough('SelectItemStub'),
+    SelectItem,
   }
 })
 
@@ -124,8 +164,18 @@ vi.mock('@/components/common/JsonImportInput.vue', async () => {
   return {
     default: defineComponent({
       name: 'JsonImportInputStub',
-      setup() {
-        return () => h('textarea')
+      props: {
+        modelValue: {
+          type: String,
+          default: '',
+        },
+      },
+      emits: ['update:modelValue'],
+      setup(props, { emit }) {
+        return () => h('textarea', {
+          value: props.modelValue,
+          onInput: (event: Event) => emit('update:modelValue', (event.target as HTMLTextAreaElement).value),
+        })
       },
     }),
   }
@@ -222,6 +272,11 @@ function updateInput(input: HTMLInputElement, value: string) {
   input.dispatchEvent(new Event('input', { bubbles: true }))
 }
 
+function updateTextarea(textarea: HTMLTextAreaElement, value: string) {
+  textarea.value = value
+  textarea.dispatchEvent(new Event('input', { bubbles: true }))
+}
+
 async function submit(root: HTMLElement) {
   const form = root.querySelector('form')
   expect(form).not.toBeNull()
@@ -254,6 +309,47 @@ afterEach(() => {
 })
 
 describe('provider key concurrent_limit form behavior', () => {
+  it('lets Vertex AI keys switch to Service Account JSON and submit auth_config', async () => {
+    const root = mountDialog(KeyFormDialog, {
+      open: true,
+      endpoint: null,
+      editingKey: null,
+      providerId: 'provider-vertex',
+      providerType: 'vertex_ai',
+      availableApiFormats: ['gemini:generate_content', 'claude:messages'],
+    })
+    await settle()
+
+    const serviceAccountOption = root.querySelector<HTMLButtonElement>('[data-select-item="service_account"]')
+    expect(serviceAccountOption).not.toBeNull()
+    serviceAccountOption?.click()
+    await settle()
+
+    const nameInput = root.querySelector<HTMLInputElement>('input[placeholder="例如：主 Key、备用 Key 1"]')
+    expect(nameInput).not.toBeNull()
+    updateInput(nameInput as HTMLInputElement, 'Vertex service account')
+
+    const textarea = root.querySelector<HTMLTextAreaElement>('textarea')
+    expect(textarea).not.toBeNull()
+    updateTextarea(textarea as HTMLTextAreaElement, JSON.stringify({
+      client_email: 'svc@example.iam.gserviceaccount.com',
+      private_key: '-----BEGIN PRIVATE KEY-----\\nTEST\\n-----END PRIVATE KEY-----\\n',
+      project_id: 'demo-project',
+    }))
+
+    await submit(root)
+
+    expect(endpointMocks.addProviderKey).toHaveBeenCalledWith('provider-vertex', expect.objectContaining({
+      auth_type: 'service_account',
+      auth_config: expect.objectContaining({
+        client_email: 'svc@example.iam.gserviceaccount.com',
+        private_key: '-----BEGIN PRIVATE KEY-----\\nTEST\\n-----END PRIVATE KEY-----\\n',
+        project_id: 'demo-project',
+      }),
+      api_formats: ['gemini:generate_content'],
+    }))
+  })
+
   it('hydrates and serializes a positive concurrent_limit number from the normal key form', async () => {
     const root = mountDialog(KeyFormDialog, {
       open: true,

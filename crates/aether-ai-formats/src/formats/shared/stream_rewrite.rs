@@ -1,6 +1,7 @@
 use serde_json::Value;
 
 use crate::formats::openai::image::stream::OpenAiImageStreamState;
+use crate::formats::shared::model_directives::model_directive_display_model_from_report_context;
 use crate::formats::shared::stream_core::StreamingStandardFormatMatrix;
 use crate::formats::shared::AiSurfaceFinalizeError;
 use crate::provider_compat::kiro_stream::KiroToClaudeCliStreamState;
@@ -12,6 +13,7 @@ use crate::provider_compat::surfaces::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FinalizeStreamRewriteMode {
     EnvelopeUnwrap,
+    ModelDirectiveDisplay,
     OpenAiImage,
     Standard,
     KiroToClaudeCli,
@@ -73,6 +75,17 @@ pub fn resolve_finalize_stream_rewrite_mode(
             .then_some(FinalizeStreamRewriteMode::KiroToClaudeCli);
     }
 
+    if model_directive_display_model_from_report_context(report_context).is_some()
+        && provider_api_format == client_api_format
+        && is_standard_provider_api_format(provider_api_format.as_str())
+        && !provider_adaptation_should_unwrap_stream_envelope(
+            envelope_name.as_str(),
+            provider_api_format.as_str(),
+        )
+    {
+        return Some(FinalizeStreamRewriteMode::ModelDirectiveDisplay);
+    }
+
     (provider_api_format == client_api_format
         && provider_adaptation_should_unwrap_stream_envelope(
             envelope_name.as_str(),
@@ -83,6 +96,7 @@ pub fn resolve_finalize_stream_rewrite_mode(
 
 enum AiSurfaceStreamRewriteState {
     EnvelopeUnwrap,
+    ModelDirectiveDisplay,
     OpenAiImage(Box<OpenAiImageStreamState>),
     Standard(Box<StreamingStandardFormatMatrix>),
     KiroToClaudeCli(Box<KiroToClaudeCliStreamState>),
@@ -104,6 +118,9 @@ pub fn maybe_build_ai_surface_stream_rewriter<'a>(
     let report_context = report_context?;
     let state = match resolve_finalize_stream_rewrite_mode(report_context)? {
         FinalizeStreamRewriteMode::EnvelopeUnwrap => AiSurfaceStreamRewriteState::EnvelopeUnwrap,
+        FinalizeStreamRewriteMode::ModelDirectiveDisplay => {
+            AiSurfaceStreamRewriteState::ModelDirectiveDisplay
+        }
         FinalizeStreamRewriteMode::OpenAiImage => {
             AiSurfaceStreamRewriteState::OpenAiImage(Box::<OpenAiImageStreamState>::default())
         }
@@ -142,6 +159,7 @@ impl AiSurfaceStreamRewriter<'_> {
                 transform_standard_bytes(standard, self.report_context, claude_bytes)
             }
             AiSurfaceStreamRewriteState::EnvelopeUnwrap
+            | AiSurfaceStreamRewriteState::ModelDirectiveDisplay
             | AiSurfaceStreamRewriteState::Standard(_) => {
                 self.buffered.extend_from_slice(chunk);
                 let mut output = Vec::new();
@@ -170,6 +188,7 @@ impl AiSurfaceStreamRewriter<'_> {
                 Ok(output)
             }
             AiSurfaceStreamRewriteState::EnvelopeUnwrap
+            | AiSurfaceStreamRewriteState::ModelDirectiveDisplay
             | AiSurfaceStreamRewriteState::Standard(_) => {
                 if self.buffered.is_empty() {
                     if let AiSurfaceStreamRewriteState::Standard(state) = &mut self.state {
@@ -190,8 +209,12 @@ impl AiSurfaceStreamRewriter<'_> {
     fn transform_line(&mut self, line: Vec<u8>) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
         match &mut self.state {
             AiSurfaceStreamRewriteState::EnvelopeUnwrap => {
-                transform_provider_private_stream_line(self.report_context, line)
-                    .map_err(AiSurfaceFinalizeError::from)
+                let output = transform_provider_private_stream_line(self.report_context, line)
+                    .map_err(AiSurfaceFinalizeError::from)?;
+                rewrite_model_directive_stream_line(self.report_context, output)
+            }
+            AiSurfaceStreamRewriteState::ModelDirectiveDisplay => {
+                rewrite_model_directive_stream_line(self.report_context, line)
             }
             AiSurfaceStreamRewriteState::Standard(state) => {
                 transform_standard_line(state, self.report_context, line)
@@ -201,6 +224,63 @@ impl AiSurfaceStreamRewriter<'_> {
             | AiSurfaceStreamRewriteState::KiroToClaudeCliThenStandard { .. } => Ok(Vec::new()),
         }
     }
+}
+
+fn rewrite_model_directive_stream_line(
+    report_context: &Value,
+    line: Vec<u8>,
+) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
+    let Some(display_model) = model_directive_display_model_from_report_context(report_context)
+    else {
+        return Ok(line);
+    };
+    let text = match std::str::from_utf8(&line) {
+        Ok(text) => text,
+        Err(_) => return Ok(line),
+    };
+    let trimmed_line_end = text.trim_end_matches(['\r', '\n']);
+    let trailing = &text[trimmed_line_end.len()..];
+    let Some((prefix, payload)) = trimmed_line_end.split_once(':') else {
+        return Ok(line);
+    };
+    if prefix.trim() != "data" {
+        return Ok(line);
+    }
+    let payload = payload.trim_start();
+    if payload.is_empty() || payload == "[DONE]" {
+        return Ok(line);
+    }
+    let mut value = match serde_json::from_str::<Value>(payload) {
+        Ok(value) => value,
+        Err(_) => return Ok(line),
+    };
+    if !rewrite_stream_payload_model(&mut value, &display_model) {
+        return Ok(line);
+    }
+    let mut output = Vec::new();
+    output.extend_from_slice(b"data: ");
+    output.extend(serde_json::to_vec(&value)?);
+    output.extend_from_slice(trailing.as_bytes());
+    Ok(output)
+}
+
+fn rewrite_stream_payload_model(value: &mut Value, display_model: &str) -> bool {
+    let Some(object) = value.as_object_mut() else {
+        return false;
+    };
+    let mut changed = false;
+    for key in ["model", "modelVersion"] {
+        if object.get(key).and_then(Value::as_str).is_some() {
+            object.insert(key.to_string(), Value::String(display_model.to_string()));
+            changed = true;
+        }
+    }
+    for key in ["response", "message"] {
+        if let Some(nested) = object.get_mut(key) {
+            changed |= rewrite_stream_payload_model(nested, display_model);
+        }
+    }
+    changed
 }
 
 fn transform_standard_bytes(
@@ -288,7 +368,10 @@ fn is_standard_cli_client_api_format(api_format: &str) -> bool {
 mod tests {
     use serde_json::json;
 
-    use super::{resolve_finalize_stream_rewrite_mode, FinalizeStreamRewriteMode};
+    use super::{
+        maybe_build_ai_surface_stream_rewriter, resolve_finalize_stream_rewrite_mode,
+        FinalizeStreamRewriteMode,
+    };
 
     #[test]
     fn resolves_standard_mode_for_cross_format_standard_streams() {
@@ -339,6 +422,84 @@ mod tests {
             "needs_conversion": false,
         });
         assert_eq!(resolve_finalize_stream_rewrite_mode(&report_context), None);
+    }
+
+    #[test]
+    fn resolves_model_directive_display_mode_for_same_format_standard_streams() {
+        let report_context = json!({
+            "provider_api_format": "openai:responses",
+            "client_api_format": "openai:responses",
+            "model": "gpt-5.5-xhigh",
+            "mapped_model": "gpt-5.5",
+            "needs_conversion": false,
+        });
+        assert_eq!(
+            resolve_finalize_stream_rewrite_mode(&report_context),
+            Some(FinalizeStreamRewriteMode::ModelDirectiveDisplay)
+        );
+    }
+
+    #[test]
+    fn model_directive_display_mode_does_not_displace_kiro_stream_bridge() {
+        let report_context = json!({
+            "provider_api_format": "claude:messages",
+            "client_api_format": "claude:messages",
+            "envelope_name": "kiro:generateAssistantResponse",
+            "model": "claude-sonnet-4.5-high",
+            "mapped_model": "claude-sonnet-4.5",
+            "needs_conversion": false,
+        });
+        assert_eq!(
+            resolve_finalize_stream_rewrite_mode(&report_context),
+            Some(FinalizeStreamRewriteMode::KiroToClaudeCli)
+        );
+    }
+
+    #[test]
+    fn envelope_unwrap_rewriter_restores_model_directive_display_model() {
+        let report_context = json!({
+            "provider_api_format": "gemini:generate_content",
+            "client_api_format": "gemini:generate_content",
+            "envelope_name": "gemini_cli:v1internal",
+            "model": "gemini-2.5-pro-high",
+            "mapped_model": "gemini-2.5-pro",
+            "needs_conversion": false,
+        });
+        let mut rewriter = maybe_build_ai_surface_stream_rewriter(Some(&report_context))
+            .expect("rewriter should exist");
+        let output = rewriter
+            .push_chunk(
+                b"data: {\"response\":{\"modelVersion\":\"gemini-2.5-pro\",\"candidates\":[]}}\n\n",
+            )
+            .expect("rewrite should succeed");
+        let output = String::from_utf8(output).expect("output should be utf8");
+
+        assert!(output.contains("\"modelVersion\":\"gemini-2.5-pro-high\""));
+        assert!(!output.contains("\"modelVersion\":\"gemini-2.5-pro\""));
+    }
+
+    #[test]
+    fn model_directive_display_rewriter_restores_response_model() {
+        let report_context = json!({
+            "provider_api_format": "openai:responses",
+            "client_api_format": "openai:responses",
+            "model": "gpt-5.5-xhigh",
+            "mapped_model": "gpt-5.5",
+            "needs_conversion": false,
+        });
+        let mut rewriter = maybe_build_ai_surface_stream_rewriter(Some(&report_context))
+            .expect("rewriter should exist");
+        let output = rewriter
+            .push_chunk(
+                b"event: response.created\n\
+data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_123\",\"object\":\"response\",\"model\":\"gpt-5.5\",\"status\":\"in_progress\"}}\n\n",
+            )
+            .expect("rewrite should succeed");
+        let output = String::from_utf8(output).expect("output should be utf8");
+
+        assert!(output.contains("event: response.created"));
+        assert!(output.contains("\"model\":\"gpt-5.5-xhigh\""));
+        assert!(!output.contains("\"model\":\"gpt-5.5\""));
     }
 
     #[test]

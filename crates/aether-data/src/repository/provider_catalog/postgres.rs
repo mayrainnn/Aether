@@ -571,6 +571,18 @@ ORDER BY provider_priority ASC, name ASC
             ProviderCatalogKeyListOrder::CreatedAt => {
                 "internal_priority ASC, COALESCE(created_at, TO_TIMESTAMP(0)) ASC, id ASC"
             }
+            ProviderCatalogKeyListOrder::CreatedAtAsc => {
+                "created_at ASC NULLS LAST, name ASC, id ASC"
+            }
+            ProviderCatalogKeyListOrder::CreatedAtDesc => {
+                "created_at DESC NULLS LAST, name ASC, id ASC"
+            }
+            ProviderCatalogKeyListOrder::LastUsedAtAsc => {
+                "last_used_at ASC NULLS LAST, name ASC, id ASC"
+            }
+            ProviderCatalogKeyListOrder::LastUsedAtDesc => {
+                "last_used_at DESC NULLS LAST, name ASC, id ASC"
+            }
         };
 
         let count_row = sqlx::query(

@@ -20,7 +20,7 @@ impl<'a> AiCandidateResolutionRequest<'a> {
             client_api_format,
             requested_model,
             mode: AiCandidateResolutionMode::Standard,
-            expand_pool_groups: true,
+            expand_pool_groups: false,
         }
     }
 
@@ -32,7 +32,7 @@ impl<'a> AiCandidateResolutionRequest<'a> {
             client_api_format,
             requested_model,
             mode: AiCandidateResolutionMode::WithoutTransportPairGate,
-            expand_pool_groups: true,
+            expand_pool_groups: false,
         }
     }
 
@@ -328,7 +328,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolution_reads_transport_gates_candidates_then_ranks_and_applies_pool() {
+    async fn resolution_reads_transport_gates_candidates_then_ranks_without_expanding_pools() {
         let port = TestPort::default();
 
         let outcome = run_ai_candidate_resolution(
@@ -349,7 +349,6 @@ mod tests {
                 "missing:transport_snapshot_missing",
                 "inactive:provider_inactive",
                 "unsupported:transport_unsupported",
-                "pool:cooldown",
             ]
         );
         assert_eq!(
@@ -368,7 +367,6 @@ mod tests {
                 "common:second:gpt-4.1",
                 "pair:second:openai:chat:gpt-4.1",
                 "rank:openai:chat",
-                "pool",
             ]
         );
     }
@@ -386,14 +384,13 @@ mod tests {
         .unwrap();
 
         assert_eq!(outcome.eligible_candidates, ["eligible:unsupported"]);
-        assert_eq!(outcome.skipped_candidates, ["pool:cooldown"]);
+        assert!(outcome.skipped_candidates.is_empty());
         assert_eq!(
             port.calls.lock().unwrap().as_slice(),
             [
                 "transport:unsupported",
                 "common:unsupported:",
                 "rank:openai:chat",
-                "pool",
             ]
         );
     }

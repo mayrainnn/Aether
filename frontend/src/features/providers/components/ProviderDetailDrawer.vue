@@ -576,7 +576,7 @@
                           </span>
                         </div>
                       </div>
-                      <!-- 限额并排显示：Team/Plus/Enterprise 账号 2列, Free 账号 1列 -->
+                      <!-- 普通 Codex 限额并排显示：Team/Plus/Enterprise 账号 2列, Free 账号 1列 -->
                       <div
                         class="grid gap-3"
                         :class="isCodexTeamPlan(key) ? 'grid-cols-2' : 'grid-cols-1'"
@@ -650,6 +650,89 @@
                             <template v-else>
                               已重置
                             </template>
+                          </div>
+                        </div>
+                      </div>
+                      <!-- Spark 限额独立一行展示，避免与普通 Codex 周/5H 混淆 -->
+                      <div
+                        v-if="hasCodexSparkQuotaDisplayData(key)"
+                        class="mt-3 border-t border-border/60 pt-2"
+                      >
+                        <div class="mb-1 text-[10px] text-muted-foreground">GPT-5.3 Codex Spark</div>
+                        <div class="grid gap-3 grid-cols-2">
+                          <div v-if="getCodexQuotaDisplay(key)?.spark_secondary_used_percent !== undefined">
+                            <div class="flex items-center justify-between text-[10px] mb-0.5">
+                              <span class="text-muted-foreground">Spark 周</span>
+                              <span :class="getQuotaRemainingClass(getCodexQuotaDisplay(key)?.spark_secondary_used_percent || 0)">
+                                {{ (100 - (getCodexQuotaDisplay(key)?.spark_secondary_used_percent || 0)).toFixed(1) }}%
+                              </span>
+                            </div>
+                            <div class="relative w-full h-1.5 bg-border rounded-full overflow-hidden">
+                              <div
+                                class="absolute left-0 top-0 h-full transition-all duration-300"
+                                :class="getQuotaRemainingBarColor(getCodexQuotaDisplay(key)?.spark_secondary_used_percent || 0)"
+                                :style="{ width: `${Math.max(100 - (getCodexQuotaDisplay(key)?.spark_secondary_used_percent || 0), 0)}%` }"
+                              />
+                            </div>
+                            <div
+                              v-if="shouldStartCodexResetCountdown(getCodexQuotaDisplay(key)?.spark_secondary_used_percent || 0)"
+                              class="text-[9px] mt-0.5 tabular-nums"
+                              :class="getResetCountdownClass(
+                                getCodexQuotaDisplay(key)?.spark_secondary_reset_at,
+                                getCodexQuotaDisplay(key)?.spark_secondary_reset_seconds,
+                                getCodexQuotaDisplay(key)?.updated_at,
+                                getCodexQuotaDisplay(key)?.spark_secondary_used_percent
+                              )"
+                            >
+                              <template v-if="getCodexQuotaDisplay(key)?.spark_secondary_reset_at || getCodexQuotaDisplay(key)?.spark_secondary_reset_seconds">
+                                {{ getResetCountdownText(
+                                  getCodexQuotaDisplay(key)?.spark_secondary_reset_at,
+                                  getCodexQuotaDisplay(key)?.spark_secondary_reset_seconds,
+                                  getCodexQuotaDisplay(key)?.updated_at,
+                                  getCodexQuotaDisplay(key)?.spark_secondary_used_percent
+                                ) }}
+                              </template>
+                              <template v-else>
+                                已重置
+                              </template>
+                            </div>
+                          </div>
+                          <div v-if="getCodexQuotaDisplay(key)?.spark_primary_used_percent !== undefined">
+                            <div class="flex items-center justify-between text-[10px] mb-0.5">
+                              <span class="text-muted-foreground">Spark 5H</span>
+                              <span :class="getQuotaRemainingClass(getCodexQuotaDisplay(key)?.spark_primary_used_percent || 0)">
+                                {{ (100 - (getCodexQuotaDisplay(key)?.spark_primary_used_percent || 0)).toFixed(1) }}%
+                              </span>
+                            </div>
+                            <div class="relative w-full h-1.5 bg-border rounded-full overflow-hidden">
+                              <div
+                                class="absolute left-0 top-0 h-full transition-all duration-300"
+                                :class="getQuotaRemainingBarColor(getCodexQuotaDisplay(key)?.spark_primary_used_percent || 0)"
+                                :style="{ width: `${Math.max(100 - (getCodexQuotaDisplay(key)?.spark_primary_used_percent || 0), 0)}%` }"
+                              />
+                            </div>
+                            <div
+                              v-if="shouldStartCodexResetCountdown(getCodexQuotaDisplay(key)?.spark_primary_used_percent || 0)"
+                              class="text-[9px] mt-0.5 tabular-nums"
+                              :class="getResetCountdownClass(
+                                getCodexQuotaDisplay(key)?.spark_primary_reset_at,
+                                getCodexQuotaDisplay(key)?.spark_primary_reset_seconds,
+                                getCodexQuotaDisplay(key)?.updated_at,
+                                getCodexQuotaDisplay(key)?.spark_primary_used_percent
+                              )"
+                            >
+                              <template v-if="getCodexQuotaDisplay(key)?.spark_primary_reset_at || getCodexQuotaDisplay(key)?.spark_primary_reset_seconds">
+                                {{ getResetCountdownText(
+                                  getCodexQuotaDisplay(key)?.spark_primary_reset_at,
+                                  getCodexQuotaDisplay(key)?.spark_primary_reset_seconds,
+                                  getCodexQuotaDisplay(key)?.updated_at,
+                                  getCodexQuotaDisplay(key)?.spark_primary_used_percent
+                                ) }}
+                              </template>
+                              <template v-else>
+                                已重置
+                              </template>
+                            </div>
                           </div>
                         </div>
                       </div>
@@ -1997,6 +2080,28 @@ function getCodexQuotaDisplay(key: EndpointAPIKey): CodexUpstreamMetadata | null
     display.secondary_window_minutes = secondaryWindow.window_minutes
   }
 
+  const sparkPrimaryWindow = getQuotaWindow(quota, 'spark_5h')
+  const sparkPrimaryUsedPercent = getQuotaWindowUsedPercent(sparkPrimaryWindow)
+  if (sparkPrimaryUsedPercent !== undefined) display.spark_primary_used_percent = sparkPrimaryUsedPercent
+  const sparkPrimaryResetAt = getQuotaWindowResetAt(sparkPrimaryWindow)
+  if (sparkPrimaryResetAt !== undefined) display.spark_primary_reset_at = sparkPrimaryResetAt
+  const sparkPrimaryResetSeconds = getQuotaWindowResetSeconds(sparkPrimaryWindow)
+  if (sparkPrimaryResetSeconds !== undefined) display.spark_primary_reset_seconds = sparkPrimaryResetSeconds
+  if (typeof sparkPrimaryWindow?.window_minutes === 'number') {
+    display.spark_primary_window_minutes = sparkPrimaryWindow.window_minutes
+  }
+
+  const sparkSecondaryWindow = getQuotaWindow(quota, 'spark_weekly')
+  const sparkSecondaryUsedPercent = getQuotaWindowUsedPercent(sparkSecondaryWindow)
+  if (sparkSecondaryUsedPercent !== undefined) display.spark_secondary_used_percent = sparkSecondaryUsedPercent
+  const sparkSecondaryResetAt = getQuotaWindowResetAt(sparkSecondaryWindow)
+  if (sparkSecondaryResetAt !== undefined) display.spark_secondary_reset_at = sparkSecondaryResetAt
+  const sparkSecondaryResetSeconds = getQuotaWindowResetSeconds(sparkSecondaryWindow)
+  if (sparkSecondaryResetSeconds !== undefined) display.spark_secondary_reset_seconds = sparkSecondaryResetSeconds
+  if (typeof sparkSecondaryWindow?.window_minutes === 'number') {
+    display.spark_secondary_window_minutes = sparkSecondaryWindow.window_minutes
+  }
+
   return Object.keys(display).length > 0 ? display : null
 }
 
@@ -2005,6 +2110,16 @@ function hasCodexQuotaDisplayData(key: EndpointAPIKey): boolean {
   return !!codex && (
     codex.primary_used_percent !== undefined
     || codex.secondary_used_percent !== undefined
+    || codex.spark_primary_used_percent !== undefined
+    || codex.spark_secondary_used_percent !== undefined
+  )
+}
+
+function hasCodexSparkQuotaDisplayData(key: EndpointAPIKey): boolean {
+  const codex = getCodexQuotaDisplay(key)
+  return !!codex && (
+    codex.spark_primary_used_percent !== undefined
+    || codex.spark_secondary_used_percent !== undefined
   )
 }
 

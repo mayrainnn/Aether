@@ -234,13 +234,19 @@ impl AppState {
                 .lock()
                 .expect("auth wallet store should lock")
                 .insert(wallet.id.clone(), wallet.clone());
+            self.invalidate_auth_context_cache();
             return Ok(Some(wallet));
         }
 
-        self.data
+        let wallet = self
+            .data
             .initialize_auth_user_wallet(user_id, initial_gift_usd, unlimited)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if wallet.is_some() {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(wallet)
     }
 
     pub(crate) async fn initialize_auth_api_key_wallet(
@@ -284,13 +290,19 @@ impl AppState {
                 .lock()
                 .expect("auth wallet store should lock")
                 .insert(wallet.id.clone(), wallet.clone());
+            self.invalidate_auth_context_cache();
             return Ok(Some(wallet));
         }
 
-        self.data
+        let wallet = self
+            .data
             .initialize_auth_api_key_wallet(api_key_id, initial_gift_usd, unlimited)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if wallet.is_some() {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(wallet)
     }
 
     pub(crate) async fn update_auth_user_wallet_limit_mode(
@@ -310,13 +322,21 @@ impl AppState {
             let _ = wallet_id;
             wallet.limit_mode = limit_mode.to_string();
             wallet.updated_at_unix_secs = chrono::Utc::now().timestamp().max(0) as u64;
-            return Ok(Some(wallet.clone()));
+            let wallet = wallet.clone();
+            drop(guard);
+            self.invalidate_auth_context_cache();
+            return Ok(Some(wallet));
         }
 
-        self.data
+        let wallet = self
+            .data
             .update_auth_user_wallet_limit_mode(user_id, limit_mode)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if wallet.is_some() {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(wallet)
     }
 
     pub(crate) async fn update_auth_api_key_wallet_limit_mode(
@@ -336,13 +356,21 @@ impl AppState {
             let _ = wallet_id;
             wallet.limit_mode = limit_mode.to_string();
             wallet.updated_at_unix_secs = chrono::Utc::now().timestamp().max(0) as u64;
-            return Ok(Some(wallet.clone()));
+            let wallet = wallet.clone();
+            drop(guard);
+            self.invalidate_auth_context_cache();
+            return Ok(Some(wallet));
         }
 
-        self.data
+        let wallet = self
+            .data
             .update_auth_api_key_wallet_limit_mode(api_key_id, limit_mode)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if wallet.is_some() {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(wallet)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -381,10 +409,14 @@ impl AppState {
             if let Some(updated_at_unix_secs) = updated_at_unix_secs {
                 wallet.updated_at_unix_secs = updated_at_unix_secs;
             }
-            return Ok(Some(wallet.clone()));
+            let wallet = wallet.clone();
+            drop(guard);
+            self.invalidate_auth_context_cache();
+            return Ok(Some(wallet));
         }
 
-        self.data
+        let wallet = self
+            .data
             .update_auth_user_wallet_snapshot(
                 user_id,
                 balance,
@@ -399,7 +431,11 @@ impl AppState {
                 updated_at_unix_secs,
             )
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if wallet.is_some() {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(wallet)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -438,10 +474,14 @@ impl AppState {
             if let Some(updated_at_unix_secs) = updated_at_unix_secs {
                 wallet.updated_at_unix_secs = updated_at_unix_secs;
             }
-            return Ok(Some(wallet.clone()));
+            let wallet = wallet.clone();
+            drop(guard);
+            self.invalidate_auth_context_cache();
+            return Ok(Some(wallet));
         }
 
-        self.data
+        let wallet = self
+            .data
             .update_auth_api_key_wallet_snapshot(
                 api_key_id,
                 balance,
@@ -456,6 +496,10 @@ impl AppState {
                 updated_at_unix_secs,
             )
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if wallet.is_some() {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(wallet)
     }
 }

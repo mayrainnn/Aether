@@ -13,6 +13,7 @@ pub(super) struct AdminMonitoringCacheAffinityRecord {
     pub(super) expire_at: Option<serde_json::Value>,
     pub(super) request_count: u64,
     pub(super) request_count_known: bool,
+    pub(super) scheduler_affinity_epoch: Option<u64>,
 }
 
 pub(super) struct AdminMonitoringCacheSnapshot {

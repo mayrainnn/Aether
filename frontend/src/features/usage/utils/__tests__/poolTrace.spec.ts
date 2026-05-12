@@ -24,7 +24,7 @@ function buildCandidate(
 }
 
 describe('poolTrace', () => {
-  it('keeps only pool nodes that actually participated in scheduling audit fallback', () => {
+  it('keeps pool audit nodes even when they were not attempted', () => {
     const attempts = buildPoolAttemptCandidatesFromAudit([], [
       {
         candidate_index: 0,
@@ -68,11 +68,13 @@ describe('poolTrace', () => {
       },
     ], 'req-1')
 
-    expect(attempts).toHaveLength(2)
+    expect(attempts).toHaveLength(3)
     expect(attempts[0].key_id).toBe('key-success')
     expect(attempts[0].status).toBe('success')
     expect(attempts[1].key_id).toBe('key-skipped')
     expect(attempts[1].status).toBe('skipped')
+    expect(attempts[2].key_id).toBe('key-available')
+    expect(attempts[2].status).toBe('available')
   })
 
   it('preserves real trace attempts even when audit status is non-standard', () => {

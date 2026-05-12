@@ -60,6 +60,48 @@ pub(crate) fn provider_oauth_runtime_endpoint_for_provider(
                     .find(|endpoint| endpoint.is_active)
                     .cloned()
             }),
+        "claude_code" => endpoints
+            .iter()
+            .find(|endpoint| {
+                endpoint.is_active
+                    && endpoint
+                        .api_format
+                        .trim()
+                        .eq_ignore_ascii_case("claude:messages")
+            })
+            .cloned(),
+        "gemini_cli" => endpoints
+            .iter()
+            .find(|endpoint| {
+                endpoint.is_active
+                    && endpoint
+                        .api_format
+                        .trim()
+                        .eq_ignore_ascii_case("gemini:generate_content")
+            })
+            .cloned(),
+        "vertex_ai" => endpoints
+            .iter()
+            .find(|endpoint| {
+                endpoint.is_active
+                    && endpoint
+                        .api_format
+                        .trim()
+                        .eq_ignore_ascii_case("gemini:generate_content")
+            })
+            .cloned()
+            .or_else(|| {
+                endpoints
+                    .iter()
+                    .find(|endpoint| {
+                        endpoint.is_active
+                            && endpoint
+                                .api_format
+                                .trim()
+                                .eq_ignore_ascii_case("claude:messages")
+                    })
+                    .cloned()
+            }),
         _ => endpoints
             .iter()
             .find(|endpoint| endpoint.is_active)

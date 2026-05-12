@@ -19,6 +19,7 @@ use serde_json::{json, Map, Value};
 
 use super::AiSurfaceFinalizeError;
 use crate::formats::gemini::generate_content::stream::GeminiProviderState;
+use crate::formats::shared::model_directives::model_directive_display_model_from_report_context;
 use crate::formats::shared::response::remove_empty_pages_from_tool_arguments;
 use crate::formats::shared::stream_core::common::{
     map_openai_finish_reason_to_gemini, parse_json_arguments_value, CanonicalContentPart,
@@ -382,7 +383,11 @@ fn maybe_build_standard_same_format_sync_body(
         return None;
     }
 
-    Some(body_json.clone())
+    Some(client_body_with_report_context_model(
+        body_json.clone(),
+        report_context,
+        &client_api_format,
+    ))
 }
 
 fn maybe_build_standard_same_format_stream_sync_body(
@@ -431,10 +436,11 @@ fn maybe_build_standard_same_format_stream_sync_body(
         return Ok(None);
     };
     let body_bytes = base64::engine::general_purpose::STANDARD.decode(body_base64)?;
-    Ok(aggregate_same_format_stream_sync_response(
-        expected_api_format,
-        &body_bytes,
-    ))
+    Ok(
+        aggregate_same_format_stream_sync_response(expected_api_format, &body_bytes).map(|body| {
+            client_body_with_report_context_model(body, report_context, &client_api_format)
+        }),
+    )
 }
 
 fn maybe_build_openai_responses_same_family_sync_body(
@@ -480,7 +486,11 @@ fn maybe_build_openai_responses_same_family_sync_body(
         return None;
     }
 
-    Some(body_json.clone())
+    Some(client_body_with_report_context_model(
+        body_json.clone(),
+        report_context,
+        &client_api_format,
+    ))
 }
 
 fn maybe_build_openai_responses_same_family_stream_sync_body(
@@ -528,7 +538,11 @@ fn maybe_build_openai_responses_same_family_stream_sync_body(
         return Ok(None);
     };
     let body_bytes = base64::engine::general_purpose::STANDARD.decode(body_base64)?;
-    Ok(aggregate_openai_responses_stream_sync_response(&body_bytes))
+    Ok(
+        aggregate_openai_responses_stream_sync_response(&body_bytes).map(|body| {
+            client_body_with_report_context_model(body, report_context, &client_api_format)
+        }),
+    )
 }
 
 fn maybe_build_openai_cross_format_provider_body_from_normalized_payload(
@@ -625,6 +639,8 @@ pub fn maybe_build_standard_cross_format_sync_product(
     } else {
         return None;
     };
+    let client_body_json =
+        client_body_with_report_context_model(client_body_json, report_context, &client_api_format);
 
     Some(StandardCrossFormatSyncProduct {
         client_body_json,
@@ -795,6 +811,30 @@ fn format_context_from_report_context(report_context: &Value) -> FormatContext {
         context = context.with_mapped_model(mapped_model);
     }
     context
+}
+
+fn client_body_with_report_context_model(
+    mut body_json: Value,
+    report_context: &Value,
+    client_api_format: &str,
+) -> Value {
+    let Some(display_model) = model_directive_display_model_from_report_context(report_context)
+    else {
+        return body_json;
+    };
+    let Some(object) = body_json.as_object_mut() else {
+        return body_json;
+    };
+    match normalize_openai_responses_family_api_format(client_api_format).as_str() {
+        "openai:chat" | "openai:responses" | "openai:responses:compact" | "claude:messages" => {
+            object.insert("model".to_string(), Value::String(display_model));
+        }
+        "gemini:generate_content" => {
+            object.insert("modelVersion".to_string(), Value::String(display_model));
+        }
+        _ => {}
+    }
+    body_json
 }
 
 fn convert_openai_chat_canonical_chat_response(
@@ -1195,6 +1235,10 @@ fn gemini_response_can_use_single_response_canonical(body_json: &Value) -> bool 
 }
 
 fn apply_report_context_model_fallback(model: &mut String, report_context: &Value) {
+    if let Some(display_model) = model_directive_display_model_from_report_context(report_context) {
+        *model = display_model;
+        return;
+    }
     if model != "unknown" && !model.trim().is_empty() {
         return;
     }
@@ -2881,6 +2925,7 @@ mod tests {
         maybe_build_openai_chat_cross_format_sync_product_from_normalized_payload,
         maybe_build_openai_responses_cross_format_sync_product_from_normalized_payload,
         maybe_build_openai_responses_same_family_sync_body_from_normalized_payload,
+        maybe_build_standard_cross_format_sync_product,
         maybe_build_standard_cross_format_sync_product_from_normalized_payload,
         maybe_build_standard_same_format_sync_body_from_normalized_payload,
         maybe_build_standard_sync_finalize_product_from_normalized_payload,
@@ -3220,6 +3265,75 @@ mod tests {
         .expect("body should exist");
 
         assert_eq!(body_json, provider_body_json);
+    }
+
+    #[test]
+    fn same_format_sync_response_restores_model_directive_display_model() {
+        let report_context = json!({
+            "provider_api_format": "openai:responses",
+            "client_api_format": "openai:responses",
+            "model": "gpt-5.5-xhigh",
+            "mapped_model": "gpt-5.5",
+            "needs_conversion": false,
+        });
+        let provider_body_json = json!({
+            "id": "resp_123",
+            "object": "response",
+            "model": "gpt-5.5",
+            "status": "completed",
+            "output": []
+        });
+
+        let product = maybe_build_standard_sync_finalize_product_from_normalized_payload(
+            "openai_responses_sync_finalize",
+            200,
+            Some(&report_context),
+            Some(&provider_body_json),
+            None,
+        )
+        .expect("same-format sync body should succeed")
+        .expect("body should exist");
+        let StandardSyncFinalizeNormalizedProduct::SuccessBody(body_json) = product else {
+            panic!("same-format response should be a success body");
+        };
+
+        assert_eq!(body_json["model"], "gpt-5.5-xhigh");
+    }
+
+    #[test]
+    fn cross_format_sync_response_restores_model_directive_display_model() {
+        let report_context = json!({
+            "provider_api_format": "openai:responses",
+            "client_api_format": "claude:messages",
+            "model": "gpt-5.5-xhigh",
+            "mapped_model": "gpt-5.5",
+            "needs_conversion": true,
+        });
+        let provider_body_json = json!({
+            "id": "resp_123",
+            "object": "response",
+            "model": "gpt-5.5",
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "id": "msg_123",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{ "type": "output_text", "text": "done" }]
+            }]
+        });
+
+        let product = maybe_build_standard_cross_format_sync_product(
+            "claude_cli_sync_finalize",
+            "openai:responses",
+            "claude:messages",
+            &report_context,
+            provider_body_json,
+        )
+        .expect("cross-format product should exist");
+
+        assert_eq!(product.client_body_json["model"], "gpt-5.5-xhigh");
+        assert_eq!(product.provider_body_json["model"], "gpt-5.5");
     }
 
     #[test]

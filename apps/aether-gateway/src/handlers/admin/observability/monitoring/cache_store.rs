@@ -157,6 +157,7 @@ async fn list_admin_monitoring_cache_affinity_records_matching(
             records.push(record);
         }
     };
+    let current_scheduler_affinity_epoch = state.as_ref().scheduler_affinity_epoch();
 
     {
         let patterns = affinity_keys
@@ -210,6 +211,13 @@ async fn list_admin_monitoring_cache_affinity_records_matching(
                     let Some(record) = record else {
                         continue;
                     };
+                    if key.contains("scheduler_affinity:")
+                        && record
+                            .scheduler_affinity_epoch
+                            .is_some_and(|epoch| epoch != current_scheduler_affinity_epoch)
+                    {
+                        continue;
+                    }
                     if affinity_keys.is_some_and(|keys| !keys.contains(&record.affinity_key)) {
                         continue;
                     }
@@ -237,6 +245,7 @@ async fn list_admin_monitoring_cache_affinity_records_matching(
         let Some(record) = admin_monitoring_scheduler_affinity_record(
             &entry.cache_key,
             &entry.target,
+            entry.epoch,
             entry.age,
             SCHEDULER_AFFINITY_TTL,
             now_unix_secs,

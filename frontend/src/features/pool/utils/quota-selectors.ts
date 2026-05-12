@@ -38,14 +38,20 @@ export function isDepletedQuotaSegment(segment: string): boolean {
   return false
 }
 
+function isSparkQuotaSegment(segment: string): boolean {
+  return /spark/.test(segment)
+}
+
 export function hasNoFiveHourLimit(accountQuota: string | null | undefined): boolean {
   return getQuotaSegments(accountQuota)
+    .filter((segment) => !isSparkQuotaSegment(segment))
     .filter((segment) => /5h|5小时/.test(segment))
     .some(isDepletedQuotaSegment)
 }
 
 export function hasNoWeeklyLimit(accountQuota: string | null | undefined): boolean {
   return getQuotaSegments(accountQuota)
+    .filter((segment) => !isSparkQuotaSegment(segment))
     .filter((segment) => /周|weekly|week/.test(segment))
     .some(isDepletedQuotaSegment)
 }

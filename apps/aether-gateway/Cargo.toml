@@ -16,6 +16,7 @@ aether-contracts.workspace = true
 aether-crypto.workspace = true
 aether-data.workspace = true
 aether-data-contracts.workspace = true
+aether-dispatch-core.workspace = true
 aether-http.workspace = true
 aether-model-fetch.workspace = true
 aether-oauth.workspace = true

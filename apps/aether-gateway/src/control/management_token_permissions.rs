@@ -339,9 +339,12 @@ pub(crate) fn validate_management_token_admin_route_permission(
         .and_then(|value| value.rsplit_once(':').map(|(scope, _)| scope))
         .unwrap_or_default();
     let admin_permission = format!("admin:{scope}:admin");
+    let has_full_assignable_access =
+        management_token_permissions_cover_all_assignable_permissions(token_permissions);
     if token_permissions
         .iter()
         .any(|permission| permission == &required_permission || permission == &admin_permission)
+        || (scope == "management_tokens" && has_full_assignable_access)
     {
         Ok(())
     } else {
@@ -468,6 +471,18 @@ fn is_assignable_management_token_permission(key: &str) -> bool {
         .any(|item| item.key == key)
 }
 
+pub(crate) fn management_token_permissions_cover_all_assignable_permissions(
+    token_permissions: &[String],
+) -> bool {
+    let permission_set = token_permissions
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    all_assignable_management_token_permissions()
+        .iter()
+        .all(|permission| permission_set.contains(permission.as_str()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -523,5 +538,103 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn catalog_covers_admin_route_signatures_from_route_sources() {
+        let route_sources = [
+            ("route/admin.rs", include_str!("route/admin.rs")),
+            ("route/oauth.rs", include_str!("route/oauth.rs")),
+            (
+                "route/public_support.rs",
+                include_str!("route/public_support.rs"),
+            ),
+            (
+                "route/admin/basic_families.rs",
+                include_str!("route/admin/basic_families.rs"),
+            ),
+            (
+                "route/admin/endpoints_families.rs",
+                include_str!("route/admin/endpoints_families.rs"),
+            ),
+            (
+                "route/admin/model_provider_families.rs",
+                include_str!("route/admin/model_provider_families.rs"),
+            ),
+            (
+                "route/admin/observability_families.rs",
+                include_str!("route/admin/observability_families.rs"),
+            ),
+            (
+                "route/admin/operations_families.rs",
+                include_str!("route/admin/operations_families.rs"),
+            ),
+            (
+                "route/admin/provider_ops_routes.rs",
+                include_str!("route/admin/provider_ops_routes.rs"),
+            ),
+            (
+                "route/admin/system_families.rs",
+                include_str!("route/admin/system_families.rs"),
+            ),
+        ];
+        let mut route_scopes = BTreeSet::new();
+
+        for (file, source) in route_sources {
+            for scope in extract_admin_route_scopes(source) {
+                assert!(
+                    is_known_management_token_permission_scope(scope),
+                    "missing management token permission scope {scope} referenced by {file}"
+                );
+                route_scopes.insert(scope);
+            }
+        }
+
+        assert!(
+            !route_scopes.is_empty(),
+            "admin route scope scanner did not find any route signatures"
+        );
+    }
+
+    #[test]
+    fn full_assignable_token_permissions_can_cover_management_tokens_scope() {
+        let decision = GatewayControlDecision::synthetic(
+            "/api/admin/management-tokens".to_string(),
+            Some("admin_proxy".to_string()),
+            Some("management_tokens_manage".to_string()),
+            Some("list_tokens".to_string()),
+            Some("admin:management_tokens".to_string()),
+        );
+        let permissions = all_assignable_management_token_permissions();
+
+        assert!(validate_management_token_admin_route_permission(
+            &http::Method::GET,
+            &decision,
+            Some(&permissions),
+        )
+        .is_ok());
+    }
+
+    fn extract_admin_route_scopes(source: &'static str) -> BTreeSet<&'static str> {
+        let mut scopes = BTreeSet::new();
+        let mut remaining = source;
+
+        while let Some(start) = remaining.find("\"admin:") {
+            let signature_start = start + 1;
+            let after_start = &remaining[signature_start..];
+            let Some(end) = after_start.find('"') else {
+                break;
+            };
+            let signature = &after_start[..end];
+            let mut parts = signature.split(':');
+            if parts.next() == Some("admin") {
+                if let (Some(scope), None) = (parts.next(), parts.next()) {
+                    scopes.insert(scope);
+                }
+            }
+            remaining = &after_start[end + 1..];
+        }
+
+        scopes
     }
 }

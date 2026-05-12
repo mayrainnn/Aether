@@ -265,8 +265,8 @@ async fn admin_monitoring_cache_stats_count_runtime_scheduler_affinities() {
             "model-alpha",
         )
         .expect("scheduler affinity cache key should build");
-    state.scheduler_affinity_cache.insert(
-        affinity_cache_key,
+    state.remember_scheduler_affinity_target(
+        &affinity_cache_key,
         crate::cache::SchedulerAffinityTarget {
             provider_id: "provider-1".to_string(),
             endpoint_id: "endpoint-1".to_string(),

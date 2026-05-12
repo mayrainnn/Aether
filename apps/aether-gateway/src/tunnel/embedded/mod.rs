@@ -13,6 +13,7 @@ use aether_runtime::{
 use aether_runtime_state::{RuntimeSemaphore, RuntimeSemaphoreError, RuntimeSemaphoreSnapshot};
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Json};
 use axum::routing::{get, post};
 use axum::Router;
@@ -193,7 +194,7 @@ async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
 pub async fn ws_proxy(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
     let node_id = headers
         .get("x-node-id")
@@ -209,12 +210,7 @@ pub async fn ws_proxy(
         .trim()
         .to_string();
 
-    let max_streams: usize = headers
-        .get("x-tunnel-max-streams")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(state.max_streams)
-        .clamp(64, 2048);
+    let max_streams = resolve_proxy_max_streams(&headers, state.max_streams);
 
     if node_id.is_empty() {
         warn!("proxy connection rejected: missing X-Node-ID header");
@@ -261,4 +257,36 @@ pub async fn ws_proxy(
             })
         })
         .into_response()
+}
+
+fn resolve_proxy_max_streams(headers: &HeaderMap, fallback: usize) -> usize {
+    headers
+        .get("x-tunnel-max-streams")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(fallback)
+        .clamp(1, 2048)
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::{HeaderMap, HeaderValue};
+
+    use super::resolve_proxy_max_streams;
+
+    #[test]
+    fn proxy_max_streams_honors_small_advertised_capacity() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-tunnel-max-streams", HeaderValue::from_static("8"));
+
+        assert_eq!(resolve_proxy_max_streams(&headers, 128), 8);
+    }
+
+    #[test]
+    fn proxy_max_streams_caps_unreasonably_large_capacity() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-tunnel-max-streams", HeaderValue::from_static("9999"));
+
+        assert_eq!(resolve_proxy_max_streams(&headers, 128), 2048);
+    }
 }

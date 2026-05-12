@@ -23,6 +23,12 @@ use crate::{hardware, target_filter, tunnel};
 
 type TaskHandles = Arc<Mutex<Vec<JoinHandle<()>>>>;
 
+const AUTO_STREAM_LIMIT_MIN: usize = 16;
+const AUTO_STREAM_LIMIT_MAX: usize = 512;
+const AUTO_STREAM_LIMIT_PER_CPU: u64 = 64;
+const AUTO_STREAM_LIMIT_MEMORY_MB_PER_STREAM: u64 = 4;
+const AUTO_STREAM_LIMIT_ESTIMATED_DIVISOR: u64 = 40;
+
 #[derive(Debug, Clone, Copy)]
 struct TunnelPoolPolicy {
     min_connections: usize,
@@ -120,13 +126,25 @@ pub async fn run(mut config: Config, servers: Vec<ServerEntry>) -> anyhow::Resul
     // Collect hardware info (once at startup, sent during registration)
     let hw_info = hardware::collect();
 
+    if config.max_in_flight_streams.is_none() {
+        let auto = auto_max_in_flight_streams(&hw_info);
+        config.max_in_flight_streams = Some(auto);
+        info!(
+            max_in_flight_streams = auto,
+            "auto-detected max_in_flight_streams from hardware"
+        );
+    }
+
     // Auto-detect tunnel_max_streams from hardware if not explicitly set
     if config.tunnel_max_streams.is_none() {
-        let auto = (hw_info.estimated_max_concurrency / 10).clamp(64, 1024) as u32;
+        let stream_limit = config
+            .max_in_flight_streams
+            .unwrap_or_else(|| auto_max_in_flight_streams(&hw_info));
+        let auto = stream_limit.clamp(1, 1024) as u32;
         config.tunnel_max_streams = Some(auto);
         info!(
             tunnel_max_streams = auto,
-            "auto-detected tunnel_max_streams from hardware"
+            "auto-detected tunnel_max_streams from stream admission limit"
         );
     }
     let tunnel_pool_sizing = config.resolve_tunnel_pool_sizing(&hw_info)?;
@@ -158,6 +176,7 @@ pub async fn run(mut config: Config, servers: Vec<ServerEntry>) -> anyhow::Resul
     // Build a profile-keyed Hyper client pool for tunnel upstream requests.
     let upstream_client_pool =
         upstream_client::UpstreamClientPool::new(Arc::clone(&config), Arc::clone(&dns_cache));
+    let resource_monitor = Arc::new(hardware::RuntimeResourceMonitor::new());
 
     // Register with each Aether server and build per-server contexts.
     // Wrapped in Arc<Mutex> so retry_failed_registrations can append later.
@@ -218,6 +237,7 @@ pub async fn run(mut config: Config, servers: Vec<ServerEntry>) -> anyhow::Resul
         dns_cache,
         upstream_client_pool,
         tunnel_tls_config,
+        resource_monitor,
         stream_gate: None,
         distributed_stream_gate: None,
     };
@@ -443,6 +463,22 @@ fn registration_retry_policy(config: &Config) -> HttpRetryConfig {
         max_delay_ms: config.aether_retry_max_delay_ms,
     }
     .normalized()
+}
+
+fn auto_max_in_flight_streams(hw_info: &crate::hardware::HardwareInfo) -> usize {
+    let by_cpu = u64::from(hw_info.cpu_cores.max(1)).saturating_mul(AUTO_STREAM_LIMIT_PER_CPU);
+    let by_memory = hw_info
+        .total_memory_mb
+        .max(AUTO_STREAM_LIMIT_MEMORY_MB_PER_STREAM)
+        / AUTO_STREAM_LIMIT_MEMORY_MB_PER_STREAM;
+    let by_estimate = hw_info
+        .estimated_max_concurrency
+        .max(AUTO_STREAM_LIMIT_ESTIMATED_DIVISOR)
+        / AUTO_STREAM_LIMIT_ESTIMATED_DIVISOR;
+    let raw = by_cpu.min(by_memory).min(by_estimate).max(1);
+    usize::try_from(raw)
+        .unwrap_or(AUTO_STREAM_LIMIT_MAX)
+        .clamp(AUTO_STREAM_LIMIT_MIN, AUTO_STREAM_LIMIT_MAX)
 }
 
 fn build_server_context(
@@ -843,6 +879,32 @@ mod tests {
         assert!(!should_scale_down(200, 1, &policy));
     }
 
+    #[test]
+    fn auto_stream_limit_is_conservative_for_tiny_nodes() {
+        let hw = HardwareInfo {
+            cpu_cores: 1,
+            total_memory_mb: 183,
+            os_info: "test".to_string(),
+            fd_limit: 65_535,
+            estimated_max_concurrency: 2_000,
+        };
+
+        assert_eq!(auto_max_in_flight_streams(&hw), 45);
+    }
+
+    #[test]
+    fn auto_stream_limit_caps_large_nodes() {
+        let hw = HardwareInfo {
+            cpu_cores: 64,
+            total_memory_mb: 262_144,
+            os_info: "test".to_string(),
+            fd_limit: 1_048_576,
+            estimated_max_concurrency: 500_000,
+        };
+
+        assert_eq!(auto_max_in_flight_streams(&hw), AUTO_STREAM_LIMIT_MAX);
+    }
+
     async fn wait_for_registered_server(
         server_contexts: &Arc<Mutex<Vec<Arc<ServerContext>>>>,
     ) -> Arc<ServerContext> {
@@ -947,6 +1009,7 @@ mod tests {
             dns_cache,
             upstream_client_pool,
             tunnel_tls_config: Arc::new(crate::tunnel::client::build_tls_config()),
+            resource_monitor: Arc::new(crate::hardware::RuntimeResourceMonitor::new()),
             stream_gate: None,
             distributed_stream_gate: None,
         })

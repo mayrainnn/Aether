@@ -2,6 +2,9 @@ use std::collections::BTreeMap;
 
 use aether_admin::provider::quota as admin_provider_quota_pure;
 use aether_contracts::{ExecutionPlan, ExecutionTelemetry};
+use aether_data_contracts::repository::pool_scores::{
+    PoolMemberHardState, PoolMemberIdentity, PoolMemberScheduleFeedback,
+};
 use aether_scheduler_core::{
     build_scheduler_affinity_cache_key_for_api_key_id_with_client_session,
     count_recent_rpm_requests_for_provider_key, ClientSessionAffinity, SchedulerAffinityTarget,
@@ -27,9 +30,11 @@ use crate::handlers::shared::provider_pool::admin_provider_pool_config_from_conf
 use crate::handlers::shared::provider_pool::{
     admin_provider_pool_key_circuit_breaker_reason, record_admin_provider_pool_error,
     record_admin_provider_pool_stream_timeout, record_admin_provider_pool_success,
-    AdminProviderPoolConfig,
+    release_admin_provider_pool_key_lease, AdminProviderPoolConfig,
 };
+use crate::orchestration::local_execution_candidate_metadata_from_report_context;
 use crate::scheduler::affinity::SCHEDULER_AFFINITY_TTL;
+use crate::scheduler::config::{read_scheduler_ordering_config, SchedulerSchedulingMode};
 use crate::AppState;
 
 #[derive(Debug, Clone, Copy)]
@@ -129,16 +134,37 @@ pub(crate) async fn apply_local_execution_effect(
         }
         LocalExecutionEffect::PoolSuccessSync { payload } => {
             record_sync_pool_success_effect(state, context, payload).await;
+            release_pool_key_lease_effect(state, context).await;
         }
         LocalExecutionEffect::PoolSuccessStream { payload } => {
             record_stream_pool_success_effect(state, context, payload).await;
+            release_pool_key_lease_effect(state, context).await;
         }
         LocalExecutionEffect::PoolError(effect) => {
             record_pool_error_effect(state, context, effect).await;
+            release_pool_key_lease_effect(state, context).await;
         }
         LocalExecutionEffect::PoolStreamTimeout => {
             record_pool_stream_timeout_effect(state, context).await;
+            release_pool_key_lease_effect(state, context).await;
         }
+    }
+}
+
+async fn release_pool_key_lease_effect(state: &AppState, context: LocalExecutionEffectContext<'_>) {
+    let metadata = local_execution_candidate_metadata_from_report_context(context.report_context);
+    let Some(lease) = metadata.pool_key_lease else {
+        return;
+    };
+    if let Err(err) =
+        release_admin_provider_pool_key_lease(state.runtime_state.as_ref(), &lease).await
+    {
+        warn!(
+            error = ?err,
+            provider_id = %context.plan.provider_id,
+            key_id = %context.plan.key_id,
+            "gateway orchestration effects: failed to release pool key lease"
+        );
     }
 }
 
@@ -216,22 +242,44 @@ fn local_scheduler_affinity_target(plan: &ExecutionPlan) -> Option<SchedulerAffi
     })
 }
 
-fn remember_successful_local_scheduler_affinity(
+async fn scheduler_cache_affinity_enabled(state: &AppState) -> bool {
+    match read_scheduler_ordering_config(state).await {
+        Ok(config) => config.scheduling_mode == SchedulerSchedulingMode::CacheAffinity,
+        Err(error) => {
+            warn!(
+                event_name = "orchestration_scheduler_affinity_config_load_failed",
+                log_type = "event",
+                error = ?error,
+                "failed to load scheduler config while checking cache affinity mode"
+            );
+            SchedulerSchedulingMode::default() == SchedulerSchedulingMode::CacheAffinity
+        }
+    }
+}
+
+async fn remember_successful_local_scheduler_affinity(
     state: &AppState,
     context: LocalExecutionEffectContext<'_>,
 ) {
+    if !scheduler_cache_affinity_enabled(state).await {
+        return;
+    }
     let Some(cache_key) = local_scheduler_affinity_cache_key(context.report_context) else {
         return;
     };
     let Some(target) = local_scheduler_affinity_target(context.plan) else {
         return;
     };
+    let expected_epoch =
+        local_execution_candidate_metadata_from_report_context(context.report_context)
+            .scheduler_affinity_epoch;
 
-    state.remember_scheduler_affinity_target(
+    let _ = state.remember_scheduler_affinity_target_for_epoch(
         &cache_key,
         target,
         SCHEDULER_AFFINITY_TTL,
         LOCAL_EXECUTION_SCHEDULER_AFFINITY_MAX_ENTRIES,
+        expected_epoch,
     );
 }
 
@@ -334,6 +382,19 @@ async fn record_sync_pool_success_effect(
         pool_context.sticky_session_token.as_deref(),
         total_tokens_used(&usage_outcome),
         resolve_ttfb_ms(payload.telemetry.as_ref()),
+    )
+    .await;
+    record_pool_score_schedule_feedback(
+        state,
+        context,
+        Some(true),
+        Some(PoolMemberHardState::Available),
+        Some(50),
+        serde_json::json!({
+            "last_request_feedback": {
+                "source": "sync_success"
+            }
+        }),
     )
     .await;
 }
@@ -490,7 +551,7 @@ async fn record_health_success_effect(
     context: LocalExecutionEffectContext<'_>,
     _effect: LocalHealthSuccessEffect,
 ) {
-    remember_successful_local_scheduler_affinity(state, context);
+    remember_successful_local_scheduler_affinity(state, context).await;
 
     let api_format = context.plan.provider_api_format.trim();
     if api_format.is_empty() {
@@ -555,6 +616,19 @@ async fn record_stream_pool_success_effect(
         resolve_ttfb_ms(payload.telemetry.as_ref()),
     )
     .await;
+    record_pool_score_schedule_feedback(
+        state,
+        context,
+        Some(true),
+        Some(PoolMemberHardState::Available),
+        Some(50),
+        serde_json::json!({
+            "last_request_feedback": {
+                "source": "stream_success"
+            }
+        }),
+    )
+    .await;
 }
 
 async fn record_pool_error_effect(
@@ -589,6 +663,21 @@ async fn record_pool_error_effect(
         effect.status_code,
         effect.error_body,
         Some(effect.headers),
+    )
+    .await;
+    record_pool_score_schedule_feedback(
+        state,
+        context,
+        Some(false),
+        pool_score_hard_state_for_status(effect.status_code, effect.error_body),
+        Some(pool_score_delta_for_status(effect.status_code)),
+        serde_json::json!({
+            "last_request_feedback": {
+                "source": "pool_error",
+                "status_code": effect.status_code,
+                "classification": format!("{:?}", effect.classification)
+            }
+        }),
     )
     .await;
 }
@@ -685,6 +774,21 @@ async fn record_oauth_invalidation_effect(
             plan.provider_id, plan.endpoint_id, plan.key_id, err
         );
     }
+    record_pool_score_schedule_feedback(
+        state,
+        context,
+        Some(false),
+        Some(PoolMemberHardState::AuthInvalid),
+        Some(-2_000),
+        serde_json::json!({
+            "last_request_feedback": {
+                "source": "oauth_invalidation",
+                "status_code": effect.status_code,
+                "reason": invalid_reason
+            }
+        }),
+    )
+    .await;
 }
 
 fn resolve_local_oauth_invalid_reason(
@@ -747,6 +851,92 @@ async fn record_pool_stream_timeout_effect(
         &pool_context.pool_config,
     )
     .await;
+    record_pool_score_schedule_feedback(
+        state,
+        context,
+        Some(false),
+        Some(PoolMemberHardState::Cooldown),
+        Some(-250),
+        serde_json::json!({
+            "last_request_feedback": {
+                "source": "stream_timeout"
+            }
+        }),
+    )
+    .await;
+}
+
+async fn record_pool_score_schedule_feedback(
+    state: &AppState,
+    context: LocalExecutionEffectContext<'_>,
+    succeeded: Option<bool>,
+    hard_state: Option<PoolMemberHardState>,
+    score_delta: Option<i32>,
+    score_reason_patch: Value,
+) {
+    if context.plan.provider_id.trim().is_empty() || context.plan.key_id.trim().is_empty() {
+        return;
+    }
+    let feedback = PoolMemberScheduleFeedback {
+        identity: PoolMemberIdentity::provider_api_key(
+            context.plan.provider_id.clone(),
+            context.plan.key_id.clone(),
+        ),
+        scope: None,
+        scheduled_at: current_unix_secs(),
+        succeeded,
+        hard_state,
+        score_delta,
+        score_reason_patch: Some(score_reason_patch),
+    };
+    if let Err(err) = state
+        .data
+        .record_pool_member_schedule_feedback(feedback)
+        .await
+    {
+        warn!(
+            provider_id = %context.plan.provider_id,
+            key_id = %context.plan.key_id,
+            error = ?err,
+            "gateway orchestration effects: failed to record pool score schedule feedback"
+        );
+    }
+}
+
+fn pool_score_hard_state_for_status(
+    status_code: u16,
+    error_body: Option<&str>,
+) -> Option<PoolMemberHardState> {
+    match status_code {
+        401 | 403 => Some(PoolMemberHardState::AuthInvalid),
+        402 => Some(PoolMemberHardState::QuotaExhausted),
+        429 | 500..=599 => Some(PoolMemberHardState::Cooldown),
+        _ => {
+            let body = error_body.unwrap_or_default().to_ascii_lowercase();
+            if body.contains("quota") && body.contains("exceed") {
+                Some(PoolMemberHardState::QuotaExhausted)
+            } else if body.contains("invalid") && body.contains("token") {
+                Some(PoolMemberHardState::AuthInvalid)
+            } else if body.contains("banned")
+                || body.contains("suspended")
+                || body.contains("blocked")
+            {
+                Some(PoolMemberHardState::Banned)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn pool_score_delta_for_status(status_code: u16) -> i32 {
+    match status_code {
+        401 | 403 => -2_000,
+        402 => -1_000,
+        429 => -500,
+        500..=599 => -300,
+        _ => -100,
+    }
 }
 
 #[cfg(test)]
@@ -1143,8 +1333,8 @@ mod tests {
             build_scheduler_affinity_cache_key_for_api_key_id("api-key-1", "openai:chat", "gpt-5")
                 .expect("scheduler affinity cache key should build");
 
-        state.scheduler_affinity_cache.insert(
-            cache_key.clone(),
+        state.remember_scheduler_affinity_target(
+            &cache_key,
             SchedulerAffinityTarget {
                 provider_id: "prov-1".to_string(),
                 endpoint_id: "ep-1".to_string(),
@@ -1186,8 +1376,8 @@ mod tests {
                 .expect("legacy scheduler affinity cache key should build");
 
         for cache_key in [&session_cache_key, &legacy_cache_key] {
-            state.scheduler_affinity_cache.insert(
-                cache_key.to_string(),
+            state.remember_scheduler_affinity_target(
+                cache_key.as_str(),
                 SchedulerAffinityTarget {
                     provider_id: "prov-1".to_string(),
                     endpoint_id: "ep-1".to_string(),
@@ -1232,8 +1422,8 @@ mod tests {
             build_scheduler_affinity_cache_key_for_api_key_id("api-key-1", "openai:chat", "gpt-5")
                 .expect("scheduler affinity cache key should build");
 
-        state.scheduler_affinity_cache.insert(
-            cache_key.clone(),
+        state.remember_scheduler_affinity_target(
+            &cache_key,
             SchedulerAffinityTarget {
                 provider_id: "prov-1".to_string(),
                 endpoint_id: "ep-1".to_string(),
@@ -1274,8 +1464,8 @@ mod tests {
             build_scheduler_affinity_cache_key_for_api_key_id("api-key-1", "openai:chat", "gpt-5")
                 .expect("scheduler affinity cache key should build");
 
-        state.scheduler_affinity_cache.insert(
-            cache_key.clone(),
+        state.remember_scheduler_affinity_target(
+            &cache_key,
             SchedulerAffinityTarget {
                 provider_id: "prov-1".to_string(),
                 endpoint_id: "ep-1".to_string(),
@@ -1337,6 +1527,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_balance_success_does_not_remember_scheduler_affinity_cache() {
+        let state = AppState::new()
+            .expect("gateway state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::disabled().with_system_config_values_for_tests(vec![(
+                    "scheduling_mode".to_string(),
+                    json!("load_balance"),
+                )]),
+            );
+        let plan = sample_plan();
+        let report_context = json!({
+            "api_key_id": "api-key-1",
+            "client_api_format": "openai:chat",
+            "model": "gpt-5",
+        });
+        let cache_key =
+            build_scheduler_affinity_cache_key_for_api_key_id("api-key-1", "openai:chat", "gpt-5")
+                .expect("scheduler affinity cache key should build");
+
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: Some(&report_context),
+            },
+            LocalExecutionEffect::HealthSuccess(LocalHealthSuccessEffect),
+        )
+        .await;
+
+        assert!(state
+            .read_scheduler_affinity_target(cache_key.as_str(), SCHEDULER_AFFINITY_TTL)
+            .is_none());
+    }
+
+    #[tokio::test]
     async fn success_remembers_session_scoped_scheduler_affinity_cache() {
         let state = AppState::new().expect("gateway state should build");
         let plan = sample_plan();
@@ -1387,8 +1612,8 @@ mod tests {
             build_scheduler_affinity_cache_key_for_api_key_id("api-key-1", "openai:chat", "gpt-5")
                 .expect("scheduler affinity cache key should build");
 
-        state.scheduler_affinity_cache.insert(
-            cache_key.clone(),
+        state.remember_scheduler_affinity_target(
+            &cache_key,
             SchedulerAffinityTarget {
                 provider_id: "prov-1".to_string(),
                 endpoint_id: "ep-1".to_string(),

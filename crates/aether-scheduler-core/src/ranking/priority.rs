@@ -34,19 +34,3 @@ pub(super) fn compare_candidate_priority_slot(
             .then(left.key_internal_priority.cmp(&right.key_internal_priority)),
     }
 }
-
-pub(super) fn candidates_share_priority_group(
-    left: &SchedulerRankableCandidate,
-    right: &SchedulerRankableCandidate,
-    priority_mode: SchedulerPriorityMode,
-) -> bool {
-    match priority_mode {
-        SchedulerPriorityMode::Provider => {
-            left.provider_priority == right.provider_priority
-                && left.key_internal_priority == right.key_internal_priority
-        }
-        SchedulerPriorityMode::GlobalKey => {
-            left.key_global_priority_for_format == right.key_global_priority_for_format
-        }
-    }
-}

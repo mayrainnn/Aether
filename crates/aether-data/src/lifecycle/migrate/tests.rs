@@ -295,6 +295,12 @@ fn empty_database_snapshot_covers_current_cutoff_versions() {
             20260507120000,
             20260508000000,
             20260509000000,
+            20260509120000,
+            20260510000000,
+            20260510120000,
+            20260511000000,
+            20260511120000,
+            20260511130000,
         ]
     );
 }
@@ -393,6 +399,44 @@ fn provider_api_keys_api_formats_remains_nullable_in_baselines() {
     assert!(auth_mismatch_migration
         .sql
         .contains("pak.allow_auth_channel_mismatch_formats IS NULL"));
+}
+
+#[test]
+fn management_tokens_json_columns_are_normalized_to_jsonb_in_postgres_schema_paths() {
+    let normalization_migration = POSTGRES_MIGRATOR
+        .iter()
+        .find(|migration| migration.version == 20260510000000)
+        .expect("management token jsonb normalization migration should be embedded");
+    assert!(normalization_migration
+        .sql
+        .contains("ALTER COLUMN allowed_ips TYPE jsonb USING allowed_ips::jsonb"));
+    assert!(normalization_migration
+        .sql
+        .contains("ALTER COLUMN permissions TYPE jsonb USING permissions::jsonb"));
+    assert!(normalization_migration
+        .sql
+        .contains("jsonb_array_length(allowed_ips) > 0"));
+
+    assert!(EMPTY_DATABASE_SNAPSHOT_SQL.contains("allowed_ips jsonb,"));
+    assert!(EMPTY_DATABASE_SNAPSHOT_SQL.contains("permissions jsonb,"));
+    assert!(EMPTY_DATABASE_SNAPSHOT_SQL.contains("jsonb_array_length(allowed_ips)"));
+
+    let bootstrap_schema =
+        include_str!("../../../schema/bootstrap/postgres/001_types_and_tables.sql");
+    assert!(bootstrap_schema.contains("allowed_ips jsonb,"));
+    assert!(bootstrap_schema.contains("permissions jsonb,"));
+    assert!(bootstrap_schema.contains("jsonb_array_length(allowed_ips)"));
+
+    let driver_schema =
+        include_str!("../../../schema/drivers/postgres/baseline/001_types_and_tables.sql");
+    assert!(driver_schema.contains("allowed_ips jsonb,"));
+    assert!(driver_schema.contains("permissions jsonb,"));
+    assert!(driver_schema.contains("jsonb_array_length(allowed_ips)"));
+
+    let generated_identity =
+        include_str!("../../../schema/generated/postgres/baseline/001_identity.sql");
+    assert!(generated_identity.contains("allowed_ips jsonb,"));
+    assert!(generated_identity.contains("permissions jsonb,"));
 }
 
 #[test]
@@ -518,7 +562,11 @@ fn mysql_and_sqlite_migrations_include_enabled_incrementals() {
             20260403000000,
             20260507120000,
             20260508000000,
-            20260509000000
+            20260509000000,
+            20260509120000,
+            20260510120000,
+            20260511120000,
+            20260511130000,
         ]
     );
     assert_eq!(
@@ -527,7 +575,11 @@ fn mysql_and_sqlite_migrations_include_enabled_incrementals() {
             20260403000000,
             20260507120000,
             20260508000000,
-            20260509000000
+            20260509000000,
+            20260509120000,
+            20260510120000,
+            20260511120000,
+            20260511130000,
         ]
     );
 }
@@ -1034,6 +1086,12 @@ fn pending_migrations_from_applied_skips_versions_already_applied() {
             20260507120000,
             20260508000000,
             20260509000000,
+            20260509120000,
+            20260510000000,
+            20260510120000,
+            20260511000000,
+            20260511120000,
+            20260511130000,
         ]
     );
 }

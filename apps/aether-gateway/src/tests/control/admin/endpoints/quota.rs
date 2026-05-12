@@ -830,6 +830,233 @@ async fn gateway_refreshes_admin_provider_quota_locally_for_kiro_with_trusted_ad
 }
 
 #[tokio::test]
+async fn gateway_refresh_kiro_quota_reconciles_missing_fixed_endpoint_before_refresh() {
+    let seen_endpoint_id = Arc::new(Mutex::new(None::<String>));
+    let seen_endpoint_id_clone = Arc::clone(&seen_endpoint_id);
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |request: Request| {
+            let seen_endpoint_id_inner = Arc::clone(&seen_endpoint_id_clone);
+            async move {
+                let plan: aether_contracts::ExecutionPlan = serde_json::from_slice(
+                    &to_bytes(request.into_body(), usize::MAX)
+                        .await
+                        .expect("body should read"),
+                )
+                .expect("plan should parse");
+                *seen_endpoint_id_inner.lock().expect("mutex should lock") =
+                    Some(plan.endpoint_id.clone());
+                let result = aether_contracts::ExecutionResult {
+                    request_id: plan.request_id,
+                    candidate_id: None,
+                    status_code: 200,
+                    headers: BTreeMap::new(),
+                    body: Some(aether_contracts::ResponseBody {
+                        json_body: Some(json!({
+                            "subscriptionInfo": {
+                                "subscriptionTitle": "KIRO PRO"
+                            },
+                            "usageBreakdownList": [{
+                                "currentUsageWithPrecision": 1.0,
+                                "usageLimitWithPrecision": 10.0,
+                                "nextDateReset": 1_900_000_000u64
+                            }]
+                        })),
+                        body_bytes_b64: None,
+                    }),
+                    telemetry: None,
+                    error: None,
+                };
+                (StatusCode::OK, Json(result))
+            }
+        }),
+    );
+
+    let encrypted_auth_config = encrypt_python_fernet_plaintext(
+        DEVELOPMENT_ENCRYPTION_KEY,
+        r#"{"access_token":"kiro-access-token","api_region":"us-west-2"}"#,
+    )
+    .expect("auth config ciphertext should build");
+    let encrypted_api_key =
+        encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "__placeholder__")
+            .expect("api key ciphertext should build");
+    let key = StoredProviderCatalogKey::new(
+        "key-kiro-reconcile".to_string(),
+        "provider-kiro-reconcile".to_string(),
+        "default".to_string(),
+        "bearer".to_string(),
+        None,
+        true,
+    )
+    .expect("key should build")
+    .with_transport_fields(
+        Some(json!(["claude:messages"])),
+        encrypted_api_key,
+        Some(encrypted_auth_config),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .expect("key transport should build");
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![StoredProviderCatalogProvider::new(
+            "provider-kiro-reconcile".to_string(),
+            "kiro".to_string(),
+            Some("https://example.com".to_string()),
+            "kiro".to_string(),
+        )
+        .expect("provider should build")],
+        Vec::new(),
+        vec![key],
+    ));
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url.clone())
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(
+                    provider_catalog_repository.clone(),
+                )
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/endpoints/providers/provider-kiro-reconcile/refresh-quota"
+        ))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["success"], 1);
+    assert_eq!(payload["failed"], 0);
+    assert_eq!(payload["results"][0]["status"], "success");
+
+    let endpoints = provider_catalog_repository
+        .list_endpoints_by_provider_ids(&["provider-kiro-reconcile".to_string()])
+        .await
+        .expect("endpoints should read");
+    assert_eq!(endpoints.len(), 1);
+    assert_eq!(endpoints[0].api_format, "claude:messages");
+    assert_eq!(endpoints[0].base_url, "https://q.{region}.amazonaws.com");
+    assert_eq!(
+        *seen_endpoint_id.lock().expect("mutex should lock"),
+        Some(endpoints[0].id.clone())
+    );
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_refresh_quota_reconciles_unsupported_fixed_provider_endpoints_before_clear_message(
+) {
+    let cases = [
+        (
+            "provider-claude-code-reconcile",
+            "claude_code",
+            1usize,
+            "claude:messages",
+            "https://api.anthropic.com",
+            "Claude Code 暂不支持自动刷新额度",
+        ),
+        (
+            "provider-gemini-cli-reconcile",
+            "gemini_cli",
+            1usize,
+            "gemini:generate_content",
+            "https://cloudcode-pa.googleapis.com",
+            "Gemini CLI 暂不支持自动刷新额度",
+        ),
+        (
+            "provider-vertex-ai-reconcile",
+            "vertex_ai",
+            2usize,
+            "gemini:generate_content",
+            "https://aiplatform.googleapis.com",
+            "Vertex AI 暂不支持自动刷新额度",
+        ),
+    ];
+
+    let providers = cases
+        .iter()
+        .map(|(provider_id, provider_type, _, _, _, _)| {
+            StoredProviderCatalogProvider::new(
+                (*provider_id).to_string(),
+                (*provider_type).to_string(),
+                Some("https://example.com".to_string()),
+                (*provider_type).to_string(),
+            )
+            .expect("provider should build")
+        })
+        .collect::<Vec<_>>();
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        providers,
+        Vec::new(),
+        Vec::new(),
+    ));
+
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override("http://127.0.0.1:1")
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(
+                    provider_catalog_repository.clone(),
+                )
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+
+    for (provider_id, _, endpoint_count, api_format, base_url, message_prefix) in cases {
+        let response = client
+            .post(format!(
+                "{gateway_url}/api/admin/endpoints/providers/{provider_id}/refresh-quota"
+            ))
+            .header(GATEWAY_HEADER, "rust-phase3b")
+            .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+            .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+            .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+            .send()
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload: serde_json::Value = response.json().await.expect("json body should parse");
+        assert_eq!(payload["success"], 0);
+        assert_eq!(payload["failed"], 0);
+        assert_eq!(payload["total"], 0);
+        assert!(payload["message"]
+            .as_str()
+            .expect("message should be string")
+            .starts_with(message_prefix));
+
+        let endpoints = provider_catalog_repository
+            .list_endpoints_by_provider_ids(&[provider_id.to_string()])
+            .await
+            .expect("endpoints should read");
+        assert_eq!(endpoints.len(), endpoint_count);
+        assert!(endpoints
+            .iter()
+            .any(|endpoint| endpoint.api_format == api_format && endpoint.base_url == base_url));
+    }
+
+    gateway_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_reports_codex_quota_runtime_failures_locally_without_falling_back_to_admin_passthrough(
 ) {
     let upstream_hits = Arc::new(Mutex::new(0usize));

@@ -253,6 +253,21 @@ END $mig$;
 
 
 --
+-- Name: pool_member_scores pool_member_scores_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+DO $mig$ BEGIN
+  ALTER TABLE ONLY public.pool_member_scores
+    ADD CONSTRAINT pool_member_scores_pkey PRIMARY KEY (id);
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+  WHEN duplicate_table THEN NULL;
+  WHEN invalid_table_definition THEN NULL;
+END $mig$;
+
+
+
+--
 -- Name: provider_endpoints provider_endpoints_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -964,6 +979,111 @@ END $mig$;
 DO $mig$ BEGIN
   ALTER TABLE ONLY public.user_model_usage_counts
     ADD CONSTRAINT user_model_usage_counts_pkey PRIMARY KEY (id);
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+  WHEN duplicate_table THEN NULL;
+  WHEN invalid_table_definition THEN NULL;
+END $mig$;
+
+
+
+--
+-- Name: user_group_members user_group_members_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+DO $mig$ BEGIN
+  ALTER TABLE ONLY public.user_group_members
+    ADD CONSTRAINT user_group_members_pkey PRIMARY KEY (group_id, user_id);
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+  WHEN duplicate_table THEN NULL;
+  WHEN invalid_table_definition THEN NULL;
+END $mig$;
+
+
+
+--
+-- Name: user_groups user_groups_allowed_api_formats_mode_check; Type: CHECK CONSTRAINT; Schema: public; Owner: -
+--
+
+DO $mig$ BEGIN
+  ALTER TABLE ONLY public.user_groups
+    ADD CONSTRAINT user_groups_allowed_api_formats_mode_check CHECK (allowed_api_formats_mode IN ('inherit', 'unrestricted', 'specific', 'deny_all'));
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+  WHEN duplicate_table THEN NULL;
+  WHEN invalid_table_definition THEN NULL;
+END $mig$;
+
+
+
+--
+-- Name: user_groups user_groups_allowed_models_mode_check; Type: CHECK CONSTRAINT; Schema: public; Owner: -
+--
+
+DO $mig$ BEGIN
+  ALTER TABLE ONLY public.user_groups
+    ADD CONSTRAINT user_groups_allowed_models_mode_check CHECK (allowed_models_mode IN ('inherit', 'unrestricted', 'specific', 'deny_all'));
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+  WHEN duplicate_table THEN NULL;
+  WHEN invalid_table_definition THEN NULL;
+END $mig$;
+
+
+
+--
+-- Name: user_groups user_groups_allowed_providers_mode_check; Type: CHECK CONSTRAINT; Schema: public; Owner: -
+--
+
+DO $mig$ BEGIN
+  ALTER TABLE ONLY public.user_groups
+    ADD CONSTRAINT user_groups_allowed_providers_mode_check CHECK (allowed_providers_mode IN ('inherit', 'unrestricted', 'specific', 'deny_all'));
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+  WHEN duplicate_table THEN NULL;
+  WHEN invalid_table_definition THEN NULL;
+END $mig$;
+
+
+
+--
+-- Name: user_groups user_groups_normalized_name_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+DO $mig$ BEGIN
+  ALTER TABLE ONLY public.user_groups
+    ADD CONSTRAINT user_groups_normalized_name_key UNIQUE (normalized_name);
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+  WHEN duplicate_table THEN NULL;
+  WHEN invalid_table_definition THEN NULL;
+END $mig$;
+
+
+
+--
+-- Name: user_groups user_groups_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+DO $mig$ BEGIN
+  ALTER TABLE ONLY public.user_groups
+    ADD CONSTRAINT user_groups_pkey PRIMARY KEY (id);
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+  WHEN duplicate_table THEN NULL;
+  WHEN invalid_table_definition THEN NULL;
+END $mig$;
+
+
+
+--
+-- Name: user_groups user_groups_rate_limit_mode_check; Type: CHECK CONSTRAINT; Schema: public; Owner: -
+--
+
+DO $mig$ BEGIN
+  ALTER TABLE ONLY public.user_groups
+    ADD CONSTRAINT user_groups_rate_limit_mode_check CHECK (rate_limit_mode IN ('inherit', 'system', 'custom'));
 EXCEPTION
   WHEN duplicate_object THEN NULL;
   WHEN duplicate_table THEN NULL;

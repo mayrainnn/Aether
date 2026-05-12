@@ -9,6 +9,9 @@ pub use crate::protocol::stream::{CanonicalStreamEvent, CanonicalStreamFrame};
 
 pub(crate) const OPENAI_RESPONSES_EXTENSION_NAMESPACE: &str = "openai_responses";
 pub(crate) const OPENAI_RESPONSES_LEGACY_EXTENSION_NAMESPACE: &str = "openai_cli";
+const AETHER_EXTENSION_NAMESPACE: &str = "aether";
+const CLAUDE_TOOL_RESULT_SOURCE_MARKER: &str = "claude_tool_result";
+const OPENAI_CHAT_TOOL_ERROR_PREFIX: &str = "[tool error]";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1191,6 +1194,14 @@ pub(crate) fn claude_block_to_canonical_block(block: &Value) -> Option<Canonical
         }),
         "tool_result" => {
             let content = block_object.get("content").cloned();
+            let mut extensions = claude_extensions(
+                block_object,
+                &["type", "tool_use_id", "content", "is_error"],
+            );
+            extensions.insert(
+                AETHER_EXTENSION_NAMESPACE.to_string(),
+                json!({ "source": CLAUDE_TOOL_RESULT_SOURCE_MARKER }),
+            );
             Some(CanonicalContentBlock::ToolResult {
                 tool_use_id: block_object
                     .get("tool_use_id")
@@ -1204,10 +1215,7 @@ pub(crate) fn claude_block_to_canonical_block(block: &Value) -> Option<Canonical
                     .get("is_error")
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
-                extensions: claude_extensions(
-                    block_object,
-                    &["type", "tool_use_id", "content", "is_error"],
-                ),
+                extensions,
             })
         }
         _ => Some(CanonicalContentBlock::Unknown {
@@ -2050,7 +2058,64 @@ pub(crate) fn openai_part_to_canonical_block(part: &Value) -> Option<CanonicalCo
     }
 }
 
-pub(crate) fn canonical_message_to_openai_chat(message: &CanonicalMessage) -> Value {
+pub(crate) fn canonical_message_to_openai_chat_messages(message: &CanonicalMessage) -> Vec<Value> {
+    let mut messages = Vec::new();
+    let mut pending_start = 0usize;
+    let mut saw_tool_result = false;
+
+    for (index, block) in message.content.iter().enumerate() {
+        if let CanonicalContentBlock::ToolResult { .. } = block {
+            saw_tool_result = true;
+            if pending_start < index {
+                if let Some(message_value) = canonical_message_blocks_to_openai_chat(
+                    message,
+                    &message.content[pending_start..index],
+                    false,
+                ) {
+                    messages.push(message_value);
+                }
+            }
+            messages.push(canonical_tool_result_to_openai_chat(block));
+            pending_start = index + 1;
+        }
+    }
+
+    if !saw_tool_result {
+        return vec![canonical_message_without_tool_results_to_openai_chat(
+            message,
+        )];
+    }
+
+    if pending_start < message.content.len() {
+        if let Some(message_value) = canonical_message_blocks_to_openai_chat(
+            message,
+            &message.content[pending_start..],
+            false,
+        ) {
+            messages.push(message_value);
+        }
+    }
+
+    messages
+}
+
+fn canonical_message_without_tool_results_to_openai_chat(message: &CanonicalMessage) -> Value {
+    debug_assert!(
+        !message
+            .content
+            .iter()
+            .any(|block| matches!(block, CanonicalContentBlock::ToolResult { .. })),
+        "single OpenAI Chat message emission requires no ToolResult blocks; use canonical_message_to_openai_chat_messages"
+    );
+    canonical_message_blocks_to_openai_chat(message, &message.content, true)
+        .expect("include_empty=true always emits a chat message")
+}
+
+fn canonical_message_blocks_to_openai_chat(
+    message: &CanonicalMessage,
+    content: &[CanonicalContentBlock],
+    include_empty: bool,
+) -> Option<Value> {
     let mut output = Map::new();
     output.insert(
         "role".to_string(),
@@ -2069,7 +2134,7 @@ pub(crate) fn canonical_message_to_openai_chat(message: &CanonicalMessage) -> Va
     let mut tool_calls = Vec::new();
     let mut reasoning_segments = Vec::new();
     let mut reasoning_parts = Vec::new();
-    for block in &message.content {
+    for block in content {
         match block {
             CanonicalContentBlock::Thinking {
                 text,
@@ -2123,31 +2188,21 @@ pub(crate) fn canonical_message_to_openai_chat(message: &CanonicalMessage) -> Va
                     "arguments": canonicalize_tool_arguments(input),
                 }
             })),
-            CanonicalContentBlock::ToolResult {
-                tool_use_id,
-                content_text,
-                output: result_output,
-                ..
-            } => {
-                output.insert("role".to_string(), Value::String("tool".to_string()));
-                output.insert(
-                    "tool_call_id".to_string(),
-                    Value::String(tool_use_id.clone()),
-                );
-                output.insert(
-                    "content".to_string(),
-                    result_output
-                        .clone()
-                        .unwrap_or_else(|| Value::String(content_text.clone().unwrap_or_default())),
-                );
-                return Value::Object(output);
-            }
+            CanonicalContentBlock::ToolResult { .. } => {}
             other => {
                 if let Some(part) = canonical_content_block_to_openai_part(other) {
                     content_parts.push(part);
                 }
             }
         }
+    }
+    if !include_empty
+        && content_parts.is_empty()
+        && tool_calls.is_empty()
+        && reasoning_segments.is_empty()
+        && reasoning_parts.is_empty()
+    {
+        return None;
     }
     output.insert(
         "content".to_string(),
@@ -2173,7 +2228,252 @@ pub(crate) fn canonical_message_to_openai_chat(message: &CanonicalMessage) -> Va
     if !reasoning_parts.is_empty() {
         output.insert("reasoning_parts".to_string(), Value::Array(reasoning_parts));
     }
+    Some(Value::Object(output))
+}
+
+fn canonical_tool_result_to_openai_chat(block: &CanonicalContentBlock) -> Value {
+    let CanonicalContentBlock::ToolResult {
+        tool_use_id,
+        content_text,
+        output: result_output,
+        is_error,
+        extensions,
+        ..
+    } = block
+    else {
+        unreachable!("canonical_tool_result_to_openai_chat requires ToolResult");
+    };
+
+    let mut output = Map::new();
+    output.insert("role".to_string(), Value::String("tool".to_string()));
+    output.insert(
+        "tool_call_id".to_string(),
+        Value::String(tool_use_id.clone()),
+    );
+    let content = if is_claude_tool_result(extensions) {
+        let content =
+            openai_chat_tool_result_content(result_output.as_ref(), content_text.as_deref());
+        if *is_error {
+            openai_chat_tool_error_content(content)
+        } else {
+            content
+        }
+    } else {
+        result_output
+            .clone()
+            .unwrap_or_else(|| Value::String(content_text.clone().unwrap_or_default()))
+    };
+    output.insert("content".to_string(), content);
     Value::Object(output)
+}
+
+fn is_claude_tool_result(extensions: &BTreeMap<String, Value>) -> bool {
+    extensions
+        .get(AETHER_EXTENSION_NAMESPACE)
+        .and_then(|value| value.get("source"))
+        .and_then(Value::as_str)
+        == Some(CLAUDE_TOOL_RESULT_SOURCE_MARKER)
+}
+
+fn openai_chat_tool_result_content(output: Option<&Value>, content_text: Option<&str>) -> Value {
+    match output {
+        Some(Value::String(text)) => Value::String(text.clone()),
+        Some(Value::Array(parts)) => anthropic_tool_result_blocks_to_openai_chat_content(parts),
+        Some(value) => Value::String(value.to_string()),
+        None => Value::String(content_text.unwrap_or_default().to_string()),
+    }
+}
+
+fn openai_chat_tool_error_content(content: Value) -> Value {
+    match content {
+        Value::String(text) if text.is_empty() => {
+            Value::String(OPENAI_CHAT_TOOL_ERROR_PREFIX.to_string())
+        }
+        Value::String(text) => Value::String(format!("{OPENAI_CHAT_TOOL_ERROR_PREFIX}\n{text}")),
+        Value::Array(parts) => {
+            let mut prefixed_parts = Vec::with_capacity(parts.len() + 1);
+            prefixed_parts.push(openai_text_part(OPENAI_CHAT_TOOL_ERROR_PREFIX));
+            prefixed_parts.extend(parts);
+            Value::Array(prefixed_parts)
+        }
+        value => Value::String(format!("{OPENAI_CHAT_TOOL_ERROR_PREFIX}\n{value}")),
+    }
+}
+
+fn anthropic_tool_result_blocks_to_openai_chat_content(parts: &[Value]) -> Value {
+    if let Some(text) = anthropic_text_blocks_to_string(parts) {
+        return Value::String(text);
+    }
+
+    let mut has_media_part = false;
+    let converted_parts = parts
+        .iter()
+        .map(|part| {
+            let openai_part = anthropic_tool_result_block_to_openai_chat_part(part);
+            if !openai_chat_part_is_text(&openai_part) {
+                has_media_part = true;
+            }
+            openai_part
+        })
+        .collect::<Vec<_>>();
+
+    if has_media_part {
+        Value::Array(converted_parts)
+    } else {
+        Value::String(openai_text_parts_to_string(&converted_parts))
+    }
+}
+
+fn anthropic_text_blocks_to_string(parts: &[Value]) -> Option<String> {
+    let mut texts = Vec::with_capacity(parts.len());
+    for part in parts {
+        let part_object = part.as_object()?;
+        if part_object.get("type").and_then(Value::as_str) != Some("text") {
+            return None;
+        }
+        texts.push(part_object.get("text").and_then(Value::as_str)?);
+    }
+    Some(texts.join("\n\n"))
+}
+
+fn anthropic_tool_result_block_to_openai_chat_part(part: &Value) -> Value {
+    let Some(part_object) = part.as_object() else {
+        return openai_text_part("[Claude tool_result non-text content omitted]");
+    };
+    match part_object
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+    {
+        "text" => openai_text_part(
+            part_object
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        ),
+        "image" => anthropic_image_block_to_openai_chat_part(part_object).unwrap_or_else(|| {
+            openai_text_part(anthropic_media_block_summary("image", part_object))
+        }),
+        "document" => {
+            anthropic_document_block_to_openai_chat_part(part_object).unwrap_or_else(|| {
+                openai_text_part(anthropic_media_block_summary("document", part_object))
+            })
+        }
+        "file" => anthropic_document_block_to_openai_chat_part(part_object).unwrap_or_else(|| {
+            openai_text_part(anthropic_media_block_summary("file", part_object))
+        }),
+        "" => openai_text_part("[Claude tool_result object content omitted]"),
+        raw_type => openai_text_part(format!("[Claude tool_result {raw_type} content omitted]")),
+    }
+}
+
+fn anthropic_image_block_to_openai_chat_part(block: &Map<String, Value>) -> Option<Value> {
+    let source = block.get("source")?.as_object()?;
+    match source
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+    {
+        "base64" => {
+            let media_type = anthropic_source_media_type(source)?;
+            let data = anthropic_source_str(source, "data")?;
+            Some(json!({
+                "type": "image_url",
+                "image_url": {
+                    "url": format!("data:{media_type};base64,{data}"),
+                },
+            }))
+        }
+        "url" => {
+            let url = anthropic_source_str(source, "url")?;
+            Some(json!({
+                "type": "image_url",
+                "image_url": {
+                    "url": url,
+                },
+            }))
+        }
+        _ => None,
+    }
+}
+
+fn anthropic_document_block_to_openai_chat_part(block: &Map<String, Value>) -> Option<Value> {
+    let source = block.get("source")?.as_object()?;
+    match source
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+    {
+        "base64" => {
+            let media_type = anthropic_source_media_type(source)?;
+            let data = anthropic_source_str(source, "data")?;
+            Some(json!({
+                "type": "file",
+                "file": {
+                    "file_data": format!("data:{media_type};base64,{data}"),
+                },
+            }))
+        }
+        "url" => {
+            let url = anthropic_source_str(source, "url")?;
+            Some(openai_text_part(format!("[File: {url}]")))
+        }
+        _ => None,
+    }
+}
+
+fn anthropic_media_block_summary(kind: &str, block: &Map<String, Value>) -> String {
+    let media_type = block
+        .get("source")
+        .and_then(Value::as_object)
+        .and_then(anthropic_source_media_type);
+    match media_type {
+        Some(media_type) if !media_type.trim().is_empty() => {
+            format!("[Claude tool_result {kind} content omitted: {media_type}]")
+        }
+        _ => format!("[Claude tool_result {kind} content omitted]"),
+    }
+}
+
+fn openai_text_part(text: impl Into<String>) -> Value {
+    json!({
+        "type": "text",
+        "text": text.into(),
+    })
+}
+
+fn openai_chat_part_is_text(part: &Value) -> bool {
+    part.as_object()
+        .and_then(|object| object.get("type"))
+        .and_then(Value::as_str)
+        == Some("text")
+}
+
+fn openai_text_parts_to_string(parts: &[Value]) -> String {
+    parts
+        .iter()
+        .filter_map(|part| {
+            part.as_object()
+                .and_then(|object| object.get("text"))
+                .and_then(Value::as_str)
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn anthropic_source_media_type(source: &Map<String, Value>) -> Option<&str> {
+    source
+        .get("media_type")
+        .or_else(|| source.get("mime_type"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn anthropic_source_str<'a>(source: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
+    source
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
 }
 
 pub(crate) fn canonical_content_block_to_openai_part(

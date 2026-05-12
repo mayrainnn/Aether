@@ -1,6 +1,7 @@
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::formats::shared::model_directives::model_directive_display_model_from_report_context;
 use crate::formats::shared::AiSurfaceFinalizeError;
 use crate::provider_compat::kiro_stream::{
     build_kiro_initial_sse_events, build_kiro_stream_error_sse_events, encode_kiro_sse_events,
@@ -63,18 +64,22 @@ impl KiroToClaudeCliStreamState {
 
 impl KiroClaudeStreamState {
     pub(super) fn new(report_context: &Value) -> Self {
-        let model = report_context
-            .get("mapped_model")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
+        let model = model_directive_display_model_from_report_context(report_context)
+            .or_else(|| {
+                report_context
+                    .get("mapped_model")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned)
+            })
             .or_else(|| {
                 report_context
                     .get("model")
                     .and_then(Value::as_str)
                     .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned)
             })
-            .unwrap_or("unknown")
-            .to_string();
+            .unwrap_or_else(|| "unknown".to_string());
         let thinking_enabled = report_context
             .get("original_request_body")
             .and_then(Value::as_object)

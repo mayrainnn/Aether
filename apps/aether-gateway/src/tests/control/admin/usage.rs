@@ -1682,7 +1682,7 @@ async fn gateway_handles_admin_usage_detail_locally_with_trusted_admin_principal
     assert_eq!(payload["provider"], "OpenAI");
     assert_eq!(payload["model"], "gpt-5");
     assert_eq!(payload["effective_input_tokens"], 115);
-    assert_eq!(payload["total_tokens"], 170);
+    assert_eq!(payload["total_tokens"], 165);
     assert_eq!(payload["cache_creation_cost"], 0.0);
     assert_eq!(payload["cache_read_cost"], 0.0);
     assert_eq!(
@@ -2927,8 +2927,11 @@ async fn gateway_handles_admin_usage_cache_affinity_interval_timeline_with_legac
                 role: "user".to_string(),
                 auth_source: "local".to_string(),
                 allowed_providers: None,
+                allowed_providers_mode: "unrestricted".to_string(),
                 allowed_api_formats: None,
+                allowed_api_formats_mode: "unrestricted".to_string(),
                 allowed_models: None,
+                allowed_models_mode: "unrestricted".to_string(),
                 is_active: true,
                 is_deleted: false,
                 created_at: None,

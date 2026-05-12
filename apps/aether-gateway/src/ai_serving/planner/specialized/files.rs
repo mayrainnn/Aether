@@ -318,10 +318,10 @@ pub(crate) async fn maybe_build_sync_local_gemini_files_decision_payload(
         return Ok(None);
     };
 
-    let attempts =
-        materialize_local_gemini_files_candidate_attempts(state, trace_id, &input).await?;
+    let (mut source, _) =
+        build_local_gemini_files_candidate_attempt_source(state, trace_id, &input).await?;
 
-    for attempt in attempts {
+    while let Some(attempt) = source.next_attempt().await {
         if let Some(payload) = maybe_build_local_gemini_files_decision_payload_for_candidate(
             state,
             parts,
@@ -359,11 +359,11 @@ pub(crate) async fn maybe_build_stream_local_gemini_files_decision_payload(
         return Ok(None);
     };
 
-    let attempts =
-        materialize_local_gemini_files_candidate_attempts(state, trace_id, &input).await?;
+    let (mut source, _) =
+        build_local_gemini_files_candidate_attempt_source(state, trace_id, &input).await?;
 
     let empty_body_json = serde_json::Value::Null;
-    for attempt in attempts {
+    while let Some(attempt) = source.next_attempt().await {
         if let Some(payload) = maybe_build_local_gemini_files_decision_payload_for_candidate(
             state,
             parts,
@@ -407,11 +407,11 @@ async fn build_local_sync_plan_and_reports(
         return Ok(Vec::new());
     };
 
-    let attempts =
-        materialize_local_gemini_files_candidate_attempts(state, trace_id, &input).await?;
+    let (mut source, _) =
+        build_local_gemini_files_candidate_attempt_source(state, trace_id, &input).await?;
 
     let mut plans = Vec::new();
-    for attempt in attempts {
+    while let Some(attempt) = source.next_attempt().await {
         let Some(payload) = maybe_build_local_gemini_files_decision_payload_for_candidate(
             state,
             parts,
@@ -459,12 +459,12 @@ async fn build_local_stream_plan_and_reports(
         return Ok(Vec::new());
     };
 
-    let attempts =
-        materialize_local_gemini_files_candidate_attempts(state, trace_id, &input).await?;
+    let (mut source, _) =
+        build_local_gemini_files_candidate_attempt_source(state, trace_id, &input).await?;
 
     let mut plans = Vec::new();
     let empty_body_json = serde_json::Value::Null;
-    for attempt in attempts {
+    while let Some(attempt) = source.next_attempt().await {
         let Some(payload) = maybe_build_local_gemini_files_decision_payload_for_candidate(
             state,
             parts,

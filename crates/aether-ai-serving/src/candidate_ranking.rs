@@ -17,6 +17,7 @@ pub enum AiRankingSchedulingMode {
 pub struct AiRankingContextConfig {
     pub priority_mode: SchedulerPriorityMode,
     pub scheduling_mode: AiRankingSchedulingMode,
+    pub load_balance_seed: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -81,15 +82,7 @@ pub fn build_ai_rankable_candidate(
     )
     .unwrap_or((u8::MAX, u8::MAX));
 
-    let mut rankable =
-        SchedulerRankableCandidate::from_candidate(parts.candidate, parts.original_index);
-    // The scheduler order is the upstream tie-breaker; AI serving only adds transport facts.
-    rankable.provider_id.clear();
-    rankable.endpoint_id.clear();
-    rankable.key_id.clear();
-    rankable.selected_provider_model_name.clear();
-
-    rankable
+    SchedulerRankableCandidate::from_candidate(parts.candidate, parts.original_index)
         .with_capability_priority(requested_capability_priority_for_candidate(
             parts.required_capabilities,
             parts.candidate,
@@ -107,7 +100,7 @@ pub fn ai_ranking_context(config: AiRankingContextConfig) -> SchedulerRankingCon
         priority_mode: config.priority_mode,
         ranking_mode: ai_ranking_mode(config.scheduling_mode),
         include_health: false,
-        load_balance_seed: 0,
+        load_balance_seed: config.load_balance_seed,
     }
 }
 
@@ -127,13 +120,18 @@ pub async fn run_ai_candidate_ranking<Port>(
 where
     Port: AiCandidateRankingPort,
 {
-    let affinity_requested_model = port.affinity_requested_model(&candidates);
-    let cached_affinity_target = port
-        .read_cached_affinity_target(
-            normalized_client_api_format,
-            affinity_requested_model.as_deref(),
-        )
-        .await?;
+    let ranking_context = port.ranking_context();
+    let cached_affinity_target =
+        if ranking_context.ranking_mode == SchedulerRankingMode::CacheAffinity {
+            let affinity_requested_model = port.affinity_requested_model(&candidates);
+            port.read_cached_affinity_target(
+                normalized_client_api_format,
+                affinity_requested_model.as_deref(),
+            )
+            .await?
+        } else {
+            None
+        };
 
     let mut rankables = Vec::with_capacity(candidates.len());
     for (original_index, candidate) in candidates.iter().enumerate() {
@@ -151,8 +149,7 @@ where
         );
     }
 
-    let outcomes =
-        apply_scheduler_candidate_ranking(&mut candidates, &rankables, port.ranking_context());
+    let outcomes = apply_scheduler_candidate_ranking(&mut candidates, &rankables, ranking_context);
     for outcome in outcomes {
         let ranking_index = outcome.ranking_index;
         if let Some(candidate) = candidates.get_mut(ranking_index) {
@@ -179,6 +176,7 @@ mod tests {
 
     #[derive(Default)]
     struct TestPort {
+        ranking_mode: SchedulerRankingMode,
         calls: Mutex<Vec<String>>,
     }
 
@@ -246,7 +244,7 @@ mod tests {
         fn ranking_context(&self) -> SchedulerRankingContext {
             SchedulerRankingContext {
                 priority_mode: SchedulerPriorityMode::Provider,
-                ranking_mode: SchedulerRankingMode::CacheAffinity,
+                ranking_mode: self.ranking_mode,
                 include_health: false,
                 load_balance_seed: 0,
             }
@@ -296,6 +294,31 @@ mod tests {
                 "rankable:candidate-a:false",
                 "rankable:candidate-b:true",
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn non_cache_affinity_ranking_does_not_read_affinity_target() {
+        let port = TestPort {
+            ranking_mode: SchedulerRankingMode::LoadBalance,
+            calls: Mutex::new(Vec::new()),
+        };
+        let candidates = vec![TestCandidate {
+            id: "candidate-a",
+            priority: 10,
+            ranking_index: None,
+            cached_affinity: false,
+        }];
+
+        let ranked = run_ai_candidate_ranking(&port, candidates, "openai:chat")
+            .await
+            .unwrap();
+
+        assert_eq!(ranked[0].id, "candidate-a");
+        assert!(!ranked[0].cached_affinity);
+        assert_eq!(
+            port.calls.lock().unwrap().as_slice(),
+            ["rankable:candidate-a:false"]
         );
     }
 }

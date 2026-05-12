@@ -6,6 +6,7 @@ use aether_ai_serving::{
     provider_stream_event_api_format_for_provider_type as ai_provider_stream_event_api_format_for_provider_type,
     AiExecutionReportContextParts, AiRequestOrigin,
 };
+use aether_runtime_state::RuntimeLockLease;
 use aether_scheduler_core::{ClientSessionAffinity, SchedulerRankingOutcome};
 use serde_json::{Map, Value};
 
@@ -17,7 +18,10 @@ use crate::ai_serving::{
 use crate::client_session_affinity::{
     client_session_affinity_report_context_value, CLIENT_SESSION_AFFINITY_REPORT_CONTEXT_FIELD,
 };
-use crate::orchestration::ExecutionAttemptIdentity;
+use crate::orchestration::{
+    insert_pool_key_lease_report_context_fields, ExecutionAttemptIdentity,
+    SCHEDULER_AFFINITY_EPOCH_REPORT_FIELD,
+};
 
 pub(crate) struct LocalExecutionReportContextParts<'a> {
     pub(crate) auth_context: &'a ExecutionRuntimeAuthContext,
@@ -37,6 +41,7 @@ pub(crate) struct LocalExecutionReportContextParts<'a> {
     pub(crate) client_api_format: &'a str,
     pub(crate) mapped_model: Option<&'a str>,
     pub(crate) candidate_group_id: Option<&'a str>,
+    pub(crate) pool_key_lease: Option<&'a RuntimeLockLease>,
     pub(crate) ranking: Option<&'a SchedulerRankingOutcome>,
     pub(crate) upstream_url: Option<&'a str>,
     pub(crate) header_rules: Option<&'a Value>,
@@ -50,6 +55,7 @@ pub(crate) struct LocalExecutionReportContextParts<'a> {
     pub(crate) original_request_body_json: Option<&'a Value>,
     pub(crate) original_request_body_base64: Option<&'a str>,
     pub(crate) client_session_affinity: Option<&'a ClientSessionAffinity>,
+    pub(crate) scheduler_affinity_epoch: Option<u64>,
     pub(crate) client_requested_stream: bool,
     pub(crate) upstream_is_stream: bool,
     pub(crate) has_envelope: bool,
@@ -85,6 +91,13 @@ pub(crate) fn build_local_execution_report_context(
         crate::ai_serving::tls_fingerprint_from_headers(parts.original_headers)
     {
         merge_incoming_tls_fingerprint(&mut extra_fields, incoming_tls);
+    }
+    insert_pool_key_lease_report_context_fields(&mut extra_fields, parts.pool_key_lease);
+    if let Some(epoch) = parts.scheduler_affinity_epoch {
+        extra_fields.insert(
+            SCHEDULER_AFFINITY_EPOCH_REPORT_FIELD.to_string(),
+            Value::Number(epoch.into()),
+        );
     }
     insert_request_path_fields(
         &mut extra_fields,
@@ -258,6 +271,7 @@ mod tests {
                 client_api_format: "openai:chat",
                 mapped_model: None,
                 candidate_group_id: None,
+                pool_key_lease: None,
                 ranking: None,
                 upstream_url: None,
                 header_rules: None,
@@ -274,6 +288,7 @@ mod tests {
                 original_request_body_json: Some(&json!({"model": "gpt-5"})),
                 original_request_body_base64: None,
                 client_session_affinity: Some(&client_session_affinity),
+                scheduler_affinity_epoch: None,
                 client_requested_stream: false,
                 upstream_is_stream: false,
                 has_envelope: false,
@@ -337,6 +352,7 @@ mod tests {
                 client_api_format: "gemini:generate_content",
                 mapped_model: None,
                 candidate_group_id: None,
+                pool_key_lease: None,
                 ranking: None,
                 upstream_url: None,
                 header_rules: None,
@@ -354,6 +370,7 @@ mod tests {
                 })),
                 original_request_body_base64: None,
                 client_session_affinity: None,
+                scheduler_affinity_epoch: None,
                 client_requested_stream: false,
                 upstream_is_stream: true,
                 has_envelope: false,
@@ -405,6 +422,7 @@ mod tests {
                 client_api_format: "openai:chat",
                 mapped_model: None,
                 candidate_group_id: None,
+                pool_key_lease: None,
                 ranking: None,
                 upstream_url: None,
                 header_rules: None,
@@ -418,6 +436,7 @@ mod tests {
                 original_request_body_json: Some(&json!({"model": "gpt-5"})),
                 original_request_body_base64: None,
                 client_session_affinity: None,
+                scheduler_affinity_epoch: None,
                 client_requested_stream: false,
                 upstream_is_stream: false,
                 has_envelope: false,

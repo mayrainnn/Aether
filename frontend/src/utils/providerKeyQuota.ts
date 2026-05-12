@@ -96,7 +96,12 @@ function formatQuotaValue(value: number | null | undefined): string {
 
 function getCodexQuotaText(quota: QuotaStatusSnapshot): string | null {
   const parts: string[] = []
-  for (const [label, code] of [['周', 'weekly'], ['5H', '5h']] as const) {
+  for (const [label, code] of [
+    ['周', 'weekly'],
+    ['5H', '5h'],
+    ['Spark5H', 'spark_5h'],
+    ['Spark周', 'spark_weekly'],
+  ] as const) {
     const remainingPercent = getQuotaWindowRemainingPercent(getQuotaWindow(quota, code))
     if (remainingPercent == null) continue
     parts.push(`${label}剩余 ${formatPercent(remainingPercent)}`)

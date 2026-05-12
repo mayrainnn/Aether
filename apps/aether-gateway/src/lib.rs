@@ -36,6 +36,7 @@ mod clock;
 mod constants;
 mod control;
 mod data;
+mod dispatch;
 mod error;
 mod execution_runtime;
 mod executor;

@@ -1,5 +1,7 @@
 use crate::control::{
-    management_token_permission_catalog_payload, normalize_assignable_management_token_permissions,
+    management_token_permission_catalog_payload,
+    management_token_permissions_cover_all_assignable_permissions,
+    normalize_assignable_management_token_permissions,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::{query_param_optional_bool, query_param_value};
@@ -317,12 +319,17 @@ pub(crate) async fn maybe_build_local_admin_management_tokens_response(
         return Ok(None);
     }
 
-    if decision
+    let is_management_token = decision
         .admin_principal
         .as_ref()
         .and_then(|principal| principal.management_token_id.as_deref())
-        .is_some()
-    {
+        .is_some();
+    let management_token_is_full = decision
+        .admin_principal
+        .as_ref()
+        .and_then(|principal| principal.management_token_permissions.as_deref())
+        .is_none_or(management_token_permissions_cover_all_assignable_permissions);
+    if is_management_token && !management_token_is_full {
         return Ok(Some(
             (
                 http::StatusCode::FORBIDDEN,

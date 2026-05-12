@@ -3,6 +3,7 @@ pub(crate) use crate::handlers::admin::{
     build_internal_control_error_response, create_provider_oauth_catalog_key,
     find_duplicate_provider_oauth_key, maybe_build_local_admin_pool_response,
     maybe_build_local_admin_response, provider_oauth_runtime_endpoint_for_provider,
+    provider_type_supports_quota_refresh, reconcile_admin_fixed_provider_template_endpoints,
     refresh_antigravity_provider_quota_locally, refresh_chatgpt_web_provider_quota_locally,
     refresh_codex_provider_quota_locally, refresh_kiro_provider_quota_locally,
     refresh_provider_oauth_account_state_after_update, update_existing_provider_oauth_catalog_key,

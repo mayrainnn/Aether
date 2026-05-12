@@ -4,6 +4,7 @@ use async_trait::async_trait;
 
 use super::{
     MinimalCandidateSelectionReadRepository, StoredMinimalCandidateSelectionRow,
+    StoredPoolKeyCandidateOrder, StoredPoolKeyCandidateRowsByKeyIdsQuery,
     StoredPoolKeyCandidateRowsQuery, StoredRequestedModelCandidateRowsQuery,
 };
 use crate::DataLayerError;
@@ -130,17 +131,78 @@ impl MinimalCandidateSelectionReadRepository for InMemoryMinimalCandidateSelecti
                     && row.model_id == query.model_id
             })
             .collect::<Vec<_>>();
-        rows.sort_by(|left, right| {
-            left.key_internal_priority
-                .cmp(&right.key_internal_priority)
-                .then(left.key_id.cmp(&right.key_id))
-        });
+        sort_pool_key_rows(&mut rows, &query.order);
         Ok(rows
             .into_iter()
             .skip(query.offset as usize)
             .take(query.limit as usize)
             .collect())
     }
+
+    async fn list_pool_key_rows_for_group_key_ids(
+        &self,
+        query: &StoredPoolKeyCandidateRowsByKeyIdsQuery,
+    ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
+        if query.key_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let key_order = query
+            .key_ids
+            .iter()
+            .enumerate()
+            .map(|(index, key_id)| (key_id.as_str(), index))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut rows = self
+            .list_for_exact_api_format(&query.api_format)
+            .await?
+            .into_iter()
+            .filter(|row| {
+                row.provider_id == query.provider_id
+                    && row.endpoint_id == query.endpoint_id
+                    && row.model_id == query.model_id
+                    && key_order.contains_key(row.key_id.as_str())
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| {
+            key_order
+                .get(left.key_id.as_str())
+                .cmp(&key_order.get(right.key_id.as_str()))
+                .then(left.key_id.cmp(&right.key_id))
+        });
+        Ok(rows)
+    }
+}
+
+fn sort_pool_key_rows(
+    rows: &mut [StoredMinimalCandidateSelectionRow],
+    order: &StoredPoolKeyCandidateOrder,
+) {
+    rows.sort_by(|left, right| match order {
+        StoredPoolKeyCandidateOrder::LoadBalance { seed } => {
+            stable_pool_key_hash(seed.as_str(), left.key_id.as_str())
+                .cmp(&stable_pool_key_hash(seed.as_str(), right.key_id.as_str()))
+                .then(left.key_id.cmp(&right.key_id))
+        }
+        _ => left
+            .key_internal_priority
+            .cmp(&right.key_internal_priority)
+            .then(left.key_id.cmp(&right.key_id)),
+    });
+}
+
+fn stable_pool_key_hash(seed: &str, key_id: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in seed
+        .as_bytes()
+        .iter()
+        .copied()
+        .chain(std::iter::once(b':'))
+        .chain(key_id.as_bytes().iter().copied())
+    {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 fn normalize_api_format(value: &str) -> String {
@@ -156,8 +218,10 @@ fn row_matches_requested_model(
     requested_model_name: &str,
     api_format: &str,
 ) -> bool {
-    row.global_model_name == requested_model_name
-        || row.model_provider_model_name == requested_model_name
+    (row_has_available_provider_model(row, api_format)
+        && row.global_model_name == requested_model_name)
+        || (row_default_provider_model_name_available(row, api_format)
+            && row.model_provider_model_name == requested_model_name)
         || row
             .model_provider_model_mappings
             .as_ref()
@@ -174,6 +238,60 @@ fn row_matches_requested_model(
                     }) && mapping.name == requested_model_name
                 })
             })
+}
+
+fn row_has_available_provider_model(
+    row: &StoredMinimalCandidateSelectionRow,
+    api_format: &str,
+) -> bool {
+    row_mapping_matches_scope(row, api_format)
+        || row_default_provider_model_name_available(row, api_format)
+}
+
+fn row_default_provider_model_name_available(
+    row: &StoredMinimalCandidateSelectionRow,
+    api_format: &str,
+) -> bool {
+    let Some(mappings) = row.model_provider_model_mappings.as_ref() else {
+        return true;
+    };
+    let mut has_explicit_default_mapping = false;
+    for mapping in mappings {
+        if mapping.name != row.model_provider_model_name {
+            continue;
+        }
+        has_explicit_default_mapping = true;
+        if mapping_scope_matches(mapping, row, api_format) {
+            return true;
+        }
+    }
+    !has_explicit_default_mapping
+}
+
+fn row_mapping_matches_scope(row: &StoredMinimalCandidateSelectionRow, api_format: &str) -> bool {
+    row.model_provider_model_mappings
+        .as_ref()
+        .is_some_and(|mappings| {
+            mappings
+                .iter()
+                .any(|mapping| mapping_scope_matches(mapping, row, api_format))
+        })
+}
+
+fn mapping_scope_matches(
+    mapping: &super::StoredProviderModelMapping,
+    row: &StoredMinimalCandidateSelectionRow,
+    api_format: &str,
+) -> bool {
+    mapping.api_formats.as_ref().is_none_or(|formats| {
+        formats
+            .iter()
+            .any(|value| api_format_matches(value, api_format))
+    }) && mapping.endpoint_ids.as_ref().is_none_or(|endpoint_ids| {
+        endpoint_ids
+            .iter()
+            .any(|endpoint_id| endpoint_id == &row.endpoint_id)
+    })
 }
 
 fn key_auth_channel_matches(row: &StoredMinimalCandidateSelectionRow, api_format: &str) -> bool {
@@ -215,7 +333,8 @@ mod tests {
     use super::InMemoryMinimalCandidateSelectionReadRepository;
     use crate::repository::candidate_selection::{
         MinimalCandidateSelectionReadRepository, StoredMinimalCandidateSelectionRow,
-        StoredPoolKeyCandidateRowsQuery, StoredRequestedModelCandidateRowsQuery,
+        StoredPoolKeyCandidateOrder, StoredPoolKeyCandidateRowsQuery, StoredProviderModelMapping,
+        StoredRequestedModelCandidateRowsQuery,
     };
 
     fn sample_row(
@@ -280,14 +399,12 @@ mod tests {
     async fn filters_by_exact_api_format_and_requested_model_aliases() {
         let mut mapped = sample_row("provider-1", "openai:chat", "gpt-4.1", 10);
         mapped.model_provider_model_name = "provider-gpt-4.1".to_string();
-        mapped.model_provider_model_mappings = Some(vec![
-            crate::repository::candidate_selection::StoredProviderModelMapping {
-                name: "alias-gpt-4.1".to_string(),
-                priority: 0,
-                api_formats: Some(vec!["openai:chat".to_string()]),
-                endpoint_ids: None,
-            },
-        ]);
+        mapped.model_provider_model_mappings = Some(vec![StoredProviderModelMapping {
+            name: "alias-gpt-4.1".to_string(),
+            priority: 0,
+            api_formats: Some(vec!["openai:chat".to_string()]),
+            endpoint_ids: None,
+        }]);
         let repository = InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
             mapped,
             sample_row("provider-2", "openai:chat", "gpt-4.1-mini", 20),
@@ -300,6 +417,42 @@ mod tests {
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].provider_id, "provider-1");
+    }
+
+    #[tokio::test]
+    async fn requested_model_filter_respects_endpoint_scoped_default_mapping() {
+        let mut selected = sample_row("provider-1", "openai:chat", "deepseek-v4-pro", 10);
+        selected.endpoint_id = "endpoint-openai".to_string();
+        selected.model_provider_model_name = "deepseek-v4-pro".to_string();
+        selected.model_provider_model_mappings = Some(vec![StoredProviderModelMapping {
+            name: "deepseek-v4-pro".to_string(),
+            priority: 1,
+            api_formats: None,
+            endpoint_ids: Some(vec!["endpoint-openai".to_string()]),
+        }]);
+
+        let mut scoped_out = selected.clone();
+        scoped_out.provider_id = "provider-2".to_string();
+        scoped_out.endpoint_id = "endpoint-claude".to_string();
+        scoped_out.endpoint_api_format = "claude:messages".to_string();
+        scoped_out.key_id = "key-provider-2".to_string();
+        scoped_out.key_api_formats = Some(vec!["claude:messages".to_string()]);
+
+        let repository =
+            InMemoryMinimalCandidateSelectionReadRepository::seed(vec![scoped_out, selected]);
+
+        let rows = repository
+            .list_for_exact_api_format_and_requested_model("claude:messages", "deepseek-v4-pro")
+            .await
+            .expect("list should succeed");
+        assert!(rows.is_empty());
+
+        let rows = repository
+            .list_for_exact_api_format_and_requested_model("openai:chat", "deepseek-v4-pro")
+            .await
+            .expect("list should succeed");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].endpoint_id, "endpoint-openai");
     }
 
     #[tokio::test]
@@ -402,6 +555,7 @@ mod tests {
                 endpoint_id: "endpoint-pool".to_string(),
                 model_id: "model-pool".to_string(),
                 selected_provider_model_name: "gpt-5".to_string(),
+                order: StoredPoolKeyCandidateOrder::InternalPriority,
                 offset: 2,
                 limit: 2,
             })

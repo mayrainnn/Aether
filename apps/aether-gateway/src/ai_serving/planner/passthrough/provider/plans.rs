@@ -20,7 +20,6 @@ pub(crate) use crate::ai_serving::{
 
 use super::{
     build_local_same_format_provider_candidate_attempt_source,
-    materialize_local_same_format_provider_candidate_attempts,
     maybe_build_local_same_format_provider_decision_payload_for_candidate,
     resolve_local_same_format_provider_decision_input, AiStreamAttempt, AiSyncAttempt, AppState,
     GatewayControlDecision, GatewayError, LocalSameFormatProviderCandidateAttempt,
@@ -348,7 +347,7 @@ pub(crate) async fn build_local_sync_plan_and_reports(
         Some(input.requested_model.as_str()),
         "candidate_evaluation_incomplete",
     );
-    let (attempts, candidate_count) = materialize_local_same_format_provider_candidate_attempts(
+    let (mut source, candidate_count) = build_local_same_format_provider_candidate_attempt_source(
         state, trace_id, &input, body_json, spec,
     )
     .await?;
@@ -362,7 +361,7 @@ pub(crate) async fn build_local_sync_plan_and_reports(
     }
 
     let mut plans = Vec::new();
-    for attempt in attempts {
+    while let Some(attempt) = source.next_attempt().await {
         let Some(payload) = maybe_build_local_same_format_provider_decision_payload_for_candidate(
             state, parts, trace_id, body_json, &input, attempt, spec,
         )
@@ -433,7 +432,7 @@ pub(crate) async fn build_local_stream_plan_and_reports(
         Some(input.requested_model.as_str()),
         "candidate_evaluation_incomplete",
     );
-    let (attempts, candidate_count) = materialize_local_same_format_provider_candidate_attempts(
+    let (mut source, candidate_count) = build_local_same_format_provider_candidate_attempt_source(
         state, trace_id, &input, body_json, spec,
     )
     .await?;
@@ -447,7 +446,7 @@ pub(crate) async fn build_local_stream_plan_and_reports(
     }
 
     let mut plans = Vec::new();
-    for attempt in attempts {
+    while let Some(attempt) = source.next_attempt().await {
         let Some(payload) = maybe_build_local_same_format_provider_decision_payload_for_candidate(
             state, parts, trace_id, body_json, &input, attempt, spec,
         )

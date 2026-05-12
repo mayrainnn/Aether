@@ -1177,12 +1177,9 @@ fn ai_serving_planner_separates_local_candidate_resolution_from_ranking() {
     let ranking_call = candidate_resolution
         .find("rank_eligible_local_execution_candidates(")
         .expect("candidate_resolution.rs should call core-backed local candidate ranking");
-    let pool_scheduler_call = candidate_resolution
-        .find("apply_local_execution_pool_scheduler(")
-        .expect("candidate_resolution.rs should call pool scheduler after ranking");
     assert!(
-        ranking_call < pool_scheduler_call,
-        "candidate_resolution.rs should rank eligible candidates before applying pool-internal account scheduling"
+        !candidate_resolution.contains("apply_local_execution_pool_scheduler("),
+        "candidate_resolution.rs should leave pool-internal key scheduling to dispatch cursors"
     );
     for pattern in [
         "pub(crate) async fn resolve_and_rank_local_execution_candidates(",
@@ -1270,9 +1267,18 @@ fn ai_serving_planner_separates_local_candidate_resolution_from_ranking() {
         );
     }
 
-    let pool_scheduler =
+    let planner_pool_scheduler =
         read_workspace_file("apps/aether-gateway/src/ai_serving/planner/pool_scheduler.rs");
     for pattern in [
+        "pub(crate) use crate::dispatch::pool_scheduler::apply_local_execution_pool_scheduler;",
+        "pub(crate) use crate::dispatch::pool_scheduler::PoolKeyCursor;",
+    ] {
+        assert!(
+            planner_pool_scheduler.contains(pattern),
+            "planner/pool_scheduler.rs should only re-export dispatch pool scheduler compatibility item {pattern}"
+        );
+    }
+    for forbidden in [
         "pub(crate) async fn apply_local_execution_pool_scheduler(",
         "run_ai_pool_scheduler(",
         "fn ai_pool_candidate_facts(",
@@ -1280,8 +1286,26 @@ fn ai_serving_planner_separates_local_candidate_resolution_from_ranking() {
         "fn ai_pool_runtime_state(",
     ] {
         assert!(
+            !planner_pool_scheduler.contains(forbidden),
+            "planner/pool_scheduler.rs should not own dispatch implementation {forbidden}"
+        );
+    }
+
+    let pool_scheduler = read_workspace_file("apps/aether-gateway/src/dispatch/pool_scheduler.rs");
+    for pattern in [
+        "pub(crate) async fn apply_local_execution_pool_scheduler(",
+        "pub(crate) struct PoolKeyCursor",
+        "run_ai_pool_scheduler(",
+        "fn ai_pool_candidate_facts(",
+        "fn ai_pool_scheduling_config(",
+        "fn ai_pool_runtime_state(",
+        "DEFAULT_POOL_WINDOW_SIZE",
+        "DEFAULT_POOL_PAGE_SIZE",
+        "DEFAULT_POOL_MAX_SCAN",
+    ] {
+        assert!(
             pool_scheduler.contains(pattern),
-            "planner/pool_scheduler.rs should adapt gateway pool runtime data through serving pool scheduler helper {pattern}"
+            "dispatch/pool_scheduler.rs should adapt gateway pool runtime data through serving pool scheduler helper {pattern}"
         );
     }
     for forbidden in [
@@ -1296,7 +1320,34 @@ fn ai_serving_planner_separates_local_candidate_resolution_from_ranking() {
     ] {
         assert!(
             !pool_scheduler.contains(forbidden),
-            "planner/pool_scheduler.rs should not own global candidate ranking or pool scheduling policy helper {forbidden}"
+            "dispatch/pool_scheduler.rs should not own global candidate ranking or pool scheduling policy helper {forbidden}"
+        );
+    }
+
+    let dispatch_refs = read_workspace_file("apps/aether-gateway/src/dispatch/refs.rs");
+    for pattern in [
+        "DispatchCandidateRef::SingleKey",
+        "DispatchCandidateRef::PoolRef",
+        "pub(crate) fn key_ref_for_candidate",
+        "pub(crate) fn pool_ref_for_candidate",
+    ] {
+        assert!(
+            dispatch_refs.contains(pattern),
+            "dispatch/refs.rs should expose logical dispatch refs through {pattern}"
+        );
+    }
+
+    let dispatch_core = read_workspace_file("crates/aether-dispatch-core/src/lib.rs");
+    for pattern in [
+        "DispatchCandidateRef",
+        "DispatchSequence",
+        "PoolDispatchPort",
+        "PoolWindowConfig",
+        "DispatchEffect",
+    ] {
+        assert!(
+            dispatch_core.contains(pattern),
+            "aether-dispatch-core should export pure dispatch primitive {pattern}"
         );
     }
 

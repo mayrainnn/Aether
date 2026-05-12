@@ -25,9 +25,9 @@ use http::{HeaderMap, HeaderValue, StatusCode};
 use serde_json::json;
 
 use super::super::{
-    build_router_with_state, build_state_with_execution_runtime_override, sample_endpoint,
-    sample_key, sample_management_token, sample_oauth_provider_config, sample_provider,
-    sample_proxy_node, start_server, AppState,
+    build_router_with_state, build_state_with_execution_runtime_override, hash_management_token,
+    sample_endpoint, sample_key, sample_management_token, sample_oauth_provider_config,
+    sample_provider, sample_proxy_node, start_server, AppState,
 };
 use crate::admin_api::{
     maybe_build_local_admin_provider_oauth_response, AdminAppState, AdminRequestContext,
@@ -7202,6 +7202,125 @@ async fn gateway_creates_updates_and_regenerates_admin_management_token_locally_
 }
 
 #[tokio::test]
+async fn gateway_allows_management_token_with_pool_write_for_provider_oauth_batch_import() {
+    let raw_token = "ae-provider-oauth-batch-pool-write";
+    let state = AppState::new().expect("gateway should build");
+    let admin_user = state
+        .create_local_auth_user_with_settings(
+            Some("provider-oauth-pool@example.com".to_string()),
+            true,
+            "admin".to_string(),
+            "hash".to_string(),
+            "admin".to_string(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("admin user should be created")
+        .expect("admin user should exist");
+    let mut management_token = sample_management_token(
+        "token-provider-oauth-batch-pool",
+        &admin_user.id,
+        "provider-oauth-pool",
+        true,
+    );
+    management_token.token.allowed_ips = None;
+    management_token.token.permissions = Some(json!(["admin:pool:read", "admin:pool:write"]));
+    let management_token_repository =
+        Arc::new(InMemoryManagementTokenRepository::seed_with_hashes(
+            vec![management_token],
+            vec![(
+                hash_management_token(raw_token),
+                "token-provider-oauth-batch-pool".to_string(),
+            )],
+        ));
+
+    let gateway = build_router_with_state(state.with_data_state_for_tests(
+        GatewayDataState::with_management_token_repository_for_tests(management_token_repository),
+    ));
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/provider-oauth/providers/provider-123/batch-import"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .bearer_auth(raw_token)
+        .send()
+        .await
+        .expect("request should succeed");
+
+    let status = response.status();
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{payload}");
+    assert_eq!(payload["detail"], "Admin provider OAuth data unavailable");
+
+    gateway_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_rejects_management_token_without_pool_write_for_provider_oauth_batch_import() {
+    let raw_token = "ae-provider-oauth-batch-pool-denied";
+    let state = AppState::new().expect("gateway should build");
+    let admin_user = state
+        .create_local_auth_user_with_settings(
+            Some("provider-oauth-pool-denied@example.com".to_string()),
+            true,
+            "admin".to_string(),
+            "hash".to_string(),
+            "admin".to_string(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("admin user should be created")
+        .expect("admin user should exist");
+    let mut management_token = sample_management_token(
+        "token-provider-oauth-batch-denied",
+        &admin_user.id,
+        "provider-oauth-denied",
+        true,
+    );
+    management_token.token.allowed_ips = None;
+    management_token.token.permissions = Some(json!(["admin:usage:read"]));
+    let management_token_repository =
+        Arc::new(InMemoryManagementTokenRepository::seed_with_hashes(
+            vec![management_token],
+            vec![(
+                hash_management_token(raw_token),
+                "token-provider-oauth-batch-denied".to_string(),
+            )],
+        ));
+
+    let gateway = build_router_with_state(state.with_data_state_for_tests(
+        GatewayDataState::with_management_token_repository_for_tests(management_token_repository),
+    ));
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/provider-oauth/providers/provider-123/batch-import"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .bearer_auth(raw_token)
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["detail"], "management token permission denied");
+    assert_eq!(payload["required_permission"], "admin:pool:write");
+    assert_eq!(payload["route_family"], "provider_oauth_manage");
+
+    gateway_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_deletes_admin_management_token_locally_with_trusted_admin_principal() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
@@ -7320,7 +7439,7 @@ async fn gateway_toggles_admin_management_token_locally_with_trusted_admin_princ
 }
 
 #[tokio::test]
-async fn gateway_rejects_management_token_principal_for_admin_management_token_routes() {
+async fn gateway_rejects_partial_management_token_for_admin_management_token_routes() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
@@ -7334,40 +7453,61 @@ async fn gateway_rejects_management_token_principal_for_admin_management_token_r
         }),
     );
 
-    let repository = Arc::new(InMemoryManagementTokenRepository::seed(vec![
-        sample_management_token("mt-admin-1", "user-1", "alice", true),
-    ]));
+    let raw_token = "ae-management-partial-access";
+    let state = AppState::new().expect("gateway should build");
+    let admin_user = state
+        .create_local_auth_user_with_settings(
+            Some("management-partial@example.com".to_string()),
+            true,
+            "admin".to_string(),
+            "hash".to_string(),
+            "admin".to_string(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("admin user should be created")
+        .expect("admin user should exist");
+    let mut management_token = sample_management_token(
+        "mt-admin-partial",
+        &admin_user.id,
+        "management-partial",
+        true,
+    );
+    management_token.token.allowed_ips = None;
+    management_token.token.permissions = Some(json!(["admin:usage:read"]));
+    let repository = Arc::new(InMemoryManagementTokenRepository::seed_with_hashes(
+        vec![management_token],
+        vec![(
+            hash_management_token(raw_token),
+            "mt-admin-partial".to_string(),
+        )],
+    ));
 
     let (upstream_url, upstream_handle) = start_server(upstream).await;
-    let gateway = build_router_with_state(
-        AppState::new()
-            .expect("gateway should build")
-            .with_data_state_for_tests(
-                GatewayDataState::with_management_token_repository_for_tests(repository),
-            ),
-    );
+    let gateway = build_router_with_state(state.with_data_state_for_tests(
+        GatewayDataState::with_management_token_repository_for_tests(repository),
+    ));
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
     let response = reqwest::Client::new()
         .get(format!("{gateway_url}/api/admin/management-tokens"))
         .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
-        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
-        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
-        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
-        .header(
-            TRUSTED_ADMIN_MANAGEMENT_TOKEN_ID_HEADER,
-            "mt-admin-principal",
-        )
+        .bearer_auth(raw_token)
         .send()
         .await
         .expect("request should succeed");
 
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["detail"], "management token permission denied");
     assert_eq!(
-        payload["detail"],
-        "不允许使用 Management Token 管理其他 Token，请使用 Web 界面或 JWT 认证"
+        payload["required_permission"],
+        "admin:management_tokens:read"
     );
+    assert_eq!(payload["route_family"], "management_tokens_manage");
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

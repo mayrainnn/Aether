@@ -23,8 +23,8 @@ use crate::rules::{
 };
 use crate::snapshot::GatewayProviderTransportSnapshot;
 use crate::vertex::{
-    is_vertex_api_key_transport_context,
-    local_vertex_api_key_gemini_transport_unsupported_reason_with_network,
+    is_vertex_service_account_transport_context, is_vertex_transport_context,
+    local_vertex_gemini_transport_unsupported_reason_with_network,
 };
 use crate::{build_transport_request_url, ensure_upstream_auth_header, TransportRequestUrlParams};
 
@@ -103,7 +103,7 @@ pub fn classify_same_format_provider_request_behavior(
         .provider_type
         .trim()
         .eq_ignore_ascii_case("claude_code");
-    let is_vertex = is_vertex_api_key_transport_context(transport);
+    let is_vertex = is_vertex_transport_context(transport);
     let is_kiro = is_kiro_provider_transport(transport);
     let upstream_is_stream = aether_ai_formats::resolve_upstream_is_stream_from_endpoint_config(
         transport.endpoint.config.as_ref(),
@@ -208,6 +208,14 @@ pub fn build_same_format_provider_request_body(
     ) {
         return None;
     }
+    if matches!(input.family, SameFormatProviderFamily::Gemini)
+        && aether_ai_formats::api_format_alias_matches(
+            input.provider_api_format,
+            "gemini:generate_content",
+        )
+    {
+        strip_gemini_function_response_ids(&mut provider_request_body);
+    }
     let require_body_stream_field = input.force_body_stream_field
         || input
             .body_json
@@ -220,6 +228,28 @@ pub fn build_same_format_provider_request_body(
         require_body_stream_field,
     );
     Some(provider_request_body)
+}
+
+fn strip_gemini_function_response_ids(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            for key in ["functionResponse", "function_response"] {
+                if let Some(function_response) = object.get_mut(key).and_then(Value::as_object_mut)
+                {
+                    function_response.remove("id");
+                }
+            }
+            for child in object.values_mut() {
+                strip_gemini_function_response_ids(child);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                strip_gemini_function_response_ids(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 pub fn build_same_format_provider_upstream_url(
@@ -328,7 +358,7 @@ pub fn same_format_provider_transport_unsupported_reason(
     } else if behavior.is_claude_code {
         local_claude_code_transport_unsupported_reason_with_network(transport, api_format)
     } else if behavior.is_vertex {
-        local_vertex_api_key_gemini_transport_unsupported_reason_with_network(transport)
+        local_vertex_gemini_transport_unsupported_reason_with_network(transport)
     } else {
         match family {
             SameFormatProviderFamily::Standard => {
@@ -391,6 +421,9 @@ pub fn should_try_same_format_provider_oauth_auth(
     behavior.is_kiro
         || matches!(family, SameFormatProviderFamily::Standard)
             && resolve_local_standard_auth(transport).is_none()
+        || matches!(family, SameFormatProviderFamily::Gemini)
+            && behavior.is_vertex
+            && is_vertex_service_account_transport_context(transport)
         || matches!(family, SameFormatProviderFamily::Gemini)
             && !behavior.is_vertex
             && resolve_local_gemini_auth(transport).is_none()
@@ -783,6 +816,66 @@ mod tests {
         .expect("body should build");
 
         assert!(body.get("stream").is_none());
+    }
+
+    #[test]
+    fn same_format_gemini_body_strips_function_response_id_for_upstream() {
+        let body = build_same_format_provider_request_body(SameFormatProviderRequestBodyInput {
+            body_json: &json!({
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [
+                            {
+                                "functionResponse": {
+                                    "id": "call_123",
+                                    "name": "lookup",
+                                    "response": {
+                                        "result": {
+                                            "id": "keep_result_id",
+                                            "ok": true
+                                        }
+                                    }
+                                }
+                            },
+                            {
+                                "function_response": {
+                                    "id": "call_456",
+                                    "name": "lookup_snake",
+                                    "response": {"ok": true}
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "stream": true
+            }),
+            mapped_model: "gemini-upstream",
+            client_api_format: "gemini:generate_content",
+            provider_api_format: "gemini:generate_content",
+            source_model: None,
+            family: SameFormatProviderFamily::Gemini,
+            body_rules: None,
+            request_headers: None,
+            upstream_is_stream: true,
+            force_body_stream_field: false,
+            kiro_auth_config: None,
+            is_claude_code: false,
+            enable_model_directives: false,
+        })
+        .expect("body should build");
+
+        let function_response = &body["contents"][0]["parts"][0]["functionResponse"];
+        assert!(function_response.get("id").is_none());
+        assert_eq!(function_response["name"], "lookup");
+        assert_eq!(
+            function_response["response"]["result"]["id"],
+            "keep_result_id"
+        );
+
+        let function_response = &body["contents"][0]["parts"][1]["function_response"];
+        assert!(function_response.get("id").is_none());
+        assert_eq!(function_response["name"], "lookup_snake");
     }
 
     #[test]

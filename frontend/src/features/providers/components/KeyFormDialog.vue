@@ -32,7 +32,24 @@
             data-1p-ignore="true"
           />
         </div>
-        <div>
+        <div v-if="showAuthTypeSelector">
+          <Label :for="authTypeSelectId">认证类型</Label>
+          <Select v-model="form.auth_type">
+            <SelectTrigger :id="authTypeSelectId">
+              <SelectValue placeholder="选择认证类型" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem
+                v-for="option in authTypeOptions"
+                :key="option.value"
+                :value="option.value"
+              >
+                {{ option.label }}
+              </SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div :class="showAuthTypeSelector ? 'col-span-2' : undefined">
           <Label :for="apiKeyInputId">
             {{ authSecretLabel }}
             {{ authSecretRequiredMark }}
@@ -360,7 +377,18 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
-import { Dialog, Button, Input, Label, Switch } from '@/components/ui'
+import {
+  Dialog,
+  Button,
+  Input,
+  Label,
+  Switch,
+  Select,
+  SelectTrigger,
+  SelectValue,
+  SelectContent,
+  SelectItem,
+} from '@/components/ui'
 import { Key, SquarePen, CircleHelp } from 'lucide-vue-next'
 import { useToast } from '@/composables/useToast'
 import { useFormDialog } from '@/composables/useFormDialog'
@@ -527,6 +555,7 @@ function getDefaultApiFormats(): string[] {
 const visibleApiFormats = computed(() => getSelectableApiFormats())
 
 const authTypeOptions = computed(() => getAuthTypeOptions(props.providerType))
+const showAuthTypeSelector = computed(() => props.providerType === 'vertex_ai')
 
 const apiFormatHelpOpen = ref(false)
 const apiFormatHelpHovered = ref(false)
@@ -677,6 +706,7 @@ const saving = ref(false)
 const formNonce = ref(createFieldNonce())
 const keyNameInputId = computed(() => `key-name-${formNonce.value}`)
 const apiKeyInputId = computed(() => `api-key-${formNonce.value}`)
+const authTypeSelectId = computed(() => `auth-type-${formNonce.value}`)
 const keyNameFieldName = computed(() => `key-name-field-${formNonce.value}`)
 const apiKeyFieldName = computed(() => `api-key-field-${formNonce.value}`)
 

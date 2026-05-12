@@ -1,3 +1,4 @@
+use aether_runtime_state::RuntimeLockLease;
 use aether_scheduler_core::parse_request_candidate_report_context;
 use serde_json::Value;
 
@@ -29,7 +30,15 @@ impl ExecutionAttemptIdentity {
 pub(crate) struct LocalExecutionCandidateMetadata {
     pub(crate) candidate_group_id: Option<String>,
     pub(crate) pool_key_index: Option<u32>,
+    pub(crate) pool_key_lease: Option<RuntimeLockLease>,
+    pub(crate) scheduler_affinity_epoch: Option<u64>,
 }
+
+pub(crate) const SCHEDULER_AFFINITY_EPOCH_REPORT_FIELD: &str = "scheduler_affinity_epoch";
+pub(crate) const POOL_KEY_LEASE_KEY_REPORT_FIELD: &str = "pool_key_lease_key";
+pub(crate) const POOL_KEY_LEASE_OWNER_REPORT_FIELD: &str = "pool_key_lease_owner";
+pub(crate) const POOL_KEY_LEASE_TOKEN_REPORT_FIELD: &str = "pool_key_lease_token";
+pub(crate) const POOL_KEY_LEASE_TTL_MS_REPORT_FIELD: &str = "pool_key_lease_ttl_ms";
 
 pub(crate) fn attempt_identity_from_report_context(
     report_context: Option<&Value>,
@@ -57,7 +66,66 @@ pub(crate) fn local_execution_candidate_metadata_from_report_context(
             .and_then(|value| value.get("pool_key_index"))
             .and_then(Value::as_u64)
             .and_then(|value| u32::try_from(value).ok()),
+        pool_key_lease: pool_key_lease_from_report_context(report_context),
+        scheduler_affinity_epoch: report_context
+            .and_then(|value| value.get(SCHEDULER_AFFINITY_EPOCH_REPORT_FIELD))
+            .and_then(Value::as_u64),
     }
+}
+
+pub(crate) fn insert_pool_key_lease_report_context_fields(
+    extra_fields: &mut serde_json::Map<String, Value>,
+    lease: Option<&RuntimeLockLease>,
+) {
+    let Some(lease) = lease else {
+        return;
+    };
+    extra_fields.insert(
+        POOL_KEY_LEASE_KEY_REPORT_FIELD.to_string(),
+        Value::String(lease.key.clone()),
+    );
+    extra_fields.insert(
+        POOL_KEY_LEASE_OWNER_REPORT_FIELD.to_string(),
+        Value::String(lease.owner.clone()),
+    );
+    extra_fields.insert(
+        POOL_KEY_LEASE_TOKEN_REPORT_FIELD.to_string(),
+        Value::String(lease.token.clone()),
+    );
+    extra_fields.insert(
+        POOL_KEY_LEASE_TTL_MS_REPORT_FIELD.to_string(),
+        Value::Number(lease.ttl_ms.into()),
+    );
+}
+
+fn pool_key_lease_from_report_context(report_context: Option<&Value>) -> Option<RuntimeLockLease> {
+    let report_context = report_context?;
+    let key = report_context
+        .get(POOL_KEY_LEASE_KEY_REPORT_FIELD)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let owner = report_context
+        .get(POOL_KEY_LEASE_OWNER_REPORT_FIELD)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let token = report_context
+        .get(POOL_KEY_LEASE_TOKEN_REPORT_FIELD)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let ttl_ms = report_context
+        .get(POOL_KEY_LEASE_TTL_MS_REPORT_FIELD)
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)?;
+
+    Some(RuntimeLockLease {
+        key: key.to_string(),
+        owner: owner.to_string(),
+        token: token.to_string(),
+        ttl_ms,
+    })
 }
 
 pub(crate) fn build_local_attempt_identities(
@@ -127,6 +195,7 @@ mod tests {
         GatewayProviderTransportEndpoint, GatewayProviderTransportKey,
         GatewayProviderTransportProvider, GatewayProviderTransportSnapshot,
     };
+    use aether_runtime_state::RuntimeLockLease;
 
     fn sample_transport(
         provider_max_retries: Option<i32>,
@@ -412,6 +481,10 @@ mod tests {
         let metadata = local_execution_candidate_metadata_from_report_context(Some(&json!({
             "candidate_group_id": "group-1",
             "pool_key_index": 3,
+            "pool_key_lease_key": "ap:provider-1:lease:key-1",
+            "pool_key_lease_owner": "gateway-1",
+            "pool_key_lease_token": "gateway-1:token-1",
+            "pool_key_lease_ttl_ms": 900000,
         })));
 
         assert_eq!(
@@ -419,6 +492,13 @@ mod tests {
             LocalExecutionCandidateMetadata {
                 candidate_group_id: Some("group-1".to_string()),
                 pool_key_index: Some(3),
+                pool_key_lease: Some(RuntimeLockLease {
+                    key: "ap:provider-1:lease:key-1".to_string(),
+                    owner: "gateway-1".to_string(),
+                    token: "gateway-1:token-1".to_string(),
+                    ttl_ms: 900000,
+                }),
+                scheduler_affinity_epoch: None,
             }
         );
     }

@@ -54,6 +54,7 @@ use crate::headers::{
     should_skip_request_header,
 };
 use crate::router::RequestAdmissionError;
+use crate::scheduler::config::{read_scheduler_ordering_config, SchedulerSchedulingMode};
 use crate::{
     AppState, FrontdoorUserRpmOutcome, GatewayError, GatewayFallbackMetricKind,
     GatewayFallbackReason, LocalExecutionRuntimeMissDiagnostic,
@@ -297,6 +298,20 @@ async fn maybe_forward_public_request_to_tunnel_owner(
     }) else {
         return Ok(None);
     };
+    let cache_affinity_enabled = match read_scheduler_ordering_config(state).await {
+        Ok(config) => config.scheduling_mode == SchedulerSchedulingMode::CacheAffinity,
+        Err(err) => {
+            warn!(
+                trace_id = %request_context.trace_id,
+                error = ?err,
+                "gateway failed to load scheduler config while checking tunnel affinity forwarding mode"
+            );
+            SchedulerSchedulingMode::default() == SchedulerSchedulingMode::CacheAffinity
+        }
+    };
+    if !cache_affinity_enabled {
+        return Ok(None);
+    }
     let Some(api_format) = decision
         .auth_endpoint_signature
         .as_deref()
@@ -859,9 +874,13 @@ pub(crate) async fn proxy_request(
             request_permit.take(),
         ));
     }
-    if let Some(response) =
-        maybe_build_local_admin_proxy_response(&state, &request_context, local_proxy_body.as_ref())
-            .await?
+    if let Some(response) = maybe_build_local_admin_proxy_response(
+        &state,
+        &request_context,
+        &parts.headers,
+        local_proxy_body.as_ref(),
+    )
+    .await?
     {
         let execution_path =
             resolve_local_proxy_execution_path(&response, EXECUTION_PATH_PUBLIC_PROXY_PASSTHROUGH);
@@ -1641,6 +1660,7 @@ fn local_execution_runtime_miss_skip_reasons_summary(
 fn local_execution_runtime_miss_skip_reason_label(reason: &str) -> &str {
     match reason {
         "api_key_concurrency_limit_reached" => "API Key 并发已达上限",
+        "auth_channel_mismatch" => "认证通道不匹配",
         "auth_snapshot_missing" => "API Key 本地执行配置缺失",
         "endpoint_api_format_changed" => "端点 API 格式已变更",
         "endpoint_inactive" => "端点未启用",
@@ -1649,6 +1669,10 @@ fn local_execution_runtime_miss_skip_reason_label(reason: &str) -> &str {
         "key_inactive" => "API Key 未启用",
         "key_model_disabled" => "API Key 未允许该模型",
         "mapped_model_missing" => "模型映射缺失",
+        "pool_cooldown" => "池内账号处于冷却中",
+        "pool_cost_limit_reached" => "池内账号成本额度已用尽",
+        "pool_group_exhausted" => "池化提供商没有可调度账号",
+        "pool_key_lease_busy" => "池内账号正被其他请求占用",
         "provider_inactive" => "提供商未启用",
         "provider_request_body_missing" => "无法构建上游请求体",
         "provider_request_body_build_failed" => "上游请求体转换失败",

@@ -103,7 +103,15 @@ DELETE FROM management_tokens
 WHERE id = $1
 "#;
 
-const CREATE_MANAGEMENT_TOKEN_SQL: &str = r#"
+const MANAGEMENT_TOKEN_JSON_COLUMN_TYPES_SQL: &str = r#"
+SELECT column_name, udt_name
+FROM information_schema.columns
+WHERE table_schema = 'public'
+  AND table_name = 'management_tokens'
+  AND column_name IN ('allowed_ips', 'permissions')
+"#;
+
+const CREATE_MANAGEMENT_TOKEN_SQL_PREFIX: &str = r#"
 INSERT INTO management_tokens (
   id,
   user_id,
@@ -123,8 +131,9 @@ VALUES (
   $4,
   $5,
   $6,
-  $7,
-  $8,
+"#;
+
+const CREATE_MANAGEMENT_TOKEN_SQL_SUFFIX: &str = r#",
   CASE
     WHEN $9::bigint IS NULL THEN NULL
     ELSE to_timestamp($9::double precision)
@@ -148,26 +157,23 @@ RETURNING
   EXTRACT(EPOCH FROM updated_at)::bigint AS updated_at_unix_secs
 "#;
 
-const UPDATE_MANAGEMENT_TOKEN_SQL: &str = r#"
+const UPDATE_MANAGEMENT_TOKEN_SQL_PREFIX: &str = r#"
 UPDATE management_tokens
-SET name = COALESCE($2, name),
-    description = CASE
-      WHEN $3 THEN NULL
-      WHEN $4::text IS NULL THEN description
-      ELSE $4
-    END,
-    allowed_ips = CASE
-      WHEN $5 THEN NULL
-      WHEN $6::json IS NULL THEN allowed_ips
-      ELSE $6
-    END,
-    permissions = COALESCE($7::json, permissions),
+SET name = $2,
+    description = $3,
+    allowed_ips =
+"#;
+
+const UPDATE_MANAGEMENT_TOKEN_SQL_MIDDLE: &str = r#",
+    permissions =
+"#;
+
+const UPDATE_MANAGEMENT_TOKEN_SQL_SUFFIX: &str = r#",
     expires_at = CASE
-      WHEN $8 THEN NULL
-      WHEN $9::bigint IS NULL THEN expires_at
-      ELSE to_timestamp($9::double precision)
+      WHEN $6::bigint IS NULL THEN NULL
+      ELSE to_timestamp($6::double precision)
     END,
-    is_active = COALESCE($10, is_active),
+    is_active = $7,
     updated_at = NOW()
 WHERE id = $1
 RETURNING
@@ -261,10 +267,93 @@ pub struct SqlxManagementTokenRepository {
     pool: PgPool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JsonColumnType {
+    Json,
+    Jsonb,
+}
+
+impl JsonColumnType {
+    fn from_udt_name(value: &str) -> Option<Self> {
+        match value {
+            "json" => Some(Self::Json),
+            "jsonb" => Some(Self::Jsonb),
+            _ => None,
+        }
+    }
+
+    fn sql_type(self) -> &'static str {
+        match self {
+            Self::Json => "json",
+            Self::Jsonb => "jsonb",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ManagementTokenJsonColumnTypes {
+    allowed_ips: JsonColumnType,
+    permissions: JsonColumnType,
+}
+
 impl SqlxManagementTokenRepository {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
+
+    async fn json_column_types(&self) -> Result<ManagementTokenJsonColumnTypes, DataLayerError> {
+        let rows = sqlx::query(MANAGEMENT_TOKEN_JSON_COLUMN_TYPES_SQL)
+            .fetch_all(&self.pool)
+            .await
+            .map_postgres_err()?;
+        let mut allowed_ips = None;
+        let mut permissions = None;
+        for row in rows {
+            let column_name: String = row.try_get("column_name").map_postgres_err()?;
+            let udt_name: String = row.try_get("udt_name").map_postgres_err()?;
+            let Some(column_type) = JsonColumnType::from_udt_name(udt_name.as_str()) else {
+                return Err(DataLayerError::UnexpectedValue(format!(
+                    "unsupported management_tokens.{column_name} column type: {udt_name}"
+                )));
+            };
+            match column_name.as_str() {
+                "allowed_ips" => allowed_ips = Some(column_type),
+                "permissions" => permissions = Some(column_type),
+                _ => {}
+            }
+        }
+
+        match (allowed_ips, permissions) {
+            (Some(allowed_ips), Some(permissions)) => Ok(ManagementTokenJsonColumnTypes {
+                allowed_ips,
+                permissions,
+            }),
+            _ => Err(DataLayerError::UnexpectedValue(
+                "management_tokens JSON column metadata missing".to_string(),
+            )),
+        }
+    }
+}
+
+fn create_management_token_sql(types: ManagementTokenJsonColumnTypes) -> String {
+    format!(
+        "{}  $7::text::{},\n  $8::text::{}{}",
+        CREATE_MANAGEMENT_TOKEN_SQL_PREFIX,
+        types.allowed_ips.sql_type(),
+        types.permissions.sql_type(),
+        CREATE_MANAGEMENT_TOKEN_SQL_SUFFIX
+    )
+}
+
+fn update_management_token_sql(types: ManagementTokenJsonColumnTypes) -> String {
+    format!(
+        "{} $4::text::{}{} $5::text::{}{}",
+        UPDATE_MANAGEMENT_TOKEN_SQL_PREFIX,
+        types.allowed_ips.sql_type(),
+        UPDATE_MANAGEMENT_TOKEN_SQL_MIDDLE,
+        types.permissions.sql_type(),
+        UPDATE_MANAGEMENT_TOKEN_SQL_SUFFIX
+    )
 }
 
 #[async_trait]
@@ -330,15 +419,19 @@ impl ManagementTokenWriteRepository for SqlxManagementTokenRepository {
         record: &CreateManagementTokenRecord,
     ) -> Result<StoredManagementToken, DataLayerError> {
         record.validate()?;
-        let row = sqlx::query(CREATE_MANAGEMENT_TOKEN_SQL)
+        let json_column_types = self.json_column_types().await?;
+        let sql = create_management_token_sql(json_column_types);
+        let allowed_ips = json_to_string(record.allowed_ips.as_ref())?;
+        let permissions = json_to_string(record.permissions.as_ref())?;
+        let row = sqlx::query(sql.as_str())
             .bind(&record.id)
             .bind(&record.user_id)
             .bind(&record.token_hash)
             .bind(record.token_prefix.as_deref())
             .bind(&record.name)
             .bind(record.description.as_deref())
-            .bind(record.allowed_ips.as_ref())
-            .bind(record.permissions.as_ref())
+            .bind(allowed_ips)
+            .bind(permissions)
             .bind(
                 record
                     .expires_at_unix_secs
@@ -356,21 +449,56 @@ impl ManagementTokenWriteRepository for SqlxManagementTokenRepository {
         record: &UpdateManagementTokenRecord,
     ) -> Result<Option<StoredManagementToken>, DataLayerError> {
         record.validate()?;
-        let row = sqlx::query(UPDATE_MANAGEMENT_TOKEN_SQL)
+        let Some(current) = self
+            .get_management_token_with_user(&record.token_id)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let json_column_types = self.json_column_types().await?;
+        let sql = update_management_token_sql(json_column_types);
+        let name = record
+            .name
+            .as_deref()
+            .unwrap_or(current.token.name.as_str());
+        let description = if record.clear_description {
+            None
+        } else {
+            record
+                .description
+                .as_deref()
+                .or(current.token.description.as_deref())
+        };
+        let allowed_ips = if record.clear_allowed_ips {
+            None
+        } else {
+            record
+                .allowed_ips
+                .as_ref()
+                .or(current.token.allowed_ips.as_ref())
+        };
+        let permissions = record
+            .permissions
+            .as_ref()
+            .or(current.token.permissions.as_ref());
+        let expires_at_unix_secs = if record.clear_expires_at {
+            None
+        } else {
+            record
+                .expires_at_unix_secs
+                .or(current.token.expires_at_unix_secs)
+        };
+        let is_active = record.is_active.unwrap_or(current.token.is_active);
+        let allowed_ips = json_to_string(allowed_ips)?;
+        let permissions = json_to_string(permissions)?;
+        let row = sqlx::query(sql.as_str())
             .bind(&record.token_id)
-            .bind(record.name.as_deref())
-            .bind(record.clear_description)
-            .bind(record.description.as_deref())
-            .bind(record.clear_allowed_ips)
-            .bind(record.allowed_ips.as_ref())
-            .bind(record.permissions.as_ref())
-            .bind(record.clear_expires_at)
-            .bind(
-                record
-                    .expires_at_unix_secs
-                    .and_then(|value| i64::try_from(value).ok()),
-            )
-            .bind(record.is_active)
+            .bind(name)
+            .bind(description)
+            .bind(allowed_ips)
+            .bind(permissions)
+            .bind(expires_at_unix_secs.and_then(|value| i64::try_from(value).ok()))
+            .bind(is_active)
             .fetch_optional(&self.pool)
             .await
             .map_err(|err| map_management_token_write_error(err, record.name.as_deref()))?;
@@ -432,6 +560,18 @@ impl ManagementTokenWriteRepository for SqlxManagementTokenRepository {
 
 fn optional_unix_secs(value: Option<i64>) -> Option<u64> {
     value.and_then(|value| u64::try_from(value).ok())
+}
+
+fn json_to_string(value: Option<&serde_json::Value>) -> Result<Option<String>, DataLayerError> {
+    value
+        .map(|value| {
+            serde_json::to_string(value).map_err(|err| {
+                DataLayerError::UnexpectedValue(format!(
+                    "invalid management token JSON field: {err}"
+                ))
+            })
+        })
+        .transpose()
 }
 
 fn map_management_token_write_error(
@@ -503,7 +643,10 @@ fn map_token_with_user_row(row: &PgRow) -> Result<StoredManagementTokenWithUser,
 
 #[cfg(test)]
 mod tests {
-    use super::SqlxManagementTokenRepository;
+    use super::{
+        create_management_token_sql, update_management_token_sql, JsonColumnType,
+        ManagementTokenJsonColumnTypes, SqlxManagementTokenRepository,
+    };
     use crate::driver::postgres::{PostgresPoolConfig, PostgresPoolFactory};
 
     #[tokio::test]
@@ -522,5 +665,43 @@ mod tests {
 
         let pool = factory.connect_lazy().expect("pool should build");
         let _repository = SqlxManagementTokenRepository::new(pool);
+    }
+
+    #[test]
+    fn repository_sql_casts_json_fields_to_detected_column_types_without_json_case() {
+        let jsonb_types = ManagementTokenJsonColumnTypes {
+            allowed_ips: JsonColumnType::Jsonb,
+            permissions: JsonColumnType::Jsonb,
+        };
+        let json_types = ManagementTokenJsonColumnTypes {
+            allowed_ips: JsonColumnType::Json,
+            permissions: JsonColumnType::Json,
+        };
+        let jsonb_create_sql = create_management_token_sql(jsonb_types);
+        let jsonb_update_sql = update_management_token_sql(jsonb_types);
+        let json_create_sql = create_management_token_sql(json_types);
+        let json_update_sql = update_management_token_sql(json_types);
+
+        assert!(jsonb_create_sql.contains("$7::text::jsonb"));
+        assert!(jsonb_create_sql.contains("$8::text::jsonb"));
+        assert!(jsonb_update_sql.contains("allowed_ips =\n $4::text::jsonb"));
+        assert!(jsonb_update_sql.contains("permissions =\n $5::text::jsonb"));
+
+        assert!(json_create_sql.contains("$7::text::json"));
+        assert!(json_create_sql.contains("$8::text::json"));
+        assert!(json_update_sql.contains("allowed_ips =\n $4::text::json"));
+        assert!(json_update_sql.contains("permissions =\n $5::text::json"));
+
+        for sql in [
+            jsonb_create_sql.as_str(),
+            jsonb_update_sql.as_str(),
+            json_create_sql.as_str(),
+            json_update_sql.as_str(),
+        ] {
+            assert!(!sql.contains("allowed_ips = CASE"));
+            assert!(!sql.contains("permissions = CASE"));
+            assert!(!sql.contains("$6::json IS NULL"));
+            assert!(!sql.contains("COALESCE($7::json"));
+        }
     }
 }

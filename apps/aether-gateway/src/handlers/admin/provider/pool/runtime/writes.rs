@@ -2,6 +2,7 @@ use super::keys::{
     pool_cooldown_index_key, pool_cooldown_key, pool_cost_key, pool_latency_key, pool_lru_key,
     pool_sticky_key, pool_stream_timeout_key,
 };
+use crate::handlers::admin::provider::pool::config::admin_provider_pool_cache_affinity_enabled;
 use crate::handlers::admin::provider::shared::support::{
     AdminProviderPoolConfig, AdminProviderPoolUnschedulableRule,
 };
@@ -346,6 +347,7 @@ pub(crate) async fn record_admin_provider_pool_success(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .filter(|_| pool_config.sticky_session_ttl_seconds > 0)
+        .filter(|_| admin_provider_pool_cache_affinity_enabled(pool_config))
     {
         let _ = runtime
             .kv_set(
@@ -613,6 +615,10 @@ mod tests {
             health_policy_enabled: true,
             probing_enabled: false,
             probing_interval_minutes: 10,
+            probe_concurrency: 4,
+            score_top_n: 128,
+            score_fallback_scan_limit: 1024,
+            score_rules: aether_ai_serving::PoolMemberScoreRules::default(),
             stream_timeout_threshold: 3,
             stream_timeout_window_seconds: 1800,
             stream_timeout_cooldown_seconds: 300,
@@ -807,6 +813,50 @@ mod tests {
         assert_eq!(runtime.sticky_bound_key_id, None);
         assert_eq!(runtime.sticky_sessions_by_key.get("key-1"), None);
         assert_eq!(runtime.cost_window_usage_by_key.get("key-1"), Some(&120));
+        assert!(runtime.lru_score_by_key.contains_key("key-1"));
+    }
+
+    #[tokio::test]
+    async fn success_feedback_does_not_write_sticky_without_cache_affinity() {
+        let Some(redis) = start_managed_redis_or_skip().await else {
+            return;
+        };
+        let app = build_runner_app(redis.redis_url(), "pool_runtime_no_sticky_load_balance").await;
+        let runtime = app.runtime_state.as_ref();
+        let mut pool_config = sample_pool_config();
+        pool_config.scheduling_presets = vec![AdminProviderPoolSchedulingPreset {
+            preset: "load_balance".to_string(),
+            enabled: true,
+            mode: None,
+        }];
+        pool_config.lru_enabled = false;
+        let key_ids = vec!["key-1".to_string()];
+
+        record_admin_provider_pool_success(
+            runtime,
+            "provider-1",
+            "key-1",
+            &pool_config,
+            Some("session-1"),
+            120,
+            Some(80),
+        )
+        .await;
+
+        let runtime = read_admin_provider_pool_runtime_state(
+            runtime,
+            "provider-1",
+            &key_ids,
+            &pool_config,
+            Some("session-1"),
+        )
+        .await;
+
+        assert_eq!(runtime.total_sticky_sessions, 0);
+        assert_eq!(runtime.sticky_bound_key_id, None);
+        assert_eq!(runtime.sticky_sessions_by_key.get("key-1"), None);
+        assert_eq!(runtime.cost_window_usage_by_key.get("key-1"), Some(&120));
+        assert_eq!(runtime.latency_avg_ms_by_key.get("key-1"), Some(&80.0));
         assert!(runtime.lru_score_by_key.contains_key("key-1"));
     }
 

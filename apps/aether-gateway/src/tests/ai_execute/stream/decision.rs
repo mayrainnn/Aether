@@ -1,8 +1,8 @@
 use super::{
     any, build_router_with_state, build_state_with_execution_runtime_override, json, start_server,
-    to_bytes, AppState, Arc, Body, Bytes, HeaderName, HeaderValue, Json, Mutex, Request, Response,
-    Router, StatusCode, EXECUTION_PATH_EXECUTION_RUNTIME_STREAM, EXECUTION_PATH_HEADER,
-    TRACE_ID_HEADER,
+    strip_sse_keepalive_comments, to_bytes, AppState, Arc, Body, Bytes, HeaderName, HeaderValue,
+    Json, Mutex, Request, Response, Router, StatusCode, EXECUTION_PATH_EXECUTION_RUNTIME_STREAM,
+    EXECUTION_PATH_HEADER, TRACE_ID_HEADER,
 };
 use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
 use aether_data::repository::auth::{
@@ -391,7 +391,7 @@ async fn gateway_executes_openai_chat_stream_via_local_decision_gate_without_exe
         Some(EXECUTION_PATH_EXECUTION_RUNTIME_STREAM)
     );
     assert_eq!(
-        response.text().await.expect("body should read"),
+        strip_sse_keepalive_comments(&response.text().await.expect("body should read")),
         "data: {\"id\":\"chatcmpl-local-123\"}\n\ndata: [DONE]\n\n"
     );
 
@@ -1774,7 +1774,7 @@ async fn gateway_executes_openai_chat_stream_with_custom_path_via_local_decision
         Some(EXECUTION_PATH_EXECUTION_RUNTIME_STREAM)
     );
     assert_eq!(
-        response.text().await.expect("body should read"),
+        strip_sse_keepalive_comments(&response.text().await.expect("body should read")),
         "data: {\"id\":\"chatcmpl-local-custom-path-123\"}\n\ndata: [DONE]\n\n"
     );
 
@@ -2285,7 +2285,7 @@ async fn gateway_retries_next_local_openai_chat_stream_candidate_after_retryable
         Some(EXECUTION_PATH_EXECUTION_RUNTIME_STREAM)
     );
     assert_eq!(
-        response.text().await.expect("body should read"),
+        strip_sse_keepalive_comments(&response.text().await.expect("body should read")),
         "data: {\"id\":\"chatcmpl-local-stream-failover-123\"}\n\ndata: [DONE]\n\n"
     );
 
@@ -2338,6 +2338,20 @@ async fn gateway_retries_next_local_openai_chat_stream_candidate_after_retryable
     assert_eq!(
         stored_candidates[0].error_message.as_deref(),
         Some("execution runtime stream returned retryable status 429")
+    );
+    let failed_upstream_response = stored_candidates[0]
+        .extra_data
+        .as_ref()
+        .and_then(|value| value.get("upstream_response"))
+        .expect("failed stream candidate should keep its upstream response");
+    assert_eq!(failed_upstream_response["status_code"], json!(429));
+    assert_eq!(
+        failed_upstream_response["body"]["error"]["message"],
+        json!("rate limited")
+    );
+    assert_eq!(
+        failed_upstream_response["body"]["error"]["type"],
+        json!("rate_limit_error")
     );
     assert_eq!(stored_candidates[1].candidate_index, 1);
     assert_eq!(stored_candidates[1].status, RequestCandidateStatus::Success);

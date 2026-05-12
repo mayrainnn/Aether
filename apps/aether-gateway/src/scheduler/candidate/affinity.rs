@@ -47,13 +47,14 @@ pub(super) fn remember_scheduler_affinity(
     affinity_cache_key: Option<&str>,
     state: &(impl SchedulerRuntimeState + ?Sized),
     candidate: &SchedulerMinimalCandidateSelectionCandidate,
+    expected_epoch: Option<u64>,
 ) {
     let Some(cache_key) = affinity_cache_key else {
         return;
     };
     let (provider_id, endpoint_id, key_id) = candidate_key(candidate);
 
-    state.remember_scheduler_affinity_target(
+    let _ = state.remember_scheduler_affinity_target_for_epoch(
         cache_key,
         SchedulerAffinityTarget {
             provider_id,
@@ -62,5 +63,6 @@ pub(super) fn remember_scheduler_affinity(
         },
         SCHEDULER_AFFINITY_TTL,
         SCHEDULER_AFFINITY_MAX_ENTRIES,
+        expected_epoch,
     );
 }

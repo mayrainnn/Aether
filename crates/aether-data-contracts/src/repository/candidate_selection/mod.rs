@@ -2,6 +2,7 @@ mod types;
 
 pub use types::{
     MinimalCandidateSelectionReadRepository, MinimalCandidateSelectionRepository,
-    StoredMinimalCandidateSelectionRow, StoredPoolKeyCandidateRowsQuery,
+    StoredMinimalCandidateSelectionRow, StoredPoolKeyCandidateOrder,
+    StoredPoolKeyCandidateRowsByKeyIdsQuery, StoredPoolKeyCandidateRowsQuery,
     StoredProviderModelMapping, StoredRequestedModelCandidateRowsQuery,
 };

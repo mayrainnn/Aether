@@ -158,9 +158,21 @@ pub(super) fn classify_admin_observability_family_route(
             "admin:api_keys",
             false,
         ))
+    } else if method == http::Method::POST
+        && normalized_path_no_trailing.starts_with("/api/admin/api-keys/")
+        && normalized_path_no_trailing.ends_with("/install-sessions")
+        && normalized_path_no_trailing.matches('/').count() == 5
+    {
+        Some(classified(
+            "admin_proxy",
+            "api_keys_manage",
+            "create_api_key_install_session",
+            "admin:api_keys",
+            false,
+        ))
     } else if method == http::Method::GET
-        && normalized_path.starts_with("/api/admin/api-keys/")
-        && normalized_path.matches('/').count() == 4
+        && normalized_path_no_trailing.starts_with("/api/admin/api-keys/")
+        && normalized_path_no_trailing.matches('/').count() == 4
     {
         Some(classified(
             "admin_proxy",
@@ -170,8 +182,8 @@ pub(super) fn classify_admin_observability_family_route(
             false,
         ))
     } else if method == http::Method::PUT
-        && normalized_path.starts_with("/api/admin/api-keys/")
-        && normalized_path.matches('/').count() == 4
+        && normalized_path_no_trailing.starts_with("/api/admin/api-keys/")
+        && normalized_path_no_trailing.matches('/').count() == 4
     {
         Some(classified(
             "admin_proxy",
@@ -237,6 +249,18 @@ pub(super) fn classify_admin_observability_family_route(
             "admin_proxy",
             "pool_manage",
             "list_keys",
+            "admin:pool",
+            false,
+        ))
+    } else if method == http::Method::GET
+        && normalized_path_no_trailing.starts_with("/api/admin/pool/")
+        && normalized_path_no_trailing.ends_with("/scores")
+        && normalized_path_no_trailing.matches('/').count() == 5
+    {
+        Some(classified(
+            "admin_proxy",
+            "pool_manage",
+            "scores",
             "admin:pool",
             false,
         ))

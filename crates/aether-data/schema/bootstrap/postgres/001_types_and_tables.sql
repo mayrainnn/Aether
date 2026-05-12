@@ -352,7 +352,8 @@ CREATE TABLE IF NOT EXISTS public.management_tokens (
     token_prefix character varying(12),
     name character varying(100) NOT NULL,
     description text,
-    allowed_ips json,
+    allowed_ips jsonb,
+    permissions jsonb,
     expires_at timestamp with time zone,
     last_used_at timestamp with time zone,
     last_used_ip character varying(45),
@@ -360,7 +361,7 @@ CREATE TABLE IF NOT EXISTS public.management_tokens (
     is_active boolean DEFAULT true NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT check_allowed_ips_not_empty CHECK (((allowed_ips IS NULL) OR ((allowed_ips)::text = 'null'::text) OR (json_array_length(allowed_ips) > 0)))
+    CONSTRAINT check_allowed_ips_not_empty CHECK (CASE WHEN ((allowed_ips IS NULL) OR (allowed_ips = 'null'::jsonb)) THEN true WHEN (jsonb_typeof(allowed_ips) = 'array'::text) THEN (jsonb_array_length(allowed_ips) > 0) ELSE false END)
 );
 
 
@@ -532,6 +533,38 @@ CREATE TABLE IF NOT EXISTS public.provider_api_keys (
     status character varying(64) DEFAULT 'active'::character varying NOT NULL,
     weight bigint DEFAULT 1 NOT NULL,
     metadata json
+);
+
+
+
+--
+-- Name: pool_member_scores; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE IF NOT EXISTS public.pool_member_scores (
+    id character varying(192) NOT NULL,
+    pool_kind character varying(64) NOT NULL,
+    pool_id character varying(64) NOT NULL,
+    member_kind character varying(64) NOT NULL,
+    member_id character varying(64) NOT NULL,
+    capability character varying(64) NOT NULL,
+    scope_kind character varying(64) NOT NULL,
+    scope_id character varying(128),
+    score double precision DEFAULT 0 NOT NULL,
+    hard_state character varying(64) DEFAULT 'unknown'::character varying NOT NULL,
+    score_version bigint DEFAULT 1 NOT NULL,
+    score_reason jsonb NOT NULL,
+    last_ranked_at bigint,
+    last_scheduled_at bigint,
+    last_success_at bigint,
+    last_failure_at bigint,
+    failure_count bigint DEFAULT 0 NOT NULL,
+    last_probe_attempt_at bigint,
+    last_probe_success_at bigint,
+    last_probe_failure_at bigint,
+    probe_failure_count bigint DEFAULT 0 NOT NULL,
+    probe_status character varying(64) DEFAULT 'never'::character varying NOT NULL,
+    updated_at bigint NOT NULL
 );
 
 
@@ -1238,8 +1271,11 @@ CREATE TABLE IF NOT EXISTS public.users (
     password_hash character varying(255),
     role public.userrole DEFAULT 'user'::public.userrole NOT NULL,
     allowed_providers json,
+    allowed_providers_mode text DEFAULT 'unrestricted'::text NOT NULL,
     allowed_api_formats json,
+    allowed_api_formats_mode text DEFAULT 'unrestricted'::text NOT NULL,
     allowed_models json,
+    allowed_models_mode text DEFAULT 'unrestricted'::text NOT NULL,
     model_capability_settings json,
     is_active boolean DEFAULT true NOT NULL,
     is_deleted boolean DEFAULT false NOT NULL,
@@ -1251,7 +1287,44 @@ CREATE TABLE IF NOT EXISTS public.users (
     ldap_username character varying(255),
     email_verified boolean NOT NULL,
     rate_limit integer,
+    rate_limit_mode text DEFAULT 'system'::text NOT NULL,
     metadata json
+);
+
+
+
+--
+-- Name: user_groups; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE IF NOT EXISTS public.user_groups (
+    id character varying(36) NOT NULL,
+    name character varying(100) NOT NULL,
+    normalized_name character varying(100) NOT NULL,
+    description text,
+    priority integer DEFAULT 0 NOT NULL,
+    allowed_providers json,
+    allowed_providers_mode text DEFAULT 'inherit'::text NOT NULL,
+    allowed_api_formats json,
+    allowed_api_formats_mode text DEFAULT 'inherit'::text NOT NULL,
+    allowed_models json,
+    allowed_models_mode text DEFAULT 'inherit'::text NOT NULL,
+    rate_limit integer,
+    rate_limit_mode text DEFAULT 'inherit'::text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+
+--
+-- Name: user_group_members; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE IF NOT EXISTS public.user_group_members (
+    group_id character varying(36) NOT NULL,
+    user_id character varying(36) NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
 

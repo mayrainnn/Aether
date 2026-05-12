@@ -29,12 +29,14 @@ pub(crate) use self::provider::oauth::quota::antigravity::refresh_antigravity_pr
 pub(crate) use self::provider::oauth::quota::chatgpt_web::refresh_chatgpt_web_provider_quota_locally;
 pub(crate) use self::provider::oauth::quota::codex::refresh_codex_provider_quota_locally;
 pub(crate) use self::provider::oauth::quota::kiro::refresh_kiro_provider_quota_locally;
+pub(crate) use self::provider::oauth::quota::shared::provider_type_supports_quota_refresh;
 pub(crate) use self::provider::oauth::runtime::{
     provider_oauth_runtime_endpoint_for_provider, refresh_provider_oauth_account_state_after_update,
 };
 pub(crate) use self::provider::ops::providers::actions::admin_provider_ops_local_action_response;
 pub(crate) use self::provider::pool::config::admin_provider_pool_config;
 pub(crate) use self::provider::pool_admin::maybe_build_local_admin_pool_response;
+pub(crate) use self::provider::write::provider::reconcile_admin_fixed_provider_template_endpoints;
 pub(crate) use self::provider::{
     maybe_build_local_admin_provider_oauth_response, maybe_build_local_admin_providers_response,
 };

@@ -230,7 +230,7 @@ pub(super) fn classify_oauth_route(
             "admin_proxy",
             "provider_oauth_manage",
             "batch_import_oauth",
-            "admin:provider_oauth",
+            "admin:pool",
             false,
         ))
     } else if method == http::Method::POST
@@ -241,7 +241,7 @@ pub(super) fn classify_oauth_route(
             "admin_proxy",
             "provider_oauth_manage",
             "start_batch_import_oauth_task",
-            "admin:provider_oauth",
+            "admin:pool",
             false,
         ))
     } else if method == http::Method::GET
@@ -252,7 +252,7 @@ pub(super) fn classify_oauth_route(
             "admin_proxy",
             "provider_oauth_manage",
             "get_batch_import_task_status",
-            "admin:provider_oauth",
+            "admin:pool",
             false,
         ))
     } else if method == http::Method::POST

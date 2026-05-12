@@ -540,8 +540,8 @@ async fn gateway_forwards_public_request_to_remote_tunnel_owner_before_fallback_
     state = state
         .with_data_state_for_tests(data_state)
         .with_tunnel_identity_for_tests("gateway-a", Some("http://gateway-a:8080"));
-    state.scheduler_affinity_cache.insert(
-        "scheduler_affinity:api-key-affinity-1:openai:chat:gpt-4.1".to_string(),
+    state.remember_scheduler_affinity_target(
+        "scheduler_affinity:api-key-affinity-1:openai:chat:gpt-4.1",
         crate::cache::SchedulerAffinityTarget {
             provider_id: "provider-owner".to_string(),
             endpoint_id: "endpoint-owner".to_string(),
@@ -761,8 +761,8 @@ async fn gateway_aggregates_sync_sse_from_remote_tunnel_owner_before_returning_t
     state = state
         .with_data_state_for_tests(data_state)
         .with_tunnel_identity_for_tests("gateway-a", Some("http://gateway-a:8080"));
-    state.scheduler_affinity_cache.insert(
-        "scheduler_affinity:api-key-affinity-cli-1:openai:responses:gpt-5.4".to_string(),
+    state.remember_scheduler_affinity_target(
+        "scheduler_affinity:api-key-affinity-cli-1:openai:responses:gpt-5.4",
         crate::cache::SchedulerAffinityTarget {
             provider_id: "provider-cli-owner".to_string(),
             endpoint_id: "endpoint-cli-owner".to_string(),
@@ -1001,8 +1001,8 @@ async fn gateway_streamifies_sync_json_from_remote_tunnel_owner_before_returning
     state = state
         .with_data_state_for_tests(data_state)
         .with_tunnel_identity_for_tests("gateway-a", Some("http://gateway-a:8080"));
-    state.scheduler_affinity_cache.insert(
-        "scheduler_affinity:api-key-affinity-cli-1:openai:responses:gpt-5.4".to_string(),
+    state.remember_scheduler_affinity_target(
+        "scheduler_affinity:api-key-affinity-cli-1:openai:responses:gpt-5.4",
         crate::cache::SchedulerAffinityTarget {
             provider_id: "provider-cli-owner".to_string(),
             endpoint_id: "endpoint-cli-owner".to_string(),

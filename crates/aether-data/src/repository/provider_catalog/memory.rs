@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::sync::RwLock;
 
@@ -454,6 +455,20 @@ impl ProviderCatalogReadRepository for InMemoryProviderCatalogReadRepository {
             })
             .cloned()
             .collect::<Vec<_>>();
+        fn compare_optional_u64_null_last(
+            left: Option<u64>,
+            right: Option<u64>,
+            descending: bool,
+        ) -> Ordering {
+            match (left, right) {
+                (Some(left), Some(right)) if descending => right.cmp(&left),
+                (Some(left), Some(right)) => left.cmp(&right),
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (None, None) => Ordering::Equal,
+            }
+        }
+
         match query.order {
             ProviderCatalogKeyListOrder::Name => {
                 keys.sort_by(|left, right| {
@@ -473,6 +488,50 @@ impl ProviderCatalogReadRepository for InMemoryProviderCatalogReadRepository {
                                 .cmp(&right.created_at_unix_ms.unwrap_or_default()),
                         )
                         .then(left.id.cmp(&right.id))
+                });
+            }
+            ProviderCatalogKeyListOrder::CreatedAtAsc => {
+                keys.sort_by(|left, right| {
+                    compare_optional_u64_null_last(
+                        left.created_at_unix_ms,
+                        right.created_at_unix_ms,
+                        false,
+                    )
+                    .then(left.name.cmp(&right.name))
+                    .then(left.id.cmp(&right.id))
+                });
+            }
+            ProviderCatalogKeyListOrder::CreatedAtDesc => {
+                keys.sort_by(|left, right| {
+                    compare_optional_u64_null_last(
+                        left.created_at_unix_ms,
+                        right.created_at_unix_ms,
+                        true,
+                    )
+                    .then(left.name.cmp(&right.name))
+                    .then(left.id.cmp(&right.id))
+                });
+            }
+            ProviderCatalogKeyListOrder::LastUsedAtAsc => {
+                keys.sort_by(|left, right| {
+                    compare_optional_u64_null_last(
+                        left.last_used_at_unix_secs,
+                        right.last_used_at_unix_secs,
+                        false,
+                    )
+                    .then(left.name.cmp(&right.name))
+                    .then(left.id.cmp(&right.id))
+                });
+            }
+            ProviderCatalogKeyListOrder::LastUsedAtDesc => {
+                keys.sort_by(|left, right| {
+                    compare_optional_u64_null_last(
+                        left.last_used_at_unix_secs,
+                        right.last_used_at_unix_secs,
+                        true,
+                    )
+                    .then(left.name.cmp(&right.name))
+                    .then(left.id.cmp(&right.id))
                 });
             }
         }
@@ -1025,6 +1084,70 @@ mod tests {
                 .map(|item| item.id.as_str())
                 .collect::<Vec<_>>(),
             vec!["key-1", "key-2"]
+        );
+    }
+
+    #[tokio::test]
+    async fn paginates_provider_keys_by_pool_sort_fields() {
+        let mut old = sample_key("key-1", "provider-1");
+        old.name = "old".to_string();
+        old.created_at_unix_ms = Some(10);
+        old.last_used_at_unix_secs = Some(30);
+        let mut fresh = sample_key("key-2", "provider-1");
+        fresh.name = "fresh".to_string();
+        fresh.created_at_unix_ms = Some(20);
+        fresh.last_used_at_unix_secs = Some(10);
+        let mut unused = sample_key("key-3", "provider-1");
+        unused.name = "unused".to_string();
+        unused.created_at_unix_ms = None;
+        unused.last_used_at_unix_secs = None;
+        let repository = InMemoryProviderCatalogReadRepository::seed(
+            vec![sample_provider("provider-1")],
+            vec![],
+            vec![old, fresh, unused],
+        );
+
+        let imported = repository
+            .list_keys_page(&ProviderCatalogKeyListQuery {
+                provider_id: "provider-1".to_string(),
+                search: None,
+                is_active: None,
+                offset: 0,
+                limit: 2,
+                order: ProviderCatalogKeyListOrder::CreatedAtDesc,
+            })
+            .await
+            .expect("keys should page");
+
+        assert_eq!(imported.total, 3);
+        assert_eq!(
+            imported
+                .items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["key-2", "key-1"]
+        );
+
+        let last_used = repository
+            .list_keys_page(&ProviderCatalogKeyListQuery {
+                provider_id: "provider-1".to_string(),
+                search: None,
+                is_active: None,
+                offset: 0,
+                limit: 3,
+                order: ProviderCatalogKeyListOrder::LastUsedAtDesc,
+            })
+            .await
+            .expect("keys should page");
+
+        assert_eq!(
+            last_used
+                .items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["key-1", "key-2", "key-3"]
         );
     }
 
