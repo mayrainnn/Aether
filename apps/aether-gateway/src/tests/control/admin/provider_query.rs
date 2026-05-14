@@ -2,7 +2,12 @@ use std::sync::{Arc, Mutex};
 
 use aether_contracts::ExecutionPlan;
 use aether_crypto::DEVELOPMENT_ENCRYPTION_KEY;
+use aether_data::repository::candidates::InMemoryRequestCandidateRepository;
+use aether_data::repository::global_models::InMemoryGlobalModelReadRepository;
 use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
+use aether_data_contracts::repository::candidates::{
+    RequestCandidateReadRepository, RequestCandidateStatus,
+};
 use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogEndpoint;
 use axum::body::Body;
 use axum::routing::any;
@@ -12,8 +17,9 @@ use http::StatusCode;
 use serde_json::json;
 
 use super::super::{
-    build_router_with_state, build_state_with_execution_runtime_override, sample_endpoint,
-    sample_key, sample_provider, start_server, AppState,
+    build_router_with_state, build_state_with_execution_runtime_override,
+    sample_admin_provider_model, sample_endpoint, sample_key, sample_provider, start_server,
+    AppState,
 };
 use crate::constants::{
     GATEWAY_HEADER, TRUSTED_ADMIN_SESSION_ID_HEADER, TRUSTED_ADMIN_USER_ID_HEADER,
@@ -911,6 +917,1205 @@ async fn gateway_handles_admin_provider_query_test_model_locally_with_trusted_ad
 }
 
 #[tokio::test]
+async fn gateway_handles_admin_provider_query_embedding_model_test() {
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |Json(plan): Json<ExecutionPlan>| async move {
+            assert_eq!(plan.provider_id, "provider-siliconflow");
+            assert_eq!(plan.endpoint_id, "endpoint-siliconflow-embedding");
+            assert_eq!(plan.key_id, "key-siliconflow-embedding");
+            assert_eq!(plan.client_api_format, "openai:embedding");
+            assert_eq!(plan.provider_api_format, "openai:embedding");
+            assert_eq!(plan.url, "https://api.siliconflow.example/v1/embeddings");
+            assert_eq!(plan.model_name.as_deref(), Some("Qwen/Qwen3-Embedding-4B"));
+            assert!(!plan.stream);
+            assert_eq!(
+                plan.headers.get("authorization").map(String::as_str),
+                Some("Bearer sk-siliconflow-embedding")
+            );
+            let body = plan.body.json_body.as_ref().expect("json body");
+            assert_eq!(body["model"], json!("Qwen/Qwen3-Embedding-4B"));
+            assert_eq!(body["input"], json!("This is a test embedding input."));
+            assert!(
+                body.get("stream").is_none(),
+                "embedding provider body must not carry stream"
+            );
+            Json(json!({
+                "request_id": plan.request_id,
+                "candidate_id": plan.candidate_id,
+                "status_code": 200,
+                "headers": {
+                    "content-type": "application/json"
+                },
+                "body": {
+                    "json_body": {
+                        "object": "list",
+                        "model": "Qwen/Qwen3-Embedding-4B",
+                        "data": [{
+                            "object": "embedding",
+                            "index": 0,
+                            "embedding": [0.1, 0.2, 0.3]
+                        }]
+                    }
+                },
+                "telemetry": {
+                    "elapsed_ms": 24
+                }
+            }))
+        }),
+    );
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let mut provider = sample_provider("provider-siliconflow", "SiliconFlow", 10);
+    provider.provider_type = "custom".to_string();
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![sample_endpoint(
+            "endpoint-siliconflow-embedding",
+            "provider-siliconflow",
+            "openai:embedding",
+            "https://api.siliconflow.example",
+        )],
+        vec![sample_key(
+            "key-siliconflow-embedding",
+            "provider-siliconflow",
+            "openai:embedding",
+            "sk-siliconflow-embedding",
+        )],
+    ));
+
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url)
+            .with_data_state_for_tests(GatewayDataState::with_provider_transport_reader_for_tests(
+                provider_catalog_repository,
+                DEVELOPMENT_ENCRYPTION_KEY.to_string(),
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/admin/provider-query/test-model"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "provider_id": "provider-siliconflow",
+            "model": "Qwen/Qwen3-Embedding-4B",
+            "api_format": "openai:embedding",
+            "endpoint_id": "endpoint-siliconflow-embedding",
+            "request_body": {
+                "model": "Qwen/Qwen3-Embedding-4B",
+                "input": "This is a test embedding input."
+            }
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["success"], json!(true));
+    assert_eq!(payload["error"], serde_json::Value::Null);
+    assert_eq!(payload["attempts"][0]["status"], json!("success"));
+    assert_eq!(
+        payload["attempts"][0]["response_body"]["data"][0]["object"],
+        json!("embedding")
+    );
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_handles_admin_provider_query_doubao_text_embedding_model_test() {
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |Json(plan): Json<ExecutionPlan>| async move {
+            assert_eq!(plan.provider_id, "provider-doubao");
+            assert_eq!(plan.endpoint_id, "endpoint-doubao-embedding");
+            assert_eq!(plan.key_id, "key-doubao-embedding");
+            assert_eq!(plan.client_api_format, "openai:embedding");
+            assert_eq!(plan.provider_api_format, "doubao:embedding");
+            assert_eq!(plan.url, "https://ark.volces.example/api/v3/embeddings");
+            assert_eq!(
+                plan.model_name.as_deref(),
+                Some("doubao-embedding-text-240515")
+            );
+            assert!(!plan.stream);
+            assert_eq!(
+                plan.headers.get("authorization").map(String::as_str),
+                Some("Bearer sk-doubao-embedding")
+            );
+            let body = plan.body.json_body.as_ref().expect("json body");
+            assert_eq!(body["model"], json!("doubao-embedding-text-240515"));
+            assert_eq!(body["input"], json!(["This is a test embedding input."]));
+            assert!(
+                body.get("stream").is_none(),
+                "doubao embedding provider body must not carry stream"
+            );
+            Json(json!({
+                "request_id": plan.request_id,
+                "candidate_id": plan.candidate_id,
+                "status_code": 200,
+                "headers": {
+                    "content-type": "application/json"
+                },
+                "body": {
+                    "json_body": {
+                        "object": "list",
+                        "model": "doubao-embedding-text-240515",
+                        "data": [{
+                            "object": "embedding",
+                            "index": 0,
+                            "embedding": [0.1, 0.2, 0.3]
+                        }]
+                    }
+                },
+                "telemetry": {
+                    "elapsed_ms": 28
+                }
+            }))
+        }),
+    );
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let mut provider = sample_provider("provider-doubao", "Doubao", 10);
+    provider.provider_type = "doubao".to_string();
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![sample_endpoint(
+            "endpoint-doubao-embedding",
+            "provider-doubao",
+            "doubao:embedding",
+            "https://ark.volces.example/api/v3",
+        )],
+        vec![sample_key(
+            "key-doubao-embedding",
+            "provider-doubao",
+            "doubao:embedding",
+            "sk-doubao-embedding",
+        )],
+    ));
+
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url)
+            .with_data_state_for_tests(GatewayDataState::with_provider_transport_reader_for_tests(
+                provider_catalog_repository,
+                DEVELOPMENT_ENCRYPTION_KEY.to_string(),
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/admin/provider-query/test-model"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "provider_id": "provider-doubao",
+            "model": "doubao-embedding-text-240515",
+            "api_format": "doubao:embedding",
+            "endpoint_id": "endpoint-doubao-embedding",
+            "request_body": {
+                "model": "doubao-embedding-text-240515",
+                "input": "This is a test embedding input."
+            }
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["success"], json!(true));
+    assert_eq!(payload["error"], serde_json::Value::Null);
+    assert_eq!(payload["attempts"][0]["status"], json!("success"));
+    assert_eq!(
+        payload["attempts"][0]["request_body"]["input"],
+        json!(["This is a test embedding input."])
+    );
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_handles_admin_provider_query_gemini_embedding_model_test() {
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |Json(plan): Json<ExecutionPlan>| async move {
+            assert_eq!(plan.provider_id, "provider-gemini");
+            assert_eq!(plan.endpoint_id, "endpoint-gemini-embedding");
+            assert_eq!(plan.key_id, "key-gemini-embedding");
+            assert_eq!(plan.client_api_format, "openai:embedding");
+            assert_eq!(plan.provider_api_format, "gemini:embedding");
+            assert_eq!(
+                plan.url,
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent"
+            );
+            assert_eq!(plan.model_name.as_deref(), Some("gemini-embedding-001"));
+            assert!(!plan.stream);
+            assert_eq!(
+                plan.headers.get("x-goog-api-key").map(String::as_str),
+                Some("sk-gemini-embedding")
+            );
+            let body = plan.body.json_body.as_ref().expect("json body");
+            assert_eq!(body["model"], json!("gemini-embedding-001"));
+            assert_eq!(
+                body["content"]["parts"][0]["text"],
+                json!("This is a test embedding input.")
+            );
+            assert!(body.get("requests").is_none());
+            assert!(
+                body.get("stream").is_none(),
+                "gemini embedding provider body must not carry stream"
+            );
+            Json(json!({
+                "request_id": plan.request_id,
+                "candidate_id": plan.candidate_id,
+                "status_code": 200,
+                "headers": {
+                    "content-type": "application/json"
+                },
+                "body": {
+                    "json_body": {
+                        "model": "gemini-embedding-001",
+                        "embedding": {
+                            "values": [0.1, 0.2, 0.3]
+                        }
+                    }
+                },
+                "telemetry": {
+                    "elapsed_ms": 27
+                }
+            }))
+        }),
+    );
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let mut provider = sample_provider("provider-gemini", "Gemini", 10);
+    provider.provider_type = "gemini".to_string();
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![sample_endpoint(
+            "endpoint-gemini-embedding",
+            "provider-gemini",
+            "gemini:embedding",
+            "https://generativelanguage.googleapis.com/v1beta",
+        )],
+        vec![sample_key(
+            "key-gemini-embedding",
+            "provider-gemini",
+            "gemini:embedding",
+            "sk-gemini-embedding",
+        )],
+    ));
+
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url)
+            .with_data_state_for_tests(GatewayDataState::with_provider_transport_reader_for_tests(
+                provider_catalog_repository,
+                DEVELOPMENT_ENCRYPTION_KEY.to_string(),
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/admin/provider-query/test-model"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "provider_id": "provider-gemini",
+            "model": "gemini-embedding-001",
+            "api_format": "gemini:embedding",
+            "endpoint_id": "endpoint-gemini-embedding",
+            "request_body": {
+                "model": "gemini-embedding-001",
+                "input": "This is a test embedding input."
+            }
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["success"], json!(true));
+    assert_eq!(payload["error"], serde_json::Value::Null);
+    assert_eq!(payload["attempts"][0]["status"], json!("success"));
+    assert_eq!(
+        payload["attempts"][0]["response_body"]["embedding"]["values"][0],
+        json!(0.1)
+    );
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_handles_admin_provider_query_jina_embedding_model_test() {
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |Json(plan): Json<ExecutionPlan>| async move {
+            assert_eq!(plan.provider_id, "provider-jina-embedding");
+            assert_eq!(plan.endpoint_id, "endpoint-jina-embedding");
+            assert_eq!(plan.key_id, "key-jina-embedding");
+            assert_eq!(plan.client_api_format, "openai:embedding");
+            assert_eq!(plan.provider_api_format, "jina:embedding");
+            assert_eq!(plan.url, "https://api.jina.example/v1/embeddings");
+            assert_eq!(plan.model_name.as_deref(), Some("jina-embeddings-v3"));
+            assert!(!plan.stream);
+            assert_eq!(
+                plan.headers.get("authorization").map(String::as_str),
+                Some("Bearer sk-jina-embedding")
+            );
+            let body = plan.body.json_body.as_ref().expect("json body");
+            assert_eq!(body["model"], json!("jina-embeddings-v3"));
+            assert_eq!(body["task"], json!("text-matching"));
+            assert_eq!(body["input"], json!("This is a test embedding input."));
+            assert!(
+                body.get("stream").is_none(),
+                "jina embedding provider body must not carry stream"
+            );
+            Json(json!({
+                "request_id": plan.request_id,
+                "candidate_id": plan.candidate_id,
+                "status_code": 200,
+                "headers": {
+                    "content-type": "application/json"
+                },
+                "body": {
+                    "json_body": {
+                        "model": "jina-embeddings-v3",
+                        "data": [{
+                            "object": "embedding",
+                            "index": 0,
+                            "embedding": [0.1, 0.2, 0.3]
+                        }]
+                    }
+                },
+                "telemetry": {
+                    "elapsed_ms": 29
+                }
+            }))
+        }),
+    );
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let mut provider = sample_provider("provider-jina-embedding", "Jina", 10);
+    provider.provider_type = "jina".to_string();
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![sample_endpoint(
+            "endpoint-jina-embedding",
+            "provider-jina-embedding",
+            "jina:embedding",
+            "https://api.jina.example",
+        )],
+        vec![sample_key(
+            "key-jina-embedding",
+            "provider-jina-embedding",
+            "jina:embedding",
+            "sk-jina-embedding",
+        )],
+    ));
+
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url)
+            .with_data_state_for_tests(GatewayDataState::with_provider_transport_reader_for_tests(
+                provider_catalog_repository,
+                DEVELOPMENT_ENCRYPTION_KEY.to_string(),
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/admin/provider-query/test-model"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "provider_id": "provider-jina-embedding",
+            "model": "jina-embeddings-v3",
+            "api_format": "jina:embedding",
+            "endpoint_id": "endpoint-jina-embedding",
+            "request_body": {
+                "model": "jina-embeddings-v3",
+                "input": "This is a test embedding input."
+            }
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["success"], json!(true));
+    assert_eq!(payload["error"], serde_json::Value::Null);
+    assert_eq!(payload["attempts"][0]["status"], json!("success"));
+    assert_eq!(
+        payload["attempts"][0]["request_body"]["task"],
+        json!("text-matching")
+    );
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_handles_admin_provider_query_openai_rerank_model_test() {
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |Json(plan): Json<ExecutionPlan>| async move {
+            assert_eq!(plan.provider_id, "provider-openai-rerank");
+            assert_eq!(plan.endpoint_id, "endpoint-openai-rerank");
+            assert_eq!(plan.key_id, "key-openai-rerank");
+            assert_eq!(plan.client_api_format, "openai:rerank");
+            assert_eq!(plan.provider_api_format, "openai:rerank");
+            assert_eq!(plan.url, "https://api.openai.example/v1/rerank");
+            assert_eq!(plan.model_name.as_deref(), Some("bge-reranker-base"));
+            assert!(!plan.stream);
+            assert_eq!(
+                plan.headers.get("authorization").map(String::as_str),
+                Some("Bearer sk-openai-rerank")
+            );
+            let body = plan.body.json_body.as_ref().expect("json body");
+            assert_eq!(body["model"], json!("bge-reranker-base"));
+            assert_eq!(body["query"], json!("Apple"));
+            assert_eq!(
+                body["documents"],
+                json!(["apple", "banana", "fruit", "vegetable"])
+            );
+            assert_eq!(body["return_documents"], json!(true));
+            assert_eq!(body["top_n"], json!(4));
+            assert!(
+                body.get("stream").is_none(),
+                "openai rerank provider body must not carry stream"
+            );
+            Json(json!({
+                "request_id": plan.request_id,
+                "candidate_id": plan.candidate_id,
+                "status_code": 200,
+                "headers": {
+                    "content-type": "application/json"
+                },
+                "body": {
+                    "json_body": {
+                        "model": "bge-reranker-base",
+                        "results": [{
+                            "index": 0,
+                            "relevance_score": 0.91
+                        }]
+                    }
+                },
+                "telemetry": {
+                    "elapsed_ms": 32
+                }
+            }))
+        }),
+    );
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let mut provider = sample_provider("provider-openai-rerank", "OpenAI Rerank", 10);
+    provider.provider_type = "openai".to_string();
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![sample_endpoint(
+            "endpoint-openai-rerank",
+            "provider-openai-rerank",
+            "openai:rerank",
+            "https://api.openai.example/v1",
+        )],
+        vec![sample_key(
+            "key-openai-rerank",
+            "provider-openai-rerank",
+            "openai:rerank",
+            "sk-openai-rerank",
+        )],
+    ));
+
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url)
+            .with_data_state_for_tests(GatewayDataState::with_provider_transport_reader_for_tests(
+                provider_catalog_repository,
+                DEVELOPMENT_ENCRYPTION_KEY.to_string(),
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/admin/provider-query/test-model"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "provider_id": "provider-openai-rerank",
+            "model": "bge-reranker-base",
+            "api_format": "openai:rerank",
+            "endpoint_id": "endpoint-openai-rerank",
+            "request_body": {
+                "model": "bge-reranker-base",
+                "query": "Apple",
+                "documents": ["apple", "banana", "fruit", "vegetable"],
+                "return_documents": true,
+                "top_n": 4
+            }
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["success"], json!(true));
+    assert_eq!(payload["error"], serde_json::Value::Null);
+    assert_eq!(payload["attempts"][0]["status"], json!("success"));
+    assert_eq!(
+        payload["attempts"][0]["response_body"]["results"][0]["relevance_score"],
+        json!(0.91)
+    );
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_handles_admin_provider_query_rerank_model_test() {
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |Json(plan): Json<ExecutionPlan>| async move {
+            assert_eq!(plan.provider_id, "provider-jina");
+            assert_eq!(plan.endpoint_id, "endpoint-jina-rerank");
+            assert_eq!(plan.key_id, "key-jina-rerank");
+            assert_eq!(plan.client_api_format, "openai:rerank");
+            assert_eq!(plan.provider_api_format, "jina:rerank");
+            assert_eq!(plan.url, "https://api.jina.example/v1/rerank");
+            assert_eq!(
+                plan.model_name.as_deref(),
+                Some("jina-reranker-v2-base-multilingual")
+            );
+            assert!(!plan.stream);
+            assert_eq!(
+                plan.headers.get("authorization").map(String::as_str),
+                Some("Bearer sk-jina-rerank")
+            );
+            let body = plan.body.json_body.as_ref().expect("json body");
+            assert_eq!(body["model"], json!("jina-reranker-v2-base-multilingual"));
+            assert_eq!(body["query"], json!("Apple"));
+            assert_eq!(
+                body["documents"],
+                json!(["apple", "banana", "fruit", "vegetable"])
+            );
+            assert_eq!(body["return_documents"], json!(true));
+            assert_eq!(body["top_n"], json!(4));
+            assert!(
+                body.get("stream").is_none(),
+                "rerank provider body must not carry stream"
+            );
+            Json(json!({
+                "request_id": plan.request_id,
+                "candidate_id": plan.candidate_id,
+                "status_code": 200,
+                "headers": {
+                    "content-type": "application/json"
+                },
+                "body": {
+                    "json_body": {
+                        "model": "jina-reranker-v2-base-multilingual",
+                        "results": [{
+                            "index": 0,
+                            "relevance_score": 0.93
+                        }]
+                    }
+                },
+                "telemetry": {
+                    "elapsed_ms": 31
+                }
+            }))
+        }),
+    );
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let mut provider = sample_provider("provider-jina", "Jina", 10);
+    provider.provider_type = "jina".to_string();
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![sample_endpoint(
+            "endpoint-jina-rerank",
+            "provider-jina",
+            "jina:rerank",
+            "https://api.jina.example",
+        )],
+        vec![sample_key(
+            "key-jina-rerank",
+            "provider-jina",
+            "jina:rerank",
+            "sk-jina-rerank",
+        )],
+    ));
+
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url)
+            .with_data_state_for_tests(GatewayDataState::with_provider_transport_reader_for_tests(
+                provider_catalog_repository,
+                DEVELOPMENT_ENCRYPTION_KEY.to_string(),
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/admin/provider-query/test-model"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "provider_id": "provider-jina",
+            "model": "jina-reranker-v2-base-multilingual",
+            "api_format": "jina:rerank",
+            "endpoint_id": "endpoint-jina-rerank",
+            "request_body": {
+                "model": "jina-reranker-v2-base-multilingual",
+                "query": "Apple",
+                "documents": ["apple", "banana", "fruit", "vegetable"],
+                "return_documents": true,
+                "top_n": 4
+            }
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["success"], json!(true));
+    assert_eq!(payload["error"], serde_json::Value::Null);
+    assert_eq!(payload["attempts"][0]["status"], json!("success"));
+    assert_eq!(
+        payload["attempts"][0]["response_body"]["results"][0]["relevance_score"],
+        json!(0.93)
+    );
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_maps_admin_provider_model_before_model_list_test_request() {
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |Json(plan): Json<ExecutionPlan>| async move {
+            assert_eq!(plan.provider_id, "provider-minimax");
+            assert_eq!(plan.endpoint_id, "endpoint-minimax-chat");
+            assert_eq!(plan.key_id, "key-minimax-primary");
+            assert_eq!(plan.provider_api_format, "openai:chat");
+            let requested_model = plan
+                .model_name
+                .as_deref()
+                .expect("test plan should carry model name");
+            assert!(
+                matches!(
+                    requested_model,
+                    "MiniMax-M2.7-highspeed" | "MiniMax-M2.7-balanced" | "claude-opus-4-6"
+                ),
+                "unexpected requested model: {requested_model}"
+            );
+            assert_eq!(
+                plan.body
+                    .json_body
+                    .as_ref()
+                    .and_then(|body| body.get("model")),
+                Some(&json!(requested_model))
+            );
+            let response_model = if requested_model.starts_with("MiniMax-M2.7") {
+                "MiniMax-M2.7"
+            } else {
+                requested_model
+            };
+            Json(json!({
+                "request_id": plan.request_id,
+                "candidate_id": plan.candidate_id,
+                "status_code": 200,
+                "headers": {
+                    "content-type": "application/json"
+                },
+                "body": {
+                    "json_body": {
+                        "id": "chatcmpl-minimax-mapped-model",
+                        "object": "chat.completion",
+                        "model": response_model,
+                        "choices": [{
+                            "message": {
+                                "role": "assistant",
+                                "content": "Hello from MiniMax"
+                            }
+                        }]
+                    }
+                },
+                "telemetry": {
+                    "elapsed_ms": 22
+                }
+            }))
+        }),
+    );
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let mut provider = sample_provider("provider-minimax", "MiniMax", 10);
+    provider.provider_type = "custom".to_string();
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![sample_endpoint(
+            "endpoint-minimax-chat",
+            "provider-minimax",
+            "openai:chat",
+            "https://api.minimax.example",
+        )],
+        vec![sample_key(
+            "key-minimax-primary",
+            "provider-minimax",
+            "openai:chat",
+            "sk-minimax-primary",
+        )],
+    ));
+    let mut provider_model = sample_admin_provider_model(
+        "model-minimax-claude-opus",
+        "provider-minimax",
+        "global-claude-opus-4-6",
+        "claude-opus-4-6",
+    );
+    provider_model.global_model_name = Some("claude-opus-4-6".to_string());
+    provider_model.global_model_display_name = Some("Claude Opus 4.6".to_string());
+    provider_model.provider_model_mappings = Some(json!([
+        {
+            "name": "ignored-anthropic-model",
+            "priority": 1,
+            "api_formats": ["anthropic:messages"],
+        },
+        {
+            "name": "MiniMax-M2.7-highspeed",
+            "priority": 2,
+            "api_formats": ["openai:chat"],
+            "endpoint_ids": ["endpoint-minimax-chat"],
+        },
+        {
+            "name": "MiniMax-M2.7-balanced",
+            "priority": 3,
+            "api_formats": ["openai:chat"],
+            "endpoint_ids": ["endpoint-minimax-chat"],
+        }
+    ]));
+    let global_model_repository = Arc::new(
+        InMemoryGlobalModelReadRepository::seed(Vec::new())
+            .with_admin_provider_models(vec![provider_model]),
+    );
+
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url)
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_transport_reader_for_tests(
+                    provider_catalog_repository,
+                    DEVELOPMENT_ENCRYPTION_KEY.to_string(),
+                )
+                .with_global_model_repository_for_tests(global_model_repository),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/admin/provider-query/test-model"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "provider_id": "provider-minimax",
+            "model": "claude-opus-4-6",
+            "api_format": "openai:chat",
+            "endpoint_id": "endpoint-minimax-chat"
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["success"], json!(true));
+    assert_eq!(payload["model"], json!("claude-opus-4-6"));
+    assert_eq!(
+        payload["data"]["response"]["choices"][0]["message"]["content"],
+        json!("Hello from MiniMax")
+    );
+    assert_eq!(
+        payload["attempts"][0]["effective_model"],
+        json!("MiniMax-M2.7-highspeed")
+    );
+    assert_eq!(
+        payload["attempts"][0]["request_body"]["model"],
+        json!("MiniMax-M2.7-highspeed")
+    );
+    assert_eq!(
+        payload["attempts"][0]["response_body"]["model"],
+        json!("MiniMax-M2.7")
+    );
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/admin/provider-query/test-model"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "provider_id": "provider-minimax",
+            "model": "claude-opus-4-6",
+            "api_format": "openai:chat",
+            "endpoint_id": "endpoint-minimax-chat",
+            "mapped_model_name": "MiniMax-M2.7-balanced",
+            "request_body": {
+                "model": "stale-model-from-ui",
+                "messages": [{
+                    "role": "user",
+                    "content": "custom prompt"
+                }]
+            }
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["success"], json!(true));
+    assert_eq!(
+        payload["attempts"][0]["effective_model"],
+        json!("MiniMax-M2.7-balanced")
+    );
+    assert_eq!(
+        payload["attempts"][0]["request_body"]["model"],
+        json!("MiniMax-M2.7-balanced")
+    );
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/admin/provider-query/test-model"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "provider_id": "provider-minimax",
+            "model": "claude-opus-4-6",
+            "api_format": "openai:chat",
+            "endpoint_id": "endpoint-minimax-chat",
+            "mapped_model_name": "ignored-anthropic-model"
+        }))
+        .send()
+        .await
+        .expect("request should fail");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/provider-query/test-model-failover"
+        ))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "provider_id": "provider-minimax",
+            "mode": "global",
+            "model": "claude-opus-4-6",
+            "failover_models": ["claude-opus-4-6"],
+            "api_format": "openai:chat",
+            "endpoint_id": "endpoint-minimax-chat",
+            "apply_model_mapping": false
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["success"], json!(true));
+    assert_eq!(payload["model"], json!("claude-opus-4-6"));
+    assert_eq!(
+        payload["attempts"][0]["effective_model"],
+        json!("claude-opus-4-6")
+    );
+    assert_eq!(
+        payload["attempts"][0]["request_body"]["model"],
+        json!("claude-opus-4-6")
+    );
+    assert_eq!(
+        payload["attempts"][0]["response_body"]["model"],
+        json!("claude-opus-4-6")
+    );
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_streams_codex_openai_responses_upstream_for_admin_pool_model_test() {
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |Json(plan): Json<ExecutionPlan>| async move {
+            assert_eq!(plan.provider_id, "provider-codex");
+            assert_eq!(plan.endpoint_id, "endpoint-codex-responses");
+            assert_eq!(plan.key_id, "key-codex-primary");
+            assert_eq!(plan.provider_api_format, "openai:responses");
+            assert_eq!(plan.model_name.as_deref(), Some("gpt-5.3-codex-spark"));
+            assert!(plan.stream, "Codex openai:responses must stream upstream");
+            assert_eq!(
+                plan.body
+                    .json_body
+                    .as_ref()
+                    .and_then(|body| body.get("stream")),
+                Some(&json!(true))
+            );
+            Json(json!({
+                "request_id": plan.request_id,
+                "candidate_id": plan.candidate_id,
+                "status_code": 200,
+                "headers": {
+                    "content-type": "application/json"
+                },
+                "body": {
+                    "json_body": {
+                        "id": "resp-codex-model-test",
+                        "model": "gpt-5.3-codex-spark",
+                        "output_text": "ok"
+                    }
+                },
+                "telemetry": {
+                    "elapsed_ms": 18
+                }
+            }))
+        }),
+    );
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let mut provider = sample_provider("provider-codex", "Codex", 10);
+    provider.provider_type = "codex".to_string();
+    let mut endpoint = sample_endpoint(
+        "endpoint-codex-responses",
+        "provider-codex",
+        "openai:responses",
+        "https://chatgpt.com/backend-api/codex",
+    );
+    endpoint.config = Some(json!({"upstream_stream_policy": "force_stream"}));
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![endpoint],
+        vec![sample_key(
+            "key-codex-primary",
+            "provider-codex",
+            "openai:responses",
+            "sk-codex-primary",
+        )],
+    ));
+
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url)
+            .with_data_state_for_tests(GatewayDataState::with_provider_transport_reader_for_tests(
+                provider_catalog_repository,
+                DEVELOPMENT_ENCRYPTION_KEY.to_string(),
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/provider-query/test-model-failover"
+        ))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "provider_id": "provider-codex",
+            "mode": "pool",
+            "model": "gpt-5.3-codex-spark",
+            "failover_models": ["gpt-5.3-codex-spark"],
+            "api_format": "openai:responses",
+            "endpoint_id": "endpoint-codex-responses",
+            "request_body": {
+                "model": "gpt-5.3-codex-spark",
+                "input": "hello",
+                "stream": true
+            }
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["success"], json!(true));
+    assert_eq!(
+        payload["attempts"][0]["request_body"]["stream"],
+        json!(true)
+    );
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_uses_pool_scheduler_order_for_admin_pool_model_test() {
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |Json(plan): Json<ExecutionPlan>| async move {
+            assert_eq!(plan.key_id, "key-codex-plus");
+            Json(json!({
+                "request_id": plan.request_id,
+                "candidate_id": plan.candidate_id,
+                "status_code": 200,
+                "headers": {
+                    "content-type": "application/json"
+                },
+                "body": {
+                    "json_body": {
+                        "id": "resp-codex-plus",
+                        "model": "gpt-5.4-mini",
+                        "output_text": "ok"
+                    }
+                },
+                "telemetry": {
+                    "elapsed_ms": 21
+                }
+            }))
+        }),
+    );
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let mut provider = sample_provider("provider-codex", "Codex", 10);
+    provider.provider_type = "codex".to_string();
+    provider.config = Some(json!({
+        "pool_advanced": {
+            "scheduling_presets": [
+                {"preset": "plus_first", "enabled": true}
+            ]
+        }
+    }));
+    let mut free_key = sample_key(
+        "key-codex-free",
+        "provider-codex",
+        "openai:responses",
+        "sk-codex-free",
+    );
+    free_key.internal_priority = 0;
+    free_key.status_snapshot = Some(json!({
+        "quota": {
+            "provider_type": "codex",
+            "code": "limited",
+            "plan_type": "free",
+            "usage_ratio": 0.1
+        }
+    }));
+    let mut plus_key = sample_key(
+        "key-codex-plus",
+        "provider-codex",
+        "openai:responses",
+        "sk-codex-plus",
+    );
+    plus_key.internal_priority = 100;
+    plus_key.status_snapshot = Some(json!({
+        "quota": {
+            "provider_type": "codex",
+            "code": "limited",
+            "plan_type": "plus",
+            "usage_ratio": 0.1
+        }
+    }));
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![sample_endpoint(
+            "endpoint-codex-responses",
+            "provider-codex",
+            "openai:responses",
+            "https://chatgpt.com/backend-api/codex",
+        )],
+        vec![free_key, plus_key],
+    ));
+    let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url)
+            .with_data_state_for_tests(
+                GatewayDataState::with_request_candidate_repository_for_tests(
+                    request_candidate_repository.clone(),
+                )
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY.to_string())
+                .attach_provider_catalog_repository_for_tests(provider_catalog_repository),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/provider-query/test-model-failover"
+        ))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "provider_id": "provider-codex",
+            "mode": "pool",
+            "model": "gpt-5.4-mini",
+            "failover_models": ["gpt-5.4-mini"],
+            "api_format": "openai:responses",
+            "endpoint_id": "endpoint-codex-responses",
+            "request_id": "provider-query-model-test-trace-123",
+            "request_body": {
+                "model": "gpt-5.4-mini",
+                "input": "hello",
+                "stream": true
+            }
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["success"], json!(true));
+    assert_eq!(payload["attempts"][0]["key_id"], json!("key-codex-plus"));
+    assert_eq!(
+        payload["candidate_summary"]["winning_key_id"],
+        json!("key-codex-plus")
+    );
+    assert_eq!(payload["candidate_summary"]["total_candidates"], json!(2));
+    assert_eq!(payload["candidate_summary"]["attempted"], json!(1));
+    assert_eq!(payload["candidate_summary"]["unused"], json!(1));
+    let stored_candidates = request_candidate_repository
+        .list_by_request_id("provider-query-model-test-trace-123")
+        .await
+        .expect("model-test trace candidates should read");
+    assert_eq!(stored_candidates.len(), 2);
+    assert_eq!(
+        stored_candidates[0].key_id.as_deref(),
+        Some("key-codex-plus")
+    );
+    assert_eq!(stored_candidates[0].status, RequestCandidateStatus::Success);
+    assert_eq!(
+        stored_candidates[1].key_id.as_deref(),
+        Some("key-codex-free")
+    );
+    assert_eq!(stored_candidates[1].status, RequestCandidateStatus::Unused);
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_handles_admin_provider_query_test_model_failover_locally_with_trusted_admin_principal(
 ) {
     let execution_runtime = Router::new().route(
@@ -1059,6 +2264,14 @@ async fn gateway_handles_admin_provider_query_test_model_failover_locally_with_t
     assert_eq!(payload["success"], json!(true));
     assert_eq!(payload["total_candidates"], json!(2));
     assert_eq!(payload["total_attempts"], json!(2));
+    assert_eq!(payload["candidate_summary"]["total_candidates"], json!(2));
+    assert_eq!(payload["candidate_summary"]["attempted"], json!(2));
+    assert_eq!(payload["candidate_summary"]["failed"], json!(1));
+    assert_eq!(payload["candidate_summary"]["success"], json!(1));
+    assert_eq!(
+        payload["candidate_summary"]["stop_reason"],
+        json!("first_success")
+    );
     let attempts = payload["attempts"]
         .as_array()
         .expect("attempts should be an array");
@@ -1203,6 +2416,198 @@ async fn gateway_handles_admin_provider_query_test_model_for_kiro_locally() {
 }
 
 #[tokio::test]
+async fn gateway_uses_kiro_mapped_model_name_for_explicit_model_mapping_test() {
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |Json(plan): Json<ExecutionPlan>| async move {
+            assert_eq!(plan.provider_id, "provider-kiro");
+            assert_eq!(plan.endpoint_id, "endpoint-kiro-cli");
+            assert_eq!(plan.key_id, "key-kiro-primary");
+            assert_eq!(plan.provider_api_format, "claude:messages");
+            assert_eq!(plan.model_name.as_deref(), Some("claude-haiku-4.5"));
+            let body = plan.body.json_body.as_ref().expect("json body");
+            assert_eq!(
+                body.pointer("/conversationState/currentMessage/userInputMessage/modelId"),
+                Some(&json!("claude-haiku-4.5"))
+            );
+            Json(json!({
+                "request_id": plan.request_id,
+                "candidate_id": plan.candidate_id,
+                "status_code": 200,
+                "headers": {
+                    "content-type": "application/vnd.amazon.eventstream"
+                },
+                "body": {
+                    "body_bytes_b64": base64::engine::general_purpose::STANDARD.encode(
+                        [
+                            encode_kiro_event_frame("assistantResponseEvent", json!({"content": "Hello from Kiro mapped model"})),
+                            encode_kiro_exception_frame("ContentLengthExceededException"),
+                        ]
+                        .concat()
+                    )
+                },
+                "telemetry": {
+                    "elapsed_ms": 42
+                }
+            }))
+        }),
+    );
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let mut provider = sample_provider("provider-kiro", "Kiro", 10);
+    provider.provider_type = "kiro".to_string();
+    let mut key = sample_key(
+        "key-kiro-primary",
+        "provider-kiro",
+        "claude:messages",
+        "__placeholder__",
+    );
+    key.auth_type = "oauth".to_string();
+    key.encrypted_auth_config = Some(
+        aether_crypto::encrypt_python_fernet_plaintext(
+            DEVELOPMENT_ENCRYPTION_KEY,
+            r#"{
+                "provider_type":"kiro",
+                "auth_method":"idc",
+                "access_token":"cached-kiro-token",
+                "expires_at":4102444800,
+                "refresh_token":"rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+                "machine_id":"123e4567-e89b-12d3-a456-426614174000",
+                "api_region":"us-east-1",
+                "client_id":"client-id",
+                "client_secret":"client-secret"
+            }"#,
+        )
+        .expect("auth config should encrypt"),
+    );
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![StoredProviderCatalogEndpoint::new(
+            "endpoint-kiro-cli".to_string(),
+            "provider-kiro".to_string(),
+            "claude:messages".to_string(),
+            Some("claude".to_string()),
+            Some("messages".to_string()),
+            true,
+        )
+        .expect("endpoint should build")
+        .with_transport_fields(
+            "https://q.{region}.amazonaws.com".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("endpoint transport should build")],
+        vec![key],
+    ));
+    let mut provider_model = sample_admin_provider_model(
+        "model-kiro-haiku",
+        "provider-kiro",
+        "global-kiro-haiku",
+        "claude-haiku-4-5-20251001",
+    );
+    provider_model.provider_model_mappings = Some(json!([{
+        "name": "claude-haiku-4.5",
+        "priority": 1,
+        "api_formats": ["claude:messages"],
+        "endpoint_ids": ["endpoint-kiro-cli"]
+    }]));
+    let global_model_repository = Arc::new(
+        InMemoryGlobalModelReadRepository::seed(Vec::new())
+            .with_admin_provider_models(vec![provider_model]),
+    );
+
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url)
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_transport_reader_for_tests(
+                    provider_catalog_repository,
+                    DEVELOPMENT_ENCRYPTION_KEY.to_string(),
+                )
+                .with_global_model_repository_for_tests(global_model_repository),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/provider-query/test-model-failover"
+        ))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "provider_id": "provider-kiro",
+            "mode": "pool",
+            "model_name": "claude-haiku-4-5-20251001",
+            "failover_models": ["claude-haiku-4-5-20251001"],
+            "mapped_model_name": "claude-haiku-4.5",
+            "api_format": "claude:messages",
+            "endpoint_id": "endpoint-kiro-cli",
+            "request_id": "provider-test-kiro-mapped"
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["success"], json!(true));
+    assert_eq!(
+        payload["attempts"][0]["effective_model"],
+        json!("claude-haiku-4.5")
+    );
+    assert_eq!(
+        payload["attempts"][0]["request_body"]
+            .pointer("/conversationState/currentMessage/userInputMessage/modelId"),
+        Some(&json!("claude-haiku-4.5"))
+    );
+    assert_eq!(
+        payload["data"]["response"]["content"][0]["text"],
+        json!("Hello from Kiro mapped model")
+    );
+
+    let direct_response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/admin/provider-query/test-model"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "provider_id": "provider-kiro",
+            "mode": "direct",
+            "model_name": "claude-haiku-4-5-20251001",
+            "mapped_model_name": "claude-haiku-4.5",
+            "api_format": "claude:messages",
+            "endpoint_id": "endpoint-kiro-cli",
+            "request_id": "provider-test-kiro-mapped-direct"
+        }))
+        .send()
+        .await
+        .expect("direct request should succeed");
+
+    assert_eq!(direct_response.status(), StatusCode::OK);
+    let direct_payload: serde_json::Value = direct_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert_eq!(direct_payload["success"], json!(true));
+    assert_eq!(
+        direct_payload["data"]["response"]["content"][0]["text"],
+        json!("Hello from Kiro mapped model")
+    );
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_handles_admin_provider_query_test_model_failover_for_kiro_locally() {
     let execution_runtime = Router::new().route(
         "/v1/execute/sync",
@@ -1335,6 +2740,14 @@ async fn gateway_handles_admin_provider_query_test_model_failover_for_kiro_local
     assert_eq!(payload["success"], json!(true));
     assert_eq!(payload["total_candidates"], json!(2));
     assert_eq!(payload["total_attempts"], json!(2));
+    assert_eq!(payload["candidate_summary"]["total_candidates"], json!(2));
+    assert_eq!(payload["candidate_summary"]["attempted"], json!(2));
+    assert_eq!(payload["candidate_summary"]["failed"], json!(1));
+    assert_eq!(payload["candidate_summary"]["success"], json!(1));
+    assert_eq!(
+        payload["candidate_summary"]["stop_reason"],
+        json!("first_success")
+    );
     let attempts = payload["attempts"]
         .as_array()
         .expect("attempts should be an array");
@@ -1622,7 +3035,7 @@ async fn gateway_handles_openai_responses_test_model_locally() {
             assert_eq!(plan.key_id, "key-openai-cli");
             assert_eq!(plan.provider_api_format, "openai:responses");
             assert_eq!(plan.url, "https://tiger.bookapi.cc/codex/responses");
-            assert!(!plan.stream);
+            assert!(plan.stream);
             assert_eq!(
                 plan.headers.get("authorization").map(String::as_str),
                 Some("Bearer sk-test-cli")
@@ -1637,6 +3050,13 @@ async fn gateway_handles_openai_responses_test_model_locally() {
                     .as_ref()
                     .and_then(|body| body.get("model")),
                 Some(&json!("gpt-5.4-mini"))
+            );
+            assert_eq!(
+                plan.body
+                    .json_body
+                    .as_ref()
+                    .and_then(|body| body.get("stream")),
+                Some(&json!(true))
             );
             assert!(plan
                 .body
@@ -1775,7 +3195,125 @@ async fn gateway_handles_openai_responses_test_model_locally() {
 }
 
 #[tokio::test]
-async fn gateway_returns_stub_for_transport_unsupported_non_kiro_provider() {
+async fn gateway_handles_openai_image_test_model_locally() {
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |Json(plan): Json<ExecutionPlan>| async move {
+            assert_eq!(plan.provider_id, "provider-openai");
+            assert_eq!(plan.endpoint_id, "endpoint-openai-image");
+            assert_eq!(plan.key_id, "key-openai-image");
+            assert_eq!(plan.client_api_format, "openai:image");
+            assert_eq!(plan.provider_api_format, "openai:image");
+            assert_eq!(plan.model_name.as_deref(), Some("gpt-image-1"));
+            assert_eq!(plan.url, "https://api.openai.example/v1/responses");
+            assert!(plan.stream);
+            assert_eq!(
+                plan.headers.get("authorization").map(String::as_str),
+                Some("Bearer sk-test-image")
+            );
+            assert_eq!(
+                plan.body
+                    .json_body
+                    .as_ref()
+                    .and_then(|body| body.get("model")),
+                Some(&json!(crate::ai_serving::CODEX_OPENAI_IMAGE_INTERNAL_MODEL))
+            );
+            assert_eq!(
+                plan.body
+                    .json_body
+                    .as_ref()
+                    .and_then(|body| body.get("input"))
+                    .and_then(|input| input.as_array())
+                    .and_then(|items| items.first())
+                    .and_then(|item| item.get("content"))
+                    .and_then(|value| value.as_str()),
+                Some("Draw a small blue square")
+            );
+            Json(json!({
+                "request_id": plan.request_id,
+                "candidate_id": plan.candidate_id,
+                "status_code": 200,
+                "headers": {
+                    "content-type": "text/event-stream"
+                },
+                "body": {
+                    "body_bytes_b64": base64::engine::general_purpose::STANDARD.encode(
+                        concat!(
+                            "event: response.created\n",
+                            "data: {\"type\":\"response.created\",\"response\":{\"created_at\":1776839946}}\n\n",
+                            "event: response.output_item.done\n",
+                            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"image_generation_call\",\"output_format\":\"png\",\"revised_prompt\":\"revised prompt\",\"result\":\"aGVsbG8=\"}}\n\n",
+                            "event: response.completed\n",
+                            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_img_123\",\"model\":\"gpt-image-1\",\"status\":\"completed\",\"tool_usage\":{\"image_gen\":{\"input_tokens\":171,\"output_tokens\":1372,\"total_tokens\":1543}}}}\n\n"
+                        )
+                        .as_bytes()
+                    )
+                },
+                "telemetry": {
+                    "elapsed_ms": 19
+                }
+            }))
+        }),
+    );
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let mut provider = sample_provider("provider-openai", "OpenAI", 10);
+    provider.provider_type = "codex".to_string();
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![sample_endpoint(
+            "endpoint-openai-image",
+            "provider-openai",
+            "openai:image",
+            "https://api.openai.example",
+        )],
+        vec![sample_key(
+            "key-openai-image",
+            "provider-openai",
+            "openai:image",
+            "sk-test-image",
+        )],
+    ));
+
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url)
+            .with_data_state_for_tests(GatewayDataState::with_provider_transport_reader_for_tests(
+                provider_catalog_repository,
+                DEVELOPMENT_ENCRYPTION_KEY.to_string(),
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/admin/provider-query/test-model"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "provider_id": "provider-openai",
+            "model": "gpt-image-1",
+            "api_format": "openai:image",
+            "message": "Draw a small blue square"
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["success"], json!(true));
+    assert_eq!(
+        payload["data"]["response"]["data"][0]["b64_json"],
+        json!("aGVsbG8=")
+    );
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_reports_transport_unsupported_reason_for_non_kiro_provider() {
     let mut provider = sample_provider("provider-antigravity", "Antigravity", 10);
     provider.provider_type = "antigravity".to_string();
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
@@ -1824,10 +3362,178 @@ async fn gateway_returns_stub_for_transport_unsupported_non_kiro_provider() {
     assert_eq!(payload["success"], json!(false));
     assert_eq!(
         payload["error"],
-        json!("Rust local provider-query failover simulation is not configured")
+        json!(
+            "Rust local provider-query model test cannot execute endpoint format gemini:generate_content (transport_antigravity_auth_unsupported)"
+        )
     );
 
     gateway_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_handles_antigravity_endpoint_test_model_locally() {
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |Json(plan): Json<ExecutionPlan>| async move {
+            assert_eq!(plan.provider_id, "provider-antigravity");
+            assert_eq!(plan.endpoint_id, "endpoint-antigravity-gemini");
+            assert_eq!(plan.key_id, "key-antigravity-gemini");
+            assert_eq!(plan.provider_api_format, "gemini:generate_content");
+            assert_eq!(
+                plan.url,
+                "https://antigravity.googleapis.com/v1internal:generateContent"
+            );
+            assert_eq!(plan.stream, false);
+            assert_eq!(
+                plan.body
+                    .json_body
+                    .as_ref()
+                    .and_then(|body| body.get("project"))
+                    .and_then(|value| value.as_str()),
+                Some("project-ant-123")
+            );
+            assert_eq!(
+                plan.body
+                    .json_body
+                    .as_ref()
+                    .and_then(|body| body.get("requestType"))
+                    .and_then(|value| value.as_str()),
+                Some("endpoint_test")
+            );
+            assert_eq!(
+                plan.body
+                    .json_body
+                    .as_ref()
+                    .and_then(|body| body.get("model"))
+                    .and_then(|value| value.as_str()),
+                Some("gemini-2.5-pro")
+            );
+            assert_eq!(
+                plan.body
+                    .json_body
+                    .as_ref()
+                    .and_then(|body| body.get("request"))
+                    .and_then(|request| request.get("contents"))
+                    .and_then(|contents| contents.as_array())
+                    .and_then(|items| items.first())
+                    .and_then(|item| item.get("parts"))
+                    .and_then(|parts| parts.as_array())
+                    .and_then(|parts| parts.first())
+                    .and_then(|part| part.get("text"))
+                    .and_then(|value| value.as_str()),
+                Some("Say hello")
+            );
+            assert_eq!(
+                plan.headers.get("x-client-name").map(String::as_str),
+                Some("antigravity")
+            );
+            assert!(plan.headers.contains_key("x-goog-api-client"));
+            Json(json!({
+                "request_id": plan.request_id,
+                "candidate_id": plan.candidate_id,
+                "status_code": 200,
+                "headers": {
+                    "content-type": "application/json"
+                },
+                "body": {
+                    "json_body": {
+                        "response": {
+                            "candidates": [{
+                                "content": {
+                                    "parts": [
+                                        {"text": "Hello from Antigravity EndpointTest"}
+                                    ],
+                                    "role": "model"
+                                },
+                                "finishReason": "STOP",
+                                "index": 0
+                            }],
+                            "modelVersion": "claude-sonnet-4-5",
+                            "usageMetadata": {
+                                "promptTokenCount": 2,
+                                "candidatesTokenCount": 3,
+                                "totalTokenCount": 5
+                            }
+                        },
+                        "responseId": "resp-antigravity-test-123"
+                    }
+                },
+                "telemetry": {
+                    "elapsed_ms": 23
+                }
+            }))
+        }),
+    );
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let mut provider = sample_provider("provider-antigravity", "Antigravity", 10);
+    provider.provider_type = "antigravity".to_string();
+    let mut key = sample_key(
+        "key-antigravity-gemini",
+        "provider-antigravity",
+        "gemini:generate_content",
+        "cached-antigravity-token",
+    );
+    key.auth_type = "oauth".to_string();
+    key.encrypted_auth_config = Some(
+        aether_crypto::encrypt_python_fernet_plaintext(
+            DEVELOPMENT_ENCRYPTION_KEY,
+            r#"{
+                "provider_type":"antigravity",
+                "project_id":"project-ant-123",
+                "client_version":"1.2.3",
+                "session_id":"sess-ant-123",
+                "refresh_token":"rt-ant-123"
+            }"#,
+        )
+        .expect("auth config should encrypt"),
+    );
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![sample_endpoint(
+            "endpoint-antigravity-gemini",
+            "provider-antigravity",
+            "gemini:generate_content",
+            "https://antigravity.googleapis.com",
+        )],
+        vec![key],
+    ));
+
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url)
+            .with_data_state_for_tests(GatewayDataState::with_provider_transport_reader_for_tests(
+                provider_catalog_repository,
+                DEVELOPMENT_ENCRYPTION_KEY.to_string(),
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/admin/provider-query/test-model"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "provider_id": "provider-antigravity",
+            "model": "gemini-2.5-pro",
+            "api_format": "gemini:generate_content",
+            "message": "Say hello"
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["success"], json!(true));
+    assert_eq!(
+        payload["data"]["response"]["choices"][0]["message"]["content"],
+        json!("Hello from Antigravity EndpointTest")
+    );
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
 }
 
 #[tokio::test]
@@ -3271,6 +4977,134 @@ async fn gateway_retries_non_kiro_failover_after_http_error_without_message() {
         .expect("attempts should be an array");
     assert_eq!(attempts[0]["status"], json!("failed"));
     assert_eq!(attempts[0]["status_code"], json!(500));
+    assert_eq!(attempts[1]["status"], json!("success"));
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_retries_non_kiro_failover_after_success_status_without_body() {
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |Json(plan): Json<ExecutionPlan>| async move {
+            let auth = plan
+                .headers
+                .get("authorization")
+                .map(String::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let payload = if auth == "Bearer sk-test-first" {
+                json!({
+                    "request_id": plan.request_id,
+                    "candidate_id": plan.candidate_id,
+                    "status_code": 200,
+                    "headers": {
+                        "content-type": "application/json"
+                    },
+                    "body": {},
+                    "telemetry": {
+                        "elapsed_ms": 6
+                    }
+                })
+            } else {
+                json!({
+                    "request_id": plan.request_id,
+                    "candidate_id": plan.candidate_id,
+                    "status_code": 200,
+                    "headers": {
+                        "content-type": "application/json"
+                    },
+                    "body": {
+                        "json_body": {
+                            "id": "chatcmpl-retry-empty-body",
+                            "choices": [{
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "Recovered after empty success body"
+                                }
+                            }]
+                        }
+                    },
+                    "telemetry": {
+                        "elapsed_ms": 14
+                    }
+                })
+            };
+            Json(payload)
+        }),
+    );
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let mut provider = sample_provider("provider-openai", "OpenAI", 10);
+    provider.provider_type = "openai".to_string();
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![sample_endpoint(
+            "endpoint-openai-chat",
+            "provider-openai",
+            "openai:chat",
+            "https://api.openai.example",
+        )],
+        vec![
+            sample_key(
+                "key-openai-first",
+                "provider-openai",
+                "openai:chat",
+                "sk-test-first",
+            ),
+            sample_key(
+                "key-openai-second",
+                "provider-openai",
+                "openai:chat",
+                "sk-test-second",
+            ),
+        ],
+    ));
+
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url)
+            .with_data_state_for_tests(GatewayDataState::with_provider_transport_reader_for_tests(
+                provider_catalog_repository,
+                DEVELOPMENT_ENCRYPTION_KEY.to_string(),
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/provider-query/test-model-failover"
+        ))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "provider_id": "provider-openai",
+            "failover_models": ["gpt-4.1"],
+            "api_format": "openai:chat"
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["success"], json!(true));
+    assert_eq!(payload["total_attempts"], json!(2));
+    assert_eq!(
+        payload["data"]["response"]["choices"][0]["message"]["content"],
+        json!("Recovered after empty success body")
+    );
+    let attempts = payload["attempts"]
+        .as_array()
+        .expect("attempts should be an array");
+    assert_eq!(attempts[0]["status"], json!("failed"));
+    assert_eq!(attempts[0]["status_code"], json!(200));
+    assert_eq!(
+        attempts[0]["error_message"],
+        json!("Provider returned HTTP 200 without a model-test response body")
+    );
     assert_eq!(attempts[1]["status"], json!("success"));
 
     gateway_handle.abort();

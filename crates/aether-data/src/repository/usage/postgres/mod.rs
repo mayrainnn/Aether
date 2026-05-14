@@ -8221,6 +8221,15 @@ impl UsageWriteRepository for SqlxUsageReadRepository {
     ) -> Result<UsageCleanupSummary, DataLayerError> {
         Self::cleanup_usage(self, window, batch_size, auto_delete_expired_keys).await
     }
+
+    async fn preview_usage_cleanup(
+        &self,
+        window: &UsageCleanupWindow,
+    ) -> Result<aether_data_contracts::repository::usage::UsageCleanupPreviewCounts, DataLayerError>
+    {
+        crate::repository::usage::postgres::cleanup::preview_usage_cleanup_impl(&self.pool, window)
+            .await
+    }
 }
 
 struct StalePendingUsageRow {

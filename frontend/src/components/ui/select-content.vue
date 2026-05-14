@@ -87,7 +87,7 @@ const props = withDefaults(defineProps<Props>(), {
   sideOffset: 4,
   align: undefined,
   alignOffset: undefined,
-  disablePortal: false,
+  disablePortal: undefined,
   searchable: true,
   searchThreshold: 8,
   searchPlaceholder: '输入关键词搜索...',
@@ -95,7 +95,7 @@ const props = withDefaults(defineProps<Props>(), {
 
 const isInsideDialog = inject(DIALOG_CONTEXT_KEY, false)
 const shouldDisablePortal = computed(
-  () => props.disablePortal || isInsideDialog,
+  () => props.disablePortal ?? isInsideDialog,
 )
 const searchQuery = ref('')
 const searchInputRef = ref<InstanceType<typeof Input> | null>(null)

@@ -15,6 +15,7 @@ const CLEANUP_RUN_HISTORY_KEY: &str = "admin_cleanup_run_history";
 const CLEANUP_RUN_HISTORY_LIMIT: usize = 50;
 const REQUEST_BODY_PROGRESS_UPDATE_BATCHES: usize = 10;
 
+pub(crate) const USAGE_CLEANUP_KIND: &str = "usage_cleanup";
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct AdminCleanupRunRecord {
     pub(crate) id: String,

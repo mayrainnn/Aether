@@ -103,6 +103,26 @@ pub(super) fn classify_admin_system_family_route(
             "admin:system",
             false,
         ))
+    } else if method == http::Method::POST
+        && normalized_path == "/api/admin/system/cleanup/usage/manual"
+    {
+        Some(classified(
+            "admin_proxy",
+            "system_manage",
+            "cleanup_usage_manual",
+            "admin:system",
+            false,
+        ))
+    } else if method == http::Method::GET
+        && normalized_path == "/api/admin/system/cleanup/usage/preview"
+    {
+        Some(classified(
+            "admin_proxy",
+            "system_manage",
+            "cleanup_usage_preview",
+            "admin:system",
+            false,
+        ))
     } else if method == http::Method::POST && normalized_path == "/api/admin/system/purge/config" {
         Some(classified(
             "admin_proxy",

@@ -144,10 +144,12 @@ fn local_openai_responses_wrapper_preserves_body_order_after_edits() {
             "include",
             "reasoning",
             "tool_choice",
+            "parallel_tool_calls",
             "instructions",
             "prompt_cache_key",
         ]
     );
+    assert_eq!(provider_request_body["parallel_tool_calls"], true);
 }
 
 #[test]

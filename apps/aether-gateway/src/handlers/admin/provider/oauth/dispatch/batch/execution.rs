@@ -18,7 +18,7 @@ use crate::handlers::admin::provider::oauth::provisioning::{
     provider_oauth_key_proxy_value, update_existing_provider_oauth_catalog_key,
 };
 use crate::handlers::admin::provider::oauth::runtime::{
-    provider_oauth_runtime_endpoint_for_provider,
+    resolve_provider_oauth_runtime_endpoints,
     spawn_provider_oauth_account_state_refresh_after_update,
 };
 use crate::handlers::admin::provider::oauth::state::{
@@ -224,11 +224,11 @@ pub(super) async fn execute_admin_provider_oauth_batch_import(
         });
     };
 
-    let endpoints = state
-        .list_provider_catalog_endpoints_by_provider_ids(&[provider_id.to_string()])
-        .await?;
+    let endpoint_resolution =
+        resolve_provider_oauth_runtime_endpoints(state, &provider, provider_type).await?;
+    let endpoints = endpoint_resolution.endpoints;
     let api_formats = provider_oauth_active_api_formats(&endpoints);
-    let runtime_endpoint = provider_oauth_runtime_endpoint_for_provider(provider_type, &endpoints);
+    let runtime_endpoint = endpoint_resolution.runtime_endpoint;
     let request_proxy = state
         .resolve_admin_provider_oauth_operation_proxy_snapshot(
             proxy_node_id,

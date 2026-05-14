@@ -4758,10 +4758,13 @@ mod tests {
         );
         assert!(gemini.get("messages").is_none());
 
-        let doubao =
-            super::canonical_to_embedding_request(&canonical, "doubao-embedding-vision", "doubao")
-                .expect("doubao embedding request");
-        assert_eq!(doubao["input"][0], json!({"type": "text", "text": "alpha"}));
+        let doubao = super::canonical_to_embedding_request(
+            &canonical,
+            "doubao-embedding-text-240515",
+            "doubao",
+        )
+        .expect("doubao embedding request");
+        assert_eq!(doubao["input"], json!(["alpha", "beta"]));
         assert!(doubao.get("messages").is_none());
     }
 
@@ -4802,11 +4805,14 @@ mod tests {
         assert_eq!(gemini["content"]["parts"][0]["text"], "alpha");
         assert!(gemini.get("requests").is_none());
 
-        let doubao =
-            super::canonical_to_embedding_request(&single, "doubao-embedding-vision", "doubao")
-                .expect("doubao embedding request");
-        assert_eq!(doubao["model"], "doubao-embedding-vision");
-        assert_eq!(doubao["input"], json!([{"type": "text", "text": "alpha"}]));
+        let doubao = super::canonical_to_embedding_request(
+            &single,
+            "doubao-embedding-text-240515",
+            "doubao",
+        )
+        .expect("doubao embedding request");
+        assert_eq!(doubao["model"], "doubao-embedding-text-240515");
+        assert_eq!(doubao["input"], json!(["alpha"]));
         assert_eq!(doubao["dimensions"], 1536);
     }
 

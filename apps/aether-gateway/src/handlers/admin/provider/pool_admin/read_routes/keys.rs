@@ -197,6 +197,35 @@ fn admin_pool_compare_optional_unix_secs(
     }
 }
 
+fn admin_pool_compare_optional_score(
+    left: Option<f64>,
+    right: Option<f64>,
+    direction: AdminPoolKeySortDirection,
+) -> Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => {
+            let ordering = left.partial_cmp(&right).unwrap_or(Ordering::Equal);
+            match direction {
+                AdminPoolKeySortDirection::Asc => ordering,
+                AdminPoolKeySortDirection::Desc => ordering.reverse(),
+            }
+        }
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+fn admin_pool_score_for_key(
+    scores_by_key_id: &BTreeMap<String, StoredPoolMemberScore>,
+    key: &StoredProviderCatalogKey,
+) -> Option<f64> {
+    scores_by_key_id
+        .get(&key.id)
+        .map(|score| score.score)
+        .filter(|score| score.is_finite())
+}
+
 fn admin_pool_sort_keys_for_request(keys: &mut [StoredProviderCatalogKey], sort: AdminPoolKeySort) {
     match sort.field {
         AdminPoolKeySortField::Default => pool_selection::admin_pool_sort_keys(keys),
@@ -222,7 +251,24 @@ fn admin_pool_sort_keys_for_request(keys: &mut [StoredProviderCatalogKey], sort:
                 .then(left.id.cmp(&right.id))
             });
         }
+        AdminPoolKeySortField::Score => {}
     }
+}
+
+fn admin_pool_sort_keys_by_score(
+    keys: &mut [StoredProviderCatalogKey],
+    scores_by_key_id: &BTreeMap<String, StoredPoolMemberScore>,
+    direction: AdminPoolKeySortDirection,
+) {
+    keys.sort_by(|left, right| {
+        admin_pool_compare_optional_score(
+            admin_pool_score_for_key(scores_by_key_id, left),
+            admin_pool_score_for_key(scores_by_key_id, right),
+            direction,
+        )
+        .then(left.name.cmp(&right.name))
+        .then(left.id.cmp(&right.id))
+    });
 }
 
 fn admin_pool_repository_key_order(sort: AdminPoolKeySort) -> ProviderCatalogKeyListOrder {
@@ -240,6 +286,7 @@ fn admin_pool_repository_key_order(sort: AdminPoolKeySort) -> ProviderCatalogKey
         (AdminPoolKeySortField::LastUsedAt, AdminPoolKeySortDirection::Desc) => {
             ProviderCatalogKeyListOrder::LastUsedAtDesc
         }
+        (AdminPoolKeySortField::Score, _) => ProviderCatalogKeyListOrder::Name,
     }
 }
 
@@ -316,8 +363,9 @@ pub(super) async fn build_admin_pool_list_keys_response(
 
     let pool_config = admin_provider_pool_config(&provider);
     let page_offset = page.saturating_sub(1).saturating_mul(page_size);
+    let sort_by_score = matches!(sort.field, AdminPoolKeySortField::Score);
 
-    let (keys, total) = if status == "cooldown" {
+    let (keys, total, preloaded_pool_scores_by_key_id) = if status == "cooldown" {
         let cooldown_key_ids =
             read_admin_provider_pool_cooldown_key_ids(state.runtime_state(), &provider.id).await;
         let mut keys = if cooldown_key_ids.is_empty() {
@@ -349,15 +397,25 @@ pub(super) async fn build_admin_pool_list_keys_response(
                 })
             });
         }
-        admin_pool_sort_keys_for_request(&mut keys, sort);
+        let preloaded_pool_scores_by_key_id = if sort_by_score {
+            let key_ids = keys.iter().map(|key| key.id.clone()).collect::<Vec<_>>();
+            let scores = read_admin_pool_scores_by_key_id(state, &provider.id, &key_ids)
+                .await
+                .unwrap_or_default();
+            admin_pool_sort_keys_by_score(&mut keys, &scores, sort.direction);
+            Some(scores)
+        } else {
+            admin_pool_sort_keys_for_request(&mut keys, sort);
+            None
+        };
         let total = keys.len();
         let keys = keys
             .into_iter()
             .skip(page_offset)
             .take(page_size)
             .collect::<Vec<_>>();
-        (keys, total)
-    } else if !quick_selectors.is_empty() {
+        (keys, total, preloaded_pool_scores_by_key_id)
+    } else if !quick_selectors.is_empty() || sort_by_score {
         let mut keys = state
             .list_provider_catalog_keys_by_provider_ids(std::slice::from_ref(&provider.id))
             .await?
@@ -386,14 +444,24 @@ pub(super) async fn build_admin_pool_list_keys_response(
                 })
             })
             .collect::<Vec<_>>();
-        admin_pool_sort_keys_for_request(&mut keys, sort);
+        let preloaded_pool_scores_by_key_id = if sort_by_score {
+            let key_ids = keys.iter().map(|key| key.id.clone()).collect::<Vec<_>>();
+            let scores = read_admin_pool_scores_by_key_id(state, &provider.id, &key_ids)
+                .await
+                .unwrap_or_default();
+            admin_pool_sort_keys_by_score(&mut keys, &scores, sort.direction);
+            Some(scores)
+        } else {
+            admin_pool_sort_keys_for_request(&mut keys, sort);
+            None
+        };
         let total = keys.len();
         let keys = keys
             .into_iter()
             .skip(page_offset)
             .take(page_size)
             .collect::<Vec<_>>();
-        (keys, total)
+        (keys, total, preloaded_pool_scores_by_key_id)
     } else {
         let key_page = state
             .list_provider_catalog_key_page(&ProviderCatalogKeyListQuery {
@@ -409,13 +477,16 @@ pub(super) async fn build_admin_pool_list_keys_response(
                 order: admin_pool_repository_key_order(sort),
             })
             .await?;
-        (key_page.items, key_page.total)
+        (key_page.items, key_page.total, None)
     };
 
     let key_ids = keys.iter().map(|key| key.id.clone()).collect::<Vec<_>>();
-    let pool_scores_by_key_id = read_admin_pool_scores_by_key_id(state, &provider.id, &key_ids)
-        .await
-        .unwrap_or_default();
+    let pool_scores_by_key_id = match preloaded_pool_scores_by_key_id {
+        Some(scores) => scores,
+        None => read_admin_pool_scores_by_key_id(state, &provider.id, &key_ids)
+            .await
+            .unwrap_or_default(),
+    };
     let endpoints = state
         .list_provider_catalog_endpoints_by_provider_ids(std::slice::from_ref(&provider.id))
         .await?;

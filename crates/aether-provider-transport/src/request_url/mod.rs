@@ -109,7 +109,7 @@ pub fn build_transport_request_url(
         ),
         "doubao:embedding" => build_passthrough_path_url(
             &transport.endpoint.base_url,
-            "/embeddings/multimodal",
+            "/embeddings",
             params.request_query,
             &[],
         ),
@@ -818,14 +818,14 @@ mod tests {
                 &doubao,
                 TransportRequestUrlParams {
                     provider_api_format: "doubao:embedding",
-                    mapped_model: Some("doubao-embedding-vision"),
+                    mapped_model: Some("doubao-embedding-text-240515"),
                     upstream_is_stream: false,
                     request_query: None,
                     kiro_api_region: None,
                 },
             )
             .as_deref(),
-            Some("https://ark.volces.example/api/v3/embeddings/multimodal")
+            Some("https://ark.volces.example/api/v3/embeddings")
         );
     }
 
@@ -943,14 +943,14 @@ mod tests {
                 &doubao_with_query,
                 TransportRequestUrlParams {
                     provider_api_format: "doubao:embedding",
-                    mapped_model: Some("doubao-embedding-vision"),
+                    mapped_model: Some("doubao-embedding-text-240515"),
                     upstream_is_stream: false,
                     request_query: Some("trace=4"),
                     kiro_api_region: None,
                 },
             )
             .as_deref(),
-            Some("https://ark.volces.example/api/v3/embeddings/multimodal?tenant=base&trace=4")
+            Some("https://ark.volces.example/api/v3/embeddings?tenant=base&trace=4")
         );
     }
 

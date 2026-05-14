@@ -1,7 +1,8 @@
 use std::io::Write;
 
 use aether_data_contracts::repository::usage::{
-    parse_usage_body_ref, usage_body_ref, UsageBodyField, UsageCleanupSummary, UsageCleanupWindow,
+    parse_usage_body_ref, usage_body_ref, UsageBodyField, UsageCleanupPreviewCounts,
+    UsageCleanupSummary, UsageCleanupWindow,
 };
 use chrono::{DateTime, Utc};
 use flate2::{write::GzEncoder, Compression};
@@ -471,6 +472,48 @@ impl SqlxUsageReadRepository {
             records_deleted,
         })
     }
+}
+
+pub async fn preview_usage_cleanup_impl(
+    pool: &PostgresPool,
+    window: &UsageCleanupWindow,
+) -> Result<UsageCleanupPreviewCounts, DataLayerError> {
+    let detail: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM usage WHERE created_at < $1 AND created_at >= $2",
+    )
+    .bind(window.detail_cutoff)
+    .bind(window.compressed_cutoff)
+    .fetch_one(pool)
+    .await
+    .map_err(postgres_error)?;
+    let compressed: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM usage WHERE created_at < $1 AND created_at >= $2",
+    )
+    .bind(window.compressed_cutoff)
+    .bind(window.log_cutoff)
+    .fetch_one(pool)
+    .await
+    .map_err(postgres_error)?;
+    let header: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM usage WHERE created_at < $1 AND created_at >= $2",
+    )
+    .bind(window.header_cutoff)
+    .bind(window.log_cutoff)
+    .fetch_one(pool)
+    .await
+    .map_err(postgres_error)?;
+    let log: i64 = sqlx::query_scalar("SELECT COUNT(*)::bigint FROM usage WHERE created_at < $1")
+        .bind(window.log_cutoff)
+        .fetch_one(pool)
+        .await
+        .map_err(postgres_error)?;
+
+    Ok(UsageCleanupPreviewCounts {
+        detail: u64::try_from(detail).unwrap_or(0),
+        compressed: u64::try_from(compressed).unwrap_or(0),
+        header: u64::try_from(header).unwrap_or(0),
+        log: u64::try_from(log).unwrap_or(0),
+    })
 }
 
 async fn delete_old_usage_records(

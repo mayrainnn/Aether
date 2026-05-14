@@ -209,14 +209,15 @@
         请前往"模型目录"页面添加模型
       </p>
     </div>
-
   </Card>
 
   <ModelTestDialog
     :open="modelTest.dialogOpen.value"
     :result="modelTest.testResult.value"
     :mode="modelTest.testMode.value"
+    :provider-type="provider.provider_type"
     :selecting-model-name="pendingTestModel ? (pendingTestModel.global_model_display_name || pendingTestModel.provider_model_name) : null"
+    :requested-model-name="pendingRequestedModelName"
     :endpoints="activeEndpoints"
     :selected-endpoint="selectedTestEndpoint"
     :testing="modelTest.testing.value"
@@ -228,18 +229,22 @@
     :request-body-draft="testRequestBodyDraft"
     :request-body-reset-value="testRequestBodyResetValue"
     :request-body-error="testRequestBodyError"
+    :model-mapping-available="testModelMappingAvailable"
+    :model-mapping-options="testModelMappingOptions"
+    :selected-model-mapping="selectedTestMappedModelName"
     :start-disabled="!selectedTestEndpoint || !!testRequestHeadersError || !!testRequestBodyError"
     @close="handleTestDialogClose"
     @back="handleTestDialogBack"
     @start="handleStartPendingTest"
     @select-endpoint="handleSelectTestEndpoint"
+    @select-model-mapping="handleSelectModelMapping"
     @update:request-headers-draft="testRequestHeadersDraft = $event"
     @update:request-body-draft="testRequestBodyDraft = $event"
   />
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useSmartPagination } from '@/composables/useSmartPagination'
 import { useModelTest } from '@/composables/useModelTest'
 import { Box, Edit, Layers, Power, Copy, Loader2, Play } from 'lucide-vue-next'
@@ -252,6 +257,7 @@ import {
   type Model,
   type ProviderEndpoint,
 } from '@/api/endpoints'
+import { type EndpointAPIKey } from '@/api/endpoints/keys'
 import { updateModel } from '@/api/endpoints/models'
 import { parseApiError } from '@/utils/errorParser'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
@@ -260,16 +266,19 @@ import ModelTestDialog from './ModelTestDialog.vue'
 import {
   buildDefaultModelTestRequestHeaders,
   buildDefaultModelTestRequestBody,
+  isModelTestableEndpoint,
+  listModelTestMappedModelOptions,
+  normalizeModelTestMappedModelSelection,
   parseModelTestRequestHeadersDraft,
   parseModelTestRequestBodyDraft,
-  POOL_TEST_CONCURRENCY,
-  SINGLE_TEST_CONCURRENCY,
+  syncModelTestRequestBodyDraft,
 } from './model-test-request'
 
 const props = defineProps<{
   provider: ProviderWithEndpointsSummary
   models?: Model[]
   endpoints?: ProviderEndpoint[]
+  providerKeys?: EndpointAPIKey[]
   loading?: boolean
 }>()
 
@@ -295,12 +304,31 @@ const testRequestHeadersDraft = ref('')
 const testRequestHeadersResetValue = ref('')
 const testRequestBodyDraft = ref('')
 const testRequestBodyResetValue = ref('')
+const selectedTestMappedModelName = ref<string | null>(null)
 const isPoolManagedProvider = computed(() => Boolean(props.provider.pool_advanced))
-const activeEndpoints = computed(() => (props.endpoints ?? []).filter(endpoint => endpoint.is_active))
+const activeEndpoints = computed(() => (props.endpoints ?? [])
+  .filter(endpoint => isModelTestableEndpoint(endpoint, props.providerKeys ?? [])))
 const parsedTestRequestHeaders = computed(() => parseModelTestRequestHeadersDraft(testRequestHeadersDraft.value))
 const testRequestHeadersError = computed(() => parsedTestRequestHeaders.value.error)
 const parsedTestRequestBody = computed(() => parseModelTestRequestBodyDraft(testRequestBodyDraft.value))
 const testRequestBodyError = computed(() => parsedTestRequestBody.value.error)
+const pendingRequestedModelName = computed(() => getModelTestRequestedModelName(pendingTestModel.value))
+const testModelMappingOptions = computed(() => {
+  const requestedModelName = pendingRequestedModelName.value.trim()
+  return listModelTestMappedModelOptions(pendingTestModel.value, selectedTestEndpoint.value)
+    .filter(option => option.name !== requestedModelName)
+})
+const mappedTestModelName = computed(() => {
+  const selected = selectedTestMappedModelName.value?.trim()
+  if (!selected) return null
+  return testModelMappingOptions.value.some(option => option.name === selected)
+    ? selected
+    : null
+})
+const testModelMappingAvailable = computed(() => testModelMappingOptions.value.length > 0)
+const effectiveTestRequestModelName = computed(() => (
+  mappedTestModelName.value || pendingRequestedModelName.value
+))
 const models = computed(() => props.models ?? localModels.value)
 const isLoading = computed(() => Boolean(props.loading) || localLoading.value)
 // 按名称排序的模型列表
@@ -467,6 +495,7 @@ function handleTestDialogClose() {
   modelTest.resetState()
   pendingTestModel.value = null
   selectedTestEndpoint.value = null
+  selectedTestMappedModelName.value = null
   testRequestHeadersDraft.value = ''
   testRequestHeadersResetValue.value = ''
   testRequestBodyDraft.value = ''
@@ -483,6 +512,16 @@ function handleSelectTestEndpoint(endpointId: string) {
   const endpoint = activeEndpoints.value.find(item => item.id === endpointId)
   if (!endpoint) return
   selectedTestEndpoint.value = endpoint
+  syncSelectedTestModelMapping()
+  resetTestRequestBodyForSelectedEndpoint()
+}
+
+function handleSelectModelMapping(modelName: string) {
+  selectedTestMappedModelName.value = normalizeModelTestMappedModelSelection(
+    testModelMappingOptions.value,
+    modelName,
+  )
+  syncTestRequestBodyModel()
 }
 
 async function handleStartPendingTest() {
@@ -512,15 +551,16 @@ async function handleStartPendingTest() {
   const modelName = model.global_model_name || model.provider_model_name
   const endpointPrefix = `[${formatApiFormat(endpoint.api_format)}] `
   await modelTest.startTest({
-    mode: 'global',
+    mode: isPoolManagedProvider.value ? 'pool' : 'global',
     modelName,
     displayLabel: `${endpointPrefix}${modelName}`,
     apiFormat: endpoint.api_format,
     endpointId: endpoint.id,
     endpointBaseUrl: endpoint.base_url,
+    applyModelMapping: Boolean(mappedTestModelName.value),
+    mappedModelName: mappedTestModelName.value ?? undefined,
     requestHeaders,
     requestBody,
-    concurrency: isPoolManagedProvider.value ? POOL_TEST_CONCURRENCY : SINGLE_TEST_CONCURRENCY,
     onError: () => {
       if (activeEndpoints.value.length > 1) {
         return true
@@ -539,16 +579,71 @@ async function testModelConnection(model: Model) {
 
   pendingTestModel.value = model
   selectedTestEndpoint.value = activeEndpoints.value[0] ?? null
+  const requestedModelName = getModelTestRequestedModelName(model)
+  selectedTestMappedModelName.value = null
   testRequestHeadersResetValue.value = buildDefaultModelTestRequestHeaders()
   testRequestHeadersDraft.value = testRequestHeadersResetValue.value
   testRequestBodyResetValue.value = buildDefaultModelTestRequestBody(
-    model.global_model_name || model.provider_model_name,
+    requestedModelName,
     selectedTestEndpoint.value?.api_format,
   )
   testRequestBodyDraft.value = testRequestBodyResetValue.value
   modelTest.testResult.value = null
   modelTest.dialogOpen.value = true
 }
+
+function getModelTestRequestedModelName(model: Model | null): string {
+  return model?.global_model_name || model?.provider_model_name || ''
+}
+
+function syncSelectedTestModelMapping(preferredName?: string | null) {
+  const options = testModelMappingOptions.value
+  if (options.length === 0) {
+    selectedTestMappedModelName.value = null
+    return
+  }
+  const preferred = preferredName ?? selectedTestMappedModelName.value
+  selectedTestMappedModelName.value = normalizeModelTestMappedModelSelection(options, preferred)
+}
+
+function syncTestRequestBodyModel() {
+  const modelName = effectiveTestRequestModelName.value
+  if (!modelName) return
+
+  const resetDraft = testRequestBodyResetValue.value
+    || buildDefaultModelTestRequestBody(modelName, selectedTestEndpoint.value?.api_format)
+  const next = syncModelTestRequestBodyDraft(
+    testRequestBodyDraft.value,
+    testRequestBodyResetValue.value,
+    resetDraft,
+    modelName,
+  )
+  testRequestBodyResetValue.value = next.resetValue
+  testRequestBodyDraft.value = next.draft
+}
+
+function resetTestRequestBodyForSelectedEndpoint() {
+  const modelName = effectiveTestRequestModelName.value
+  if (!modelName) return
+
+  const nextResetValue = buildDefaultModelTestRequestBody(
+    modelName,
+    selectedTestEndpoint.value?.api_format,
+  )
+  const next = syncModelTestRequestBodyDraft(
+    testRequestBodyDraft.value,
+    testRequestBodyResetValue.value,
+    nextResetValue,
+    modelName,
+  )
+  testRequestBodyResetValue.value = next.resetValue
+  testRequestBodyDraft.value = next.draft
+}
+
+watch(
+  [effectiveTestRequestModelName, () => selectedTestEndpoint.value?.api_format],
+  () => syncTestRequestBodyModel(),
+)
 
 // 暴露给父组件
 defineExpose({

@@ -4,14 +4,22 @@ use crate::GatewayError;
 use aether_admin::system::{
     build_admin_api_formats_payload as build_admin_api_formats_payload_pure,
     build_admin_system_check_update_payload as build_admin_system_check_update_payload_pure,
+    build_admin_system_check_update_payload_with_release,
     build_admin_system_settings_payload as build_admin_system_settings_payload_pure,
     build_admin_system_settings_updated_payload,
     build_admin_system_stats_payload as build_admin_system_stats_payload_pure,
-    parse_admin_system_settings_update,
+    parse_admin_system_settings_update, AdminSystemUpdateRelease,
 };
 use axum::body::Bytes;
 use axum::http;
+#[cfg(not(test))]
+use serde::Deserialize;
 use serde_json::json;
+#[cfg(not(test))]
+use std::time::Duration;
+
+const AETHER_RELEASES_API_URL: &str =
+    "https://api.github.com/repos/fawney19/Aether/releases?per_page=20";
 
 pub(crate) fn current_aether_version() -> String {
     option_env!("AETHER_BUILD_VERSION")
@@ -22,6 +30,75 @@ pub(crate) fn current_aether_version() -> String {
 
 pub(crate) fn build_admin_system_check_update_payload() -> serde_json::Value {
     build_admin_system_check_update_payload_pure(current_aether_version())
+}
+
+pub(crate) fn build_admin_system_check_update_payload_from_release(
+    latest_release: Option<AdminSystemUpdateRelease>,
+    error: Option<String>,
+) -> serde_json::Value {
+    build_admin_system_check_update_payload_with_release(
+        current_aether_version(),
+        latest_release,
+        error,
+    )
+}
+
+#[cfg(not(test))]
+pub(crate) async fn fetch_latest_admin_system_release(
+) -> (Option<AdminSystemUpdateRelease>, Option<String>) {
+    match fetch_latest_admin_system_release_inner().await {
+        Ok(release) => (release, None),
+        Err(err) => (None, Some(err)),
+    }
+}
+
+#[cfg(test)]
+pub(crate) async fn fetch_latest_admin_system_release(
+) -> (Option<AdminSystemUpdateRelease>, Option<String>) {
+    (None, Some("测试环境未请求 GitHub Releases".to_string()))
+}
+
+#[cfg(not(test))]
+async fn fetch_latest_admin_system_release_inner(
+) -> Result<Option<AdminSystemUpdateRelease>, String> {
+    let releases: Vec<GitHubRelease> = reqwest::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .build()
+        .map_err(|err| format!("创建更新检查客户端失败: {err}"))?
+        .get(AETHER_RELEASES_API_URL)
+        .header(reqwest::header::USER_AGENT, "Aether-Gateway update-check")
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|err| format!("请求 GitHub Releases 失败: {err}"))?
+        .error_for_status()
+        .map_err(|err| format!("GitHub Releases 返回错误: {err}"))?
+        .json()
+        .await
+        .map_err(|err| format!("解析 GitHub Releases 失败: {err}"))?;
+
+    Ok(releases
+        .into_iter()
+        .find(|release| !release.draft && release.tag_name.starts_with('v'))
+        .map(|release| AdminSystemUpdateRelease {
+            version: release.tag_name,
+            release_url: Some(release.html_url),
+            release_notes: release.body.filter(|body| !body.trim().is_empty()),
+            published_at: release.published_at,
+        }))
+}
+
+#[cfg(not(test))]
+#[derive(Debug, Deserialize)]
+struct GitHubRelease {
+    tag_name: String,
+    html_url: String,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    published_at: Option<String>,
+    #[serde(default)]
+    draft: bool,
 }
 
 pub(crate) async fn build_admin_system_stats_payload(

@@ -828,7 +828,7 @@ import {
   Loader2,
   Clock,
   Database,
-  Shuffle
+  Shuffle,
 } from 'lucide-vue-next'
 import { formatTokens, formatCurrency } from '@/utils/format'
 import { parseDateLike } from '@/utils/date'

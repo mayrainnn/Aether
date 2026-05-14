@@ -16,6 +16,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use semver::Version;
 use serde::{de, de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
@@ -42,7 +43,8 @@ pub struct AdminEmailTemplateUpdate {
 }
 
 pub const ADMIN_SYSTEM_CONFIG_EXPORT_VERSION: &str = "2.2";
-pub const ADMIN_SYSTEM_CONFIG_SUPPORTED_VERSIONS: &[&str] = &[ADMIN_SYSTEM_CONFIG_EXPORT_VERSION];
+pub const ADMIN_SYSTEM_CONFIG_SUPPORTED_VERSIONS: &[&str] =
+    &["2.0", "2.1", ADMIN_SYSTEM_CONFIG_EXPORT_VERSION];
 pub const ADMIN_SYSTEM_USERS_EXPORT_VERSION: &str = "1.4";
 pub const ADMIN_SYSTEM_USERS_SUPPORTED_VERSIONS: &[&str] =
     &["1.3", ADMIN_SYSTEM_USERS_EXPORT_VERSION];
@@ -58,6 +60,14 @@ pub const ADMIN_SYSTEM_PROVIDER_OPS_SENSITIVE_CREDENTIAL_FIELDS: &[&str] = &[
     "cookie",
 ];
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminSystemUpdateRelease {
+    pub version: String,
+    pub release_url: Option<String>,
+    pub release_notes: Option<String>,
+    pub published_at: Option<String>,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -67,6 +77,21 @@ fn invalid_request(detail: impl Into<String>) -> (http::StatusCode, serde_json::
         http::StatusCode::BAD_REQUEST,
         json!({ "detail": detail.into() }),
     )
+}
+
+fn parse_finite_f64_import_value<E>(raw: &str) -> Result<f64, E>
+where
+    E: de::Error,
+{
+    let value = raw
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| E::custom("expected a finite number or numeric string"))?;
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(E::custom("expected a finite number or numeric string"))
+    }
 }
 
 fn deserialize_optional_f64_from_number<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
@@ -80,8 +105,13 @@ where
             .as_f64()
             .filter(|value| value.is_finite())
             .map(Some)
-            .ok_or_else(|| de::Error::custom("expected a finite number")),
-        Some(_) => Err(de::Error::custom("expected a finite number")),
+            .ok_or_else(|| de::Error::custom("expected a finite number or numeric string")),
+        Some(Value::String(raw)) if !raw.trim().is_empty() => {
+            parse_finite_f64_import_value::<D::Error>(&raw).map(Some)
+        }
+        Some(_) => Err(de::Error::custom(
+            "expected a finite number or numeric string",
+        )),
     }
 }
 
@@ -620,15 +650,92 @@ const ADMIN_API_FORMAT_DEFINITIONS: &[AdminApiFormatDefinition] = &[
 ];
 
 pub fn build_admin_system_check_update_payload(current_version: String) -> serde_json::Value {
+    build_admin_system_check_update_payload_with_release(
+        current_version,
+        None,
+        Some("检查更新需要 Rust 管理后端".to_string()),
+    )
+}
+
+pub fn build_admin_system_check_update_payload_with_release(
+    current_version: String,
+    latest_release: Option<AdminSystemUpdateRelease>,
+    error: Option<String>,
+) -> serde_json::Value {
+    let has_update = latest_release
+        .as_ref()
+        .is_some_and(|release| admin_system_update_available(&current_version, &release.version));
+
     json!({
         "current_version": current_version,
-        "latest_version": serde_json::Value::Null,
-        "has_update": false,
-        "release_url": serde_json::Value::Null,
-        "release_notes": serde_json::Value::Null,
-        "published_at": serde_json::Value::Null,
-        "error": "检查更新需要 Rust 管理后端",
+        "latest_version": latest_release.as_ref().map(|release| release.version.clone()),
+        "has_update": has_update,
+        "release_url": latest_release.as_ref().and_then(|release| release.release_url.clone()),
+        "release_notes": latest_release.as_ref().and_then(|release| release.release_notes.clone()),
+        "published_at": latest_release.as_ref().and_then(|release| release.published_at.clone()),
+        "error": error,
     })
+}
+
+fn normalized_admin_system_version(version: &str) -> String {
+    let trimmed = version.trim();
+    trimmed
+        .strip_prefix('v')
+        .or_else(|| trimmed.strip_prefix('V'))
+        .unwrap_or(trimmed)
+        .to_string()
+}
+
+fn admin_system_update_available(current_version: &str, latest_release_version: &str) -> bool {
+    match (
+        parse_admin_system_version_for_update(current_version),
+        parse_admin_system_version_for_update(latest_release_version),
+    ) {
+        (Some(current), Some(latest)) => latest > current,
+        _ => false,
+    }
+}
+
+fn parse_admin_system_version_for_update(version: &str) -> Option<Version> {
+    let base = admin_system_release_base_version(version);
+    let normalized = normalize_admin_system_rc_prerelease(&base);
+    Version::parse(&normalized).ok()
+}
+
+fn admin_system_release_base_version(version: &str) -> String {
+    let normalized = normalized_admin_system_version(version);
+    let without_dirty = normalized.strip_suffix("-dirty").unwrap_or(&normalized);
+    git_describe_base_version(without_dirty)
+        .unwrap_or(without_dirty)
+        .to_string()
+}
+
+fn git_describe_base_version(version: &str) -> Option<&str> {
+    let (before_hash, hash) = version.rsplit_once("-g")?;
+    if hash.is_empty() || !hash.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return None;
+    }
+
+    let (base, commit_count) = before_hash.rsplit_once('-')?;
+    if commit_count.is_empty() || !commit_count.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+
+    Some(base)
+}
+
+fn normalize_admin_system_rc_prerelease(version: &str) -> String {
+    let Some((core, prerelease)) = version.split_once('-') else {
+        return version.to_string();
+    };
+    let Some(rc_number) = prerelease.strip_prefix("rc") else {
+        return version.to_string();
+    };
+    if rc_number.is_empty() || !rc_number.chars().all(|ch| ch.is_ascii_digit()) {
+        return version.to_string();
+    }
+
+    format!("{core}-rc.{rc_number}")
 }
 
 pub fn build_admin_system_stats_payload(
@@ -2181,31 +2288,125 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_admin_system_config_import_request_accepts_supported_versions() {
-        let parsed = parse_admin_system_config_import_request(
-            json!({
-                "version": ADMIN_SYSTEM_CONFIG_EXPORT_VERSION,
-                "global_models": [],
-                "providers": [],
-            })
-            .to_string()
-            .as_bytes(),
-        )
-        .expect("current version should parse");
-
-        assert_eq!(
-            parsed.request.document.version,
-            ADMIN_SYSTEM_CONFIG_EXPORT_VERSION
+    fn build_admin_system_check_update_payload_reports_available_release() {
+        let payload = build_admin_system_check_update_payload_with_release(
+            "0.7.0-rc27".to_string(),
+            Some(AdminSystemUpdateRelease {
+                version: "v0.7.0-rc28".to_string(),
+                release_url: Some(
+                    "https://github.com/fawney19/Aether/releases/tag/v0.7.0-rc28".to_string(),
+                ),
+                release_notes: Some("release notes".to_string()),
+                published_at: Some("2026-05-13T00:00:00Z".to_string()),
+            }),
+            None,
         );
-        assert_eq!(parsed.request.merge_mode, AdminImportMergeMode::Skip);
-        assert!(parsed.request.document.oauth_providers.is_empty());
-        assert!(parsed.request.document.system_configs.is_empty());
-        assert!(parsed.request.document.ldap_config.is_none());
+
+        assert_eq!(payload["current_version"], "0.7.0-rc27");
+        assert_eq!(payload["latest_version"], "v0.7.0-rc28");
+        assert_eq!(payload["has_update"], true);
+        assert_eq!(
+            payload["release_url"],
+            "https://github.com/fawney19/Aether/releases/tag/v0.7.0-rc28"
+        );
+        assert_eq!(payload["release_notes"], "release notes");
+        assert_eq!(payload["published_at"], "2026-05-13T00:00:00Z");
+        assert_eq!(payload["error"], serde_json::Value::Null);
     }
 
     #[test]
-    fn parse_admin_system_config_import_request_rejects_removed_versions() {
-        for version in ["2.0", "2.1"] {
+    fn build_admin_system_check_update_payload_normalizes_v_prefix() {
+        let payload = build_admin_system_check_update_payload_with_release(
+            "0.7.0-rc28".to_string(),
+            Some(AdminSystemUpdateRelease {
+                version: "v0.7.0-rc28".to_string(),
+                release_url: None,
+                release_notes: None,
+                published_at: None,
+            }),
+            None,
+        );
+
+        assert_eq!(payload["has_update"], false);
+        assert_eq!(payload["error"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn build_admin_system_check_update_payload_ignores_git_describe_build_on_latest_release() {
+        let payload = build_admin_system_check_update_payload_with_release(
+            "0.7.0-rc28-11-g63149fe2-dirty".to_string(),
+            Some(AdminSystemUpdateRelease {
+                version: "v0.7.0-rc28".to_string(),
+                release_url: None,
+                release_notes: None,
+                published_at: None,
+            }),
+            None,
+        );
+
+        assert_eq!(payload["has_update"], false);
+        assert_eq!(payload["error"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn build_admin_system_check_update_payload_ignores_newer_local_release() {
+        let payload = build_admin_system_check_update_payload_with_release(
+            "0.7.0-rc29".to_string(),
+            Some(AdminSystemUpdateRelease {
+                version: "v0.7.0-rc28".to_string(),
+                release_url: None,
+                release_notes: None,
+                published_at: None,
+            }),
+            None,
+        );
+
+        assert_eq!(payload["has_update"], false);
+        assert_eq!(payload["error"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn build_admin_system_check_update_payload_compares_rc_versions_numerically() {
+        let payload = build_admin_system_check_update_payload_with_release(
+            "0.7.0-rc9".to_string(),
+            Some(AdminSystemUpdateRelease {
+                version: "v0.7.0-rc10".to_string(),
+                release_url: None,
+                release_notes: None,
+                published_at: None,
+            }),
+            None,
+        );
+
+        assert_eq!(payload["has_update"], true);
+        assert_eq!(payload["error"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn parse_admin_system_config_import_request_accepts_supported_versions() {
+        for version in ADMIN_SYSTEM_CONFIG_SUPPORTED_VERSIONS {
+            let parsed = parse_admin_system_config_import_request(
+                json!({
+                    "version": version,
+                    "global_models": [],
+                    "providers": [],
+                })
+                .to_string()
+                .as_bytes(),
+            )
+            .expect("supported version should parse");
+
+            assert_eq!(parsed.request.document.version, *version);
+            assert_eq!(parsed.request.merge_mode, AdminImportMergeMode::Skip);
+            assert!(parsed.request.document.oauth_providers.is_empty());
+            assert!(parsed.request.document.system_configs.is_empty());
+            assert!(parsed.request.document.ldap_config.is_none());
+        }
+    }
+
+    #[test]
+    fn parse_admin_system_config_import_request_rejects_unknown_versions() {
+        for version in ["1.9", "2.3"] {
             let err = parse_admin_system_config_import_request(
                 json!({
                     "version": version,
@@ -2215,7 +2416,7 @@ mod tests {
                 .to_string()
                 .as_bytes(),
             )
-            .expect_err("removed versions should fail");
+            .expect_err("unknown versions should fail");
 
             assert_eq!(err.0, http::StatusCode::BAD_REQUEST);
             assert_eq!(
@@ -2274,8 +2475,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_admin_system_config_import_request_rejects_numeric_string_fields() {
-        let err = parse_admin_system_config_import_request(
+    fn parse_admin_system_config_import_request_accepts_numeric_string_fields() {
+        let parsed = parse_admin_system_config_import_request(
             json!({
                 "version": "2.2",
                 "global_models": [{
@@ -2298,7 +2499,34 @@ mod tests {
             .to_string()
             .as_bytes(),
         )
-        .expect_err("numeric string fields should fail");
+        .expect("numeric string fields from Python exports should parse");
+
+        let global_model = &parsed.request.document.global_models[0];
+        assert_eq!(global_model.default_price_per_request, Some(1.8));
+
+        let provider = &parsed.request.document.providers[0];
+        assert_eq!(provider.monthly_quota_usd, Some(12.5));
+        assert_eq!(provider.stream_first_byte_timeout, Some(60.0));
+        assert_eq!(provider.request_timeout, Some(120.0));
+        assert_eq!(provider.models[0].price_per_request, Some(0.7));
+    }
+
+    #[test]
+    fn parse_admin_system_config_import_request_rejects_invalid_numeric_string_fields() {
+        let err = parse_admin_system_config_import_request(
+            json!({
+                "version": "2.2",
+                "global_models": [{
+                    "name": "veo3.1",
+                    "display_name": "Veo 3.1",
+                    "default_price_per_request": "not-a-number",
+                }],
+                "providers": [],
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .expect_err("invalid numeric string fields should fail");
 
         assert_eq!(err.0, http::StatusCode::BAD_REQUEST);
         let detail = err.1["detail"].as_str().expect("detail should be a string");

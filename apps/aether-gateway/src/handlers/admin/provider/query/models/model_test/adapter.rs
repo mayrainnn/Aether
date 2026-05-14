@@ -1,0 +1,268 @@
+use super::DEFAULT_PROVIDER_QUERY_TEST_MESSAGE;
+use crate::handlers::admin::request::{AdminAppState, AdminGatewayProviderTransportSnapshot};
+use crate::provider_transport::antigravity::{
+    classify_local_antigravity_request_support, AntigravityEnvelopeRequestType,
+    AntigravityRequestSideSupport, AntigravityRequestSideUnsupportedReason,
+};
+use crate::provider_transport::kiro::supports_local_kiro_request_transport_with_network;
+use serde_json::{json, Value};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ProviderQueryTestAdapter {
+    Standard,
+    Kiro,
+    OpenAiImage,
+    Antigravity,
+}
+pub(super) fn provider_query_unsupported_test_api_format_message(api_format: &str) -> String {
+    let api_format = api_format.trim();
+    if api_format.is_empty() {
+        "Rust local provider-query model test does not support an empty endpoint format".to_string()
+    } else {
+        format!(
+            "Rust local provider-query model test does not support endpoint format {api_format}"
+        )
+    }
+}
+
+pub(super) fn provider_query_standard_test_client_api_format(
+    provider_api_format: &str,
+) -> &'static str {
+    let normalized_api_format = crate::ai_serving::normalize_api_format_alias(provider_api_format);
+    if crate::ai_serving::is_embedding_api_format(&normalized_api_format) {
+        "openai:embedding"
+    } else if crate::ai_serving::is_rerank_api_format(&normalized_api_format) {
+        "openai:rerank"
+    } else {
+        "openai:chat"
+    }
+}
+
+pub(super) fn provider_query_standard_test_unsupported_reason(
+    transport: &AdminGatewayProviderTransportSnapshot,
+    api_format: &str,
+) -> String {
+    let normalized_api_format = crate::ai_serving::normalize_api_format_alias(api_format);
+    let reason = match normalized_api_format.as_str() {
+        "openai:chat" => {
+            crate::provider_transport::policy::local_openai_chat_transport_unsupported_reason(
+                transport,
+            )
+        }
+        "openai:responses"
+        | "openai:responses:compact"
+        | "claude:messages"
+        | "openai:embedding"
+        | "jina:embedding"
+        | "doubao:embedding"
+        | "openai:rerank"
+        | "jina:rerank" => {
+            crate::provider_transport::policy::local_standard_transport_unsupported_reason_with_network(
+                transport,
+                api_format,
+            )
+        }
+        "gemini:generate_content"
+            if crate::provider_transport::is_vertex_api_key_transport_context(transport) =>
+        {
+            aether_provider_transport::vertex::local_vertex_api_key_gemini_transport_unsupported_reason_with_network(
+                transport,
+            )
+        }
+        "gemini:generate_content" | "gemini:embedding" => {
+            crate::provider_transport::policy::local_gemini_transport_unsupported_reason_with_network(
+                transport,
+                api_format,
+            )
+        }
+        _ => Some("transport_api_format_mismatch"),
+    };
+
+    match reason {
+        Some(reason) => format!(
+            "{} ({reason})",
+            provider_query_unsupported_test_api_format_message(api_format)
+        ),
+        None => provider_query_unsupported_test_api_format_message(api_format),
+    }
+}
+
+pub(super) fn provider_query_antigravity_unsupported_reason(
+    reason: AntigravityRequestSideUnsupportedReason,
+) -> &'static str {
+    match reason {
+        AntigravityRequestSideUnsupportedReason::InactiveTransport => "transport_inactive",
+        AntigravityRequestSideUnsupportedReason::WrongProviderType => {
+            "transport_provider_type_unsupported"
+        }
+        AntigravityRequestSideUnsupportedReason::UnsupportedApiFormat => {
+            "transport_api_format_mismatch"
+        }
+        AntigravityRequestSideUnsupportedReason::UnsupportedCustomPath => {
+            "transport_custom_path_unsupported"
+        }
+        AntigravityRequestSideUnsupportedReason::UnsupportedHeaderRules => {
+            "transport_header_rules_unsupported"
+        }
+        AntigravityRequestSideUnsupportedReason::UnsupportedBodyRules => {
+            "transport_body_rules_unsupported"
+        }
+        AntigravityRequestSideUnsupportedReason::UnsupportedNetworkConfig => {
+            "transport_network_config_unsupported"
+        }
+        AntigravityRequestSideUnsupportedReason::UnsupportedAuth(_) => {
+            "transport_antigravity_auth_unsupported"
+        }
+        AntigravityRequestSideUnsupportedReason::UnsupportedEnvelope(_) => {
+            "transport_antigravity_envelope_unsupported"
+        }
+    }
+}
+
+pub(super) fn provider_query_antigravity_test_unsupported_reason(
+    transport: &AdminGatewayProviderTransportSnapshot,
+    request_body: &Value,
+) -> Option<&'static str> {
+    match classify_local_antigravity_request_support(
+        transport,
+        request_body,
+        AntigravityEnvelopeRequestType::EndpointTest,
+    ) {
+        AntigravityRequestSideSupport::Supported(_) => None,
+        AntigravityRequestSideSupport::Unsupported(reason) => {
+            Some(provider_query_antigravity_unsupported_reason(reason))
+        }
+    }
+}
+pub(super) fn provider_query_normalize_api_format_alias(value: &str) -> String {
+    crate::ai_serving::normalize_api_format_alias(value)
+}
+
+pub(super) fn provider_query_test_adapter_for_provider_api_format(
+    provider_type: &str,
+    api_format: &str,
+) -> Option<ProviderQueryTestAdapter> {
+    if provider_type.trim().eq_ignore_ascii_case("kiro") {
+        return Some(ProviderQueryTestAdapter::Kiro);
+    }
+
+    let normalized_api_format = provider_query_normalize_api_format_alias(api_format);
+    if normalized_api_format == "openai:image" {
+        return Some(ProviderQueryTestAdapter::OpenAiImage);
+    }
+    if provider_type.trim().eq_ignore_ascii_case("antigravity")
+        && normalized_api_format == "gemini:generate_content"
+    {
+        return Some(ProviderQueryTestAdapter::Antigravity);
+    }
+    if matches!(
+        normalized_api_format.as_str(),
+        "openai:chat"
+            | "openai:responses"
+            | "openai:responses:compact"
+            | "claude:messages"
+            | "gemini:generate_content"
+            | "openai:embedding"
+            | "gemini:embedding"
+            | "jina:embedding"
+            | "doubao:embedding"
+            | "openai:rerank"
+            | "jina:rerank"
+    ) {
+        return Some(ProviderQueryTestAdapter::Standard);
+    }
+
+    None
+}
+
+pub(super) fn provider_query_model_test_endpoint_priority(
+    provider_type: &str,
+    api_format: &str,
+) -> Option<u8> {
+    let normalized_api_format = provider_query_normalize_api_format_alias(api_format);
+    match provider_query_test_adapter_for_provider_api_format(provider_type, api_format)? {
+        ProviderQueryTestAdapter::Kiro => Some(0),
+        ProviderQueryTestAdapter::Antigravity => Some(1),
+        ProviderQueryTestAdapter::OpenAiImage => Some(2),
+        ProviderQueryTestAdapter::Standard => {
+            if matches!(
+                normalized_api_format.as_str(),
+                "openai:chat" | "claude:messages" | "gemini:generate_content"
+            ) {
+                Some(0)
+            } else {
+                Some(1)
+            }
+        }
+    }
+}
+
+pub(super) fn provider_query_default_antigravity_endpoint_test_body() -> Value {
+    json!({
+        "contents": [{
+            "role": "user",
+            "parts": [{
+                "text": DEFAULT_PROVIDER_QUERY_TEST_MESSAGE
+            }]
+        }]
+    })
+}
+
+pub(super) fn provider_query_transport_supports_model_test_execution(
+    state: &AdminAppState<'_>,
+    transport: &AdminGatewayProviderTransportSnapshot,
+    api_format: &str,
+) -> bool {
+    match provider_query_test_adapter_for_provider_api_format(
+        transport.provider.provider_type.as_str(),
+        api_format,
+    ) {
+        Some(ProviderQueryTestAdapter::Kiro) => {
+            supports_local_kiro_request_transport_with_network(transport)
+        }
+        Some(ProviderQueryTestAdapter::OpenAiImage) => {
+            crate::provider_transport::openai_image_transport_unsupported_reason(
+                transport,
+                "openai:image",
+            )
+            .is_none()
+        }
+        Some(ProviderQueryTestAdapter::Antigravity) => {
+            provider_query_antigravity_test_unsupported_reason(
+                transport,
+                &provider_query_default_antigravity_endpoint_test_body(),
+            )
+            .is_none()
+        }
+        Some(ProviderQueryTestAdapter::Standard) => match crate::ai_serving::normalize_api_format_alias(api_format).as_str() {
+        "openai:chat" => {
+            crate::provider_transport::policy::supports_local_openai_chat_transport(transport)
+        }
+        "openai:responses"
+        | "openai:responses:compact"
+        | "openai:embedding"
+        | "jina:embedding"
+        | "doubao:embedding"
+        | "openai:rerank"
+        | "jina:rerank" => {
+            crate::provider_transport::policy::supports_local_standard_transport_with_network(
+                transport, api_format,
+            )
+        }
+        "claude:messages" => {
+            crate::provider_transport::policy::supports_local_standard_transport_with_network(
+                transport, api_format,
+            )
+        }
+        "gemini:generate_content" | "gemini:embedding" => {
+            if crate::provider_transport::is_vertex_transport_context(transport) {
+                aether_provider_transport::vertex::supports_local_vertex_gemini_transport_with_network(transport)
+            } else {
+                state.supports_local_gemini_transport_with_network(transport, api_format)
+            }
+        }
+        _ => false,
+    },
+        None => false,
+    }
+}

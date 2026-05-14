@@ -19,6 +19,7 @@ pub(crate) mod submission;
 pub(crate) mod sync;
 pub(crate) mod transport;
 
+pub(crate) use self::chatgpt_web_image::maybe_execute_chatgpt_web_image_sync;
 pub(crate) use self::constants::{
     MAX_ERROR_BODY_BYTES, MAX_STREAM_PREFETCH_BYTES, MAX_STREAM_PREFETCH_FRAMES,
 };

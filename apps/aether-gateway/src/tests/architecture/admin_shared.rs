@@ -990,7 +990,7 @@ fn admin_route_adjacent_owners_use_wrapped_state_types() {
         "apps/aether-gateway/src/handlers/admin/model/global/providers.rs",
         "apps/aether-gateway/src/handlers/admin/model/write.rs",
         "apps/aether-gateway/src/handlers/admin/users/lifecycle/support.rs",
-        "apps/aether-gateway/src/handlers/admin/provider/query/models.rs",
+        "apps/aether-gateway/src/handlers/admin/provider/query/models/mod.rs",
         "apps/aether-gateway/src/handlers/admin/provider/strategy/builders.rs",
         "apps/aether-gateway/src/handlers/admin/features/video_tasks/builders.rs",
         "apps/aether-gateway/src/handlers/admin/observability/stats/leaderboard.rs",

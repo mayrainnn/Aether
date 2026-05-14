@@ -24,6 +24,15 @@
           </div>
         </div>
         <Button
+          variant="destructive"
+          size="sm"
+          :disabled="manualCleanupRunning"
+          @click="openManualCleanupDialog"
+        >
+          <Trash2 class="w-3.5 h-3.5 mr-1.5" />
+          {{ manualCleanupRunning ? '清理中…' : '立即清理' }}
+        </Button>
+        <Button
           size="sm"
           :disabled="loading || !hasChanges"
           @click="$emit('save')"
@@ -276,6 +285,27 @@
       </div>
     </div>
 
+    <ManualCleanupConfirmDialog
+      :open="manualCleanupDialogOpen"
+      @update:open="manualCleanupDialogOpen = $event"
+      @confirm="handleManualCleanupConfirm"
+    />
+
+    <div
+      v-if="manualCleanupResult"
+      class="mt-4 rounded-md border border-border bg-muted/30 px-4 py-3 text-sm"
+    >
+      <div class="font-medium">
+        {{ manualCleanupResult.title }}
+      </div>
+      <div
+        v-if="manualCleanupResult.description"
+        class="mt-1 text-xs text-muted-foreground"
+      >
+        {{ manualCleanupResult.description }}
+      </div>
+    </div>
+
     <div class="mt-4 border border-border rounded-lg overflow-hidden">
       <div class="flex items-center justify-between px-4 py-3 border-b border-border">
         <div>
@@ -371,13 +401,16 @@
 
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from 'vue'
-import { RefreshCw } from 'lucide-vue-next'
-import { adminApi, type CleanupRunRecord } from '@/api/admin'
+import { RefreshCw, Trash2 } from 'lucide-vue-next'
+import { adminApi, type CleanupRunRecord, type ManualUsageCleanupResponse } from '@/api/admin'
 import Button from '@/components/ui/button.vue'
 import Input from '@/components/ui/input.vue'
 import Label from '@/components/ui/label.vue'
 import Switch from '@/components/ui/switch.vue'
 import { CardSection } from '@/components/layout'
+import ManualCleanupConfirmDialog from './ManualCleanupConfirmDialog.vue'
+import { useToast } from '@/composables/useToast'
+import { parseApiError } from '@/utils/errorParser'
 
 defineProps<{
   enableAutoCleanup: boolean
@@ -415,6 +448,64 @@ defineEmits<{
 const cleanupRuns = ref<CleanupRunRecord[]>([])
 const cleanupRunsLoading = ref(false)
 let cleanupRunsTimer: ReturnType<typeof window.setInterval> | null = null
+
+const manualCleanupDialogOpen = ref(false)
+const manualCleanupRunning = ref(false)
+const manualCleanupResult = ref<{ title: string; description?: string } | null>(null)
+const toast = useToast()
+
+function openManualCleanupDialog() {
+  if (manualCleanupRunning.value) return
+  manualCleanupDialogOpen.value = true
+}
+
+async function handleManualCleanupConfirm(olderThanDays: number | undefined) {
+  manualCleanupRunning.value = true
+  try {
+    const response = await adminApi.runManualUsageCleanup(
+      typeof olderThanDays === 'number' ? { older_than_days: olderThanDays } : {},
+    )
+    if ('detail' in response && response.detail === 'usage_cleanup_already_running') {
+      manualCleanupResult.value = {
+        title: '已有一次清理正在进行中',
+        description: response.message,
+      }
+      toast.warning(response.message)
+    } else {
+      const completed = response as ManualUsageCleanupResponse
+      manualCleanupResult.value = {
+        title: completed.message,
+        description: summarizeManualCleanup(completed),
+      }
+      toast.success(completed.message)
+    }
+    manualCleanupDialogOpen.value = false
+  } catch (error) {
+    const message = parseApiError(error).message
+    manualCleanupResult.value = {
+      title: '请求记录清理失败',
+      description: message,
+    }
+    toast.error(message)
+  } finally {
+    manualCleanupRunning.value = false
+    void loadCleanupRuns()
+  }
+}
+
+function summarizeManualCleanup(response: ManualUsageCleanupResponse): string {
+  const { summary } = response
+  const parts: string[] = []
+  if (summary.records_deleted > 0) parts.push(`删除整条记录 ${summary.records_deleted}`)
+  if (summary.body_externalized > 0) parts.push(`压缩 body ${summary.body_externalized}`)
+  if (summary.body_cleaned > 0) parts.push(`清除过期 body ${summary.body_cleaned}`)
+  if (summary.header_cleaned > 0) parts.push(`清除 headers ${summary.header_cleaned}`)
+  if (summary.legacy_body_refs_migrated > 0) {
+    parts.push(`迁移遗留引用 ${summary.legacy_body_refs_migrated}`)
+  }
+  if (summary.keys_cleaned > 0) parts.push(`回收 Key ${summary.keys_cleaned}`)
+  return parts.length > 0 ? parts.join(' / ') : '无数据变更'
+}
 
 async function loadCleanupRuns() {
   cleanupRunsLoading.value = true

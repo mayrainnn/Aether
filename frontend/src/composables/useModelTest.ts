@@ -4,6 +4,7 @@ import { useToast } from './useToast'
 import {
   testModel,
   testModelFailover,
+  type TestCandidateSummary,
   type TestAttemptDetail,
   type TestModelResponse,
   type TestModelFailoverResponse,
@@ -12,16 +13,17 @@ import { requestTraceApi, type RequestTrace } from '@/api/requestTrace'
 import { parseApiError } from '@/utils/errorParser'
 
 export interface StartTestParams {
-  mode: 'global' | 'direct'
+  mode: 'global' | 'direct' | 'pool'
   modelName: string
   displayLabel: string
   apiFormat?: string
   endpointId?: string
   endpointBaseUrl?: string
   message?: string
+  applyModelMapping?: boolean
+  mappedModelName?: string
   requestHeaders?: Record<string, unknown>
   requestBody?: Record<string, unknown>
-  concurrency?: number
   onSuccess?: (result: TestModelFailoverResponse) => void
   /** Return `true` to indicate the failure has been handled; otherwise the composable sets `testResult`. */
   onFailure?: (result: TestModelFailoverResponse) => boolean | void
@@ -40,7 +42,7 @@ export function useModelTest(options: UseModelTestOptions) {
   const LOCAL_FAILOVER_UNCONFIGURED_MESSAGE = 'Rust local provider-query failover simulation is not configured'
 
   const testing = ref(false)
-  const testMode = ref<'global' | 'direct'>('global')
+  const testMode = ref<'global' | 'direct' | 'pool'>('global')
   const testResult = ref<TestModelFailoverResponse | null>(null)
   const testTrace = ref<RequestTrace | null>(null)
   const requestId = ref<string | null>(null)
@@ -79,7 +81,7 @@ export function useModelTest(options: UseModelTestOptions) {
             : responsePayload?.error?.message
         ) || null
     const syntheticAttempt: TestAttemptDetail = {
-      candidate_index: 1,
+      candidate_index: 0,
       endpoint_api_format: params.apiFormat || '-',
       endpoint_base_url: params.endpointBaseUrl || '',
       key_name: null,
@@ -99,14 +101,45 @@ export function useModelTest(options: UseModelTestOptions) {
         ?? (result.data as Record<string, unknown> | undefined)
         ?? null,
     }
+    const attempts = Array.isArray(result.attempts) && result.attempts.length > 0
+      ? result.attempts
+      : [syntheticAttempt]
+    const totalCandidates = typeof result.total_candidates === 'number'
+      ? result.total_candidates
+      : attempts.length
+    const totalAttempts = typeof result.total_attempts === 'number'
+      ? result.total_attempts
+      : attempts.filter(attempt => !['skipped', 'available', 'unused'].includes(attempt.status)).length
+    const syntheticSummary: TestCandidateSummary = result.candidate_summary ?? {
+      total_candidates: totalCandidates,
+      attempted: totalAttempts,
+      success: result.success ? 1 : 0,
+      failed: result.success ? 0 : 1,
+      skipped: 0,
+      unused: result.success ? Math.max(0, totalCandidates - totalAttempts) : 0,
+      pending: 0,
+      available: 0,
+      completed: result.success ? totalCandidates : totalAttempts,
+      stop_reason: result.success ? 'first_success' : 'exhausted',
+      winning_candidate_index: result.success ? 0 : null,
+      winning_key_name: null,
+      winning_key_id: '',
+      winning_auth_type: '',
+      winning_effective_model: result.success ? (result.model || params.modelName) : null,
+      winning_endpoint_api_format: params.apiFormat || null,
+      winning_endpoint_base_url: params.endpointBaseUrl || null,
+      winning_latency_ms: null,
+      winning_status_code: responsePayload?.status_code ?? null,
+    }
 
     return {
       success: result.success,
       model: result.model || params.modelName,
       provider: result.provider || { id: providerId(), name: providerId() },
-      attempts: [syntheticAttempt],
-      total_candidates: 1,
-      total_attempts: 1,
+      attempts,
+      total_candidates: totalCandidates,
+      total_attempts: totalAttempts,
+      candidate_summary: syntheticSummary,
       data: (result.data as Record<string, unknown> | undefined) ?? null,
       error: failureMessage,
     }
@@ -120,13 +153,15 @@ export function useModelTest(options: UseModelTestOptions) {
     return normalizeDirectTestResult(params, await testModel({
       provider_id: providerId(),
       model_name: params.modelName,
+      mode: params.mode,
       api_format: params.apiFormat,
       endpoint_id: params.endpointId,
       ...(normalizedMessage(params.message) ? { message: normalizedMessage(params.message) } : {}),
+      ...(typeof params.applyModelMapping === 'boolean' ? { apply_model_mapping: params.applyModelMapping } : {}),
+      ...(params.mappedModelName ? { mapped_model_name: params.mappedModelName } : {}),
       ...(params.requestHeaders ? { request_headers: params.requestHeaders } : {}),
       ...(params.requestBody ? { request_body: params.requestBody } : {}),
       request_id: reqId,
-      concurrency: params.concurrency,
     }, {
       signal,
     }))
@@ -225,10 +260,11 @@ export function useModelTest(options: UseModelTestOptions) {
           api_format: params.apiFormat,
           endpoint_id: params.endpointId,
           ...(message ? { message } : {}),
+          ...(typeof params.applyModelMapping === 'boolean' ? { apply_model_mapping: params.applyModelMapping } : {}),
+          ...(params.mappedModelName ? { mapped_model_name: params.mappedModelName } : {}),
           ...(params.requestHeaders ? { request_headers: params.requestHeaders } : {}),
           ...(params.requestBody ? { request_body: params.requestBody } : {}),
           request_id: reqId,
-          concurrency: params.concurrency,
         }, {
           signal: abortController.signal,
         })

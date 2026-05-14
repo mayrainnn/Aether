@@ -190,15 +190,21 @@ export interface TestModelRequest {
   endpoint_id?: string
   message?: string
   api_format?: string
+  mode?: 'global' | 'direct' | 'pool'
+  apply_model_mapping?: boolean
+  mapped_model_name?: string
   request_headers?: Record<string, unknown>
   request_body?: Record<string, unknown>
   request_id?: string
-  concurrency?: number
 }
 
 export interface TestModelResponse {
   success: boolean
   error?: string
+  attempts?: TestAttemptDetail[]
+  total_candidates?: number
+  total_attempts?: number
+  candidate_summary?: TestCandidateSummary
   data?: {
     response?: {
       status_code?: number
@@ -210,6 +216,7 @@ export interface TestModelResponse {
   provider?: {
     id: string
     name: string
+    provider_type?: string
   }
   model?: string
 }
@@ -230,16 +237,17 @@ export async function testModel(
  */
 export interface TestModelFailoverRequest {
   provider_id: string
-  mode: 'global' | 'direct'
+  mode: 'global' | 'direct' | 'pool'
   model_name: string
   failover_models?: string[]
   api_format?: string
   endpoint_id?: string
   message?: string
+  apply_model_mapping?: boolean
+  mapped_model_name?: string
   request_headers?: Record<string, unknown>
   request_body?: Record<string, unknown>
   request_id?: string
-  concurrency?: number
 }
 
 export interface TestAttemptDetail {
@@ -263,13 +271,36 @@ export interface TestAttemptDetail {
   response_body?: unknown
 }
 
+export interface TestCandidateSummary {
+  total_candidates: number
+  attempted: number
+  success: number
+  failed: number
+  skipped: number
+  unused: number
+  pending?: number
+  available?: number
+  completed?: number
+  stop_reason?: 'first_success' | 'exhausted' | 'all_skipped' | 'no_candidate' | 'pending' | string
+  winning_candidate_index?: number | null
+  winning_key_name?: string | null
+  winning_key_id?: string | null
+  winning_auth_type?: string | null
+  winning_effective_model?: string | null
+  winning_endpoint_api_format?: string | null
+  winning_endpoint_base_url?: string | null
+  winning_latency_ms?: number | null
+  winning_status_code?: number | null
+}
+
 export interface TestModelFailoverResponse {
   success: boolean
   model: string
-  provider: { id: string; name: string }
+  provider: { id: string; name: string; provider_type?: string }
   attempts: TestAttemptDetail[]
   total_candidates: number
   total_attempts: number
+  candidate_summary?: TestCandidateSummary
   data?: Record<string, unknown> | null
   error?: string | null
 }

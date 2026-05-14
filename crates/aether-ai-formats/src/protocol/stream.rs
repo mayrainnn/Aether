@@ -35,6 +35,7 @@ pub enum CanonicalStreamEvent {
     Start,
     TextDelta(String),
     ReasoningDelta(String),
+    ReasoningSummaryDone,
     ReasoningSignature(String),
     ContentPart(CanonicalContentPart),
     ToolCallStart {

@@ -1692,6 +1692,14 @@ pub trait UsageWriteRepository: Send + Sync {
         let _ = (window, batch_size, auto_delete_expired_keys);
         Ok(UsageCleanupSummary::default())
     }
+
+    async fn preview_usage_cleanup(
+        &self,
+        window: &UsageCleanupWindow,
+    ) -> Result<UsageCleanupPreviewCounts, crate::DataLayerError> {
+        let _ = window;
+        Ok(UsageCleanupPreviewCounts::default())
+    }
 }
 
 pub trait UsageRepository: UsageReadRepository + UsageWriteRepository + Send + Sync {}
@@ -1720,6 +1728,14 @@ pub struct UsageCleanupWindow {
     pub compressed_cutoff: DateTime<Utc>,
     pub header_cutoff: DateTime<Utc>,
     pub log_cutoff: DateTime<Utc>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UsageCleanupPreviewCounts {
+    pub detail: u64,
+    pub compressed: u64,
+    pub header: u64,
+    pub log: u64,
 }
 
 fn parse_u64(value: i32, field_name: &str) -> Result<u64, crate::DataLayerError> {

@@ -239,11 +239,11 @@ mod tests {
             "openai:embedding",
             "doubao:embedding",
             &body,
-            &FormatContext::default().with_mapped_model("doubao-embedding-vision"),
+            &FormatContext::default().with_mapped_model("doubao-embedding-text-240515"),
         )
         .expect("doubao embedding conversion should succeed");
-        assert_eq!(doubao["model"], "doubao-embedding-vision");
-        assert_eq!(doubao["input"][0], json!({"type": "text", "text": "alpha"}));
+        assert_eq!(doubao["model"], "doubao-embedding-text-240515");
+        assert_eq!(doubao["input"], json!(["alpha", "beta"]));
         assert!(doubao.get("messages").is_none());
     }
 

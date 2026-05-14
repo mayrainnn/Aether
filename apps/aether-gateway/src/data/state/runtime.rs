@@ -978,6 +978,19 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn preview_usage_cleanup(
+        &self,
+        window: &UsageCleanupWindow,
+    ) -> Result<aether_data_contracts::repository::usage::UsageCleanupPreviewCounts, DataLayerError>
+    {
+        match &self.usage_writer {
+            Some(repository) => repository.preview_usage_cleanup(window).await,
+            None => {
+                Ok(aether_data_contracts::repository::usage::UsageCleanupPreviewCounts::default())
+            }
+        }
+    }
+
     pub(crate) async fn find_request_usage_by_request_id(
         &self,
         request_id: &str,

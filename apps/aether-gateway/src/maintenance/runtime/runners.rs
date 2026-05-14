@@ -13,8 +13,9 @@ use super::{
     cleanup_stale_proxy_nodes_once, collect_proxy_upgrade_rollout_probes, now_unix_secs,
     perform_db_maintenance_once, perform_provider_checkin_once, perform_stats_aggregation_once,
     perform_stats_hourly_aggregation_once, perform_usage_cleanup_once,
-    perform_wallet_daily_usage_aggregation_once, record_completed_cleanup_run,
-    record_failed_cleanup_run, record_proxy_upgrade_traffic_success, summarize_database_pool,
+    perform_usage_cleanup_once_with_override, perform_wallet_daily_usage_aggregation_once,
+    record_completed_cleanup_run, record_failed_cleanup_run, record_proxy_upgrade_traffic_success,
+    summarize_database_pool,
 };
 
 pub(super) async fn run_audit_cleanup_once(data: &GatewayDataState) -> Result<(), DataLayerError> {
@@ -296,6 +297,110 @@ pub(super) async fn run_usage_cleanup_once(data: &GatewayDataState) -> Result<()
         );
     }
     Ok(())
+}
+
+pub(crate) async fn run_manual_usage_cleanup_once(
+    data: &GatewayDataState,
+    override_older_than_days: Option<u32>,
+    actor_user_id: Option<String>,
+) -> Result<aether_data_contracts::repository::usage::UsageCleanupSummary, ManualUsageCleanupError>
+{
+    use super::{list_admin_cleanup_run_records, USAGE_CLEANUP_KIND};
+
+    let existing = list_admin_cleanup_run_records(data)
+        .await
+        .map_err(ManualUsageCleanupError::DataLayer)?;
+    if existing
+        .iter()
+        .any(|record| record.kind == USAGE_CLEANUP_KIND && record.status == "processing")
+    {
+        return Err(ManualUsageCleanupError::AlreadyRunning);
+    }
+
+    let started_at_unix_secs = now_unix_secs();
+    let started_at = Instant::now();
+    let override_duration =
+        override_older_than_days.map(|days| chrono::Duration::days(i64::from(days)));
+    let summary = match perform_usage_cleanup_once_with_override(data, override_duration).await {
+        Ok(summary) => summary,
+        Err(err) => {
+            record_failed_cleanup_run(
+                data,
+                USAGE_CLEANUP_KIND,
+                "manual",
+                started_at_unix_secs,
+                started_at,
+                &err,
+            )
+            .await;
+            return Err(ManualUsageCleanupError::DataLayer(err));
+        }
+    };
+    let total = summary
+        .body_externalized
+        .saturating_add(summary.legacy_body_refs_migrated)
+        .saturating_add(summary.body_cleaned)
+        .saturating_add(summary.header_cleaned)
+        .saturating_add(summary.keys_cleaned)
+        .saturating_add(summary.records_deleted);
+    let message = match override_older_than_days {
+        Some(days) => format!("请求记录手动清理完成，清理 {days} 天前的记录，影响 {total} 项"),
+        None => format!("请求记录手动清理完成（按当前策略），影响 {total} 项"),
+    };
+    record_completed_cleanup_run(
+        data,
+        USAGE_CLEANUP_KIND,
+        "manual",
+        started_at_unix_secs,
+        started_at,
+        json!({
+            "body_externalized": summary.body_externalized,
+            "legacy_body_refs_migrated": summary.legacy_body_refs_migrated,
+            "body_cleaned": summary.body_cleaned,
+            "header_cleaned": summary.header_cleaned,
+            "keys_cleaned": summary.keys_cleaned,
+            "records_deleted": summary.records_deleted,
+            "requested_older_than_days": override_older_than_days,
+            "actor_user_id": actor_user_id,
+        }),
+        message,
+    )
+    .await;
+    info!(
+        event_name = "usage_cleanup_manual_completed",
+        log_type = "ops",
+        worker = "usage_cleanup",
+        trigger = "manual",
+        requested_older_than_days = override_older_than_days,
+        actor_user_id = actor_user_id.as_deref(),
+        total_affected = total,
+        "gateway finished manual usage cleanup"
+    );
+    Ok(summary)
+}
+
+#[derive(Debug)]
+pub(crate) enum ManualUsageCleanupError {
+    AlreadyRunning,
+    DataLayer(DataLayerError),
+}
+
+impl std::fmt::Display for ManualUsageCleanupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AlreadyRunning => f.write_str("a usage cleanup run is already in progress"),
+            Self::DataLayer(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl std::error::Error for ManualUsageCleanupError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::AlreadyRunning => None,
+            Self::DataLayer(err) => Some(err),
+        }
+    }
 }
 
 pub(super) fn run_pool_monitor_once(data: &GatewayDataState) {

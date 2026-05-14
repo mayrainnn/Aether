@@ -29,12 +29,46 @@
         v-if="endpoints.length > 0"
         class="space-y-2"
       >
-        <div class="flex items-center justify-between gap-3">
-          <div class="text-sm font-medium">
+        <div class="grid min-h-8 w-full items-center gap-2 sm:h-8 sm:grid-cols-2">
+          <div class="text-sm font-medium text-foreground">
             选择测试端点
           </div>
-          <div class="text-[11px] text-muted-foreground">
-            当前测试会固定到选中的端点
+          <div
+            v-if="modelMappingAvailable"
+            class="grid w-full grid-cols-[auto_1fr] items-center gap-2"
+          >
+            <div class="text-sm font-medium text-foreground">
+              模型映射
+            </div>
+            <Select
+              :model-value="selectedModelMappingValue"
+              @update:model-value="handleModelMappingValueChange"
+            >
+              <SelectTrigger class="h-8 min-h-8 w-full shrink-0 overflow-hidden border-border/60 py-0 text-xs leading-none [transition-property:none] [&>span:first-child]:min-w-0 [&>span:first-child]:flex-1 [&>span:first-child]:text-left [&>span:first-child]:leading-none">
+                <SelectValue :placeholder="requestedModelName || '当前模型'" />
+              </SelectTrigger>
+              <SelectContent
+                class="w-[var(--radix-select-trigger-width)]"
+                align="end"
+                :disable-portal="false"
+                :searchable="false"
+              >
+                <SelectItem
+                  :value="requestedModelName"
+                  :text-value="requestedModelName"
+                >
+                  {{ requestedModelName }}
+                </SelectItem>
+                <SelectItem
+                  v-for="option in modelMappingOptions"
+                  :key="option.name"
+                  :value="option.name"
+                  :text-value="option.name"
+                >
+                  {{ option.name }}
+                </SelectItem>
+              </SelectContent>
+            </Select>
           </div>
         </div>
         <div class="grid gap-2 md:grid-cols-2">
@@ -94,7 +128,7 @@
           </div>
           <Textarea
             :model-value="requestHeadersDraft"
-            class="min-h-[260px] font-mono text-xs"
+            class="min-h-[220px] font-mono text-xs"
             placeholder="输入 JSON 请求头"
             @update:model-value="emit('update:requestHeadersDraft', $event)"
           />
@@ -137,7 +171,7 @@
           </div>
           <Textarea
             :model-value="requestBodyDraft"
-            class="min-h-[260px] font-mono text-xs"
+            class="min-h-[220px] font-mono text-xs"
             placeholder="输入 JSON 请求体"
             @update:model-value="emit('update:requestBodyDraft', $event)"
           />
@@ -188,7 +222,7 @@
         <div class="space-y-2">
           <div class="flex items-center justify-between gap-3 text-xs text-muted-foreground">
             <span>实时进度</span>
-            <span>{{ liveTraceSummary.completed }}/{{ liveTraceSummary.total || 0 }}</span>
+            <span>{{ liveProgressText }}</span>
           </div>
           <div class="h-2 overflow-hidden rounded-full bg-muted">
             <div
@@ -196,60 +230,53 @@
               :style="{ width: `${liveProgressPercent}%` }"
             />
           </div>
-          <div class="flex flex-wrap gap-1.5">
+          <div
+            v-if="liveTraceSummary.total_candidates > 0"
+            class="flex flex-wrap gap-1.5"
+          >
             <Badge
-              variant="secondary"
+              v-for="item in liveSummaryItems"
+              :key="item.key"
+              :variant="item.variant"
               class="px-1.5 py-0 text-[10px]"
             >
-              待执行 {{ liveTraceSummary.available }}
+              {{ item.label }} {{ item.value }}
             </Badge>
-            <Badge
-              variant="outline"
-              class="px-1.5 py-0 text-[10px]"
-            >
-              进行中 {{ liveTraceSummary.pending }}
-            </Badge>
-            <Badge
-              variant="success"
-              class="px-1.5 py-0 text-[10px]"
-            >
-              成功 {{ liveTraceSummary.success }}
-            </Badge>
-            <Badge
-              variant="destructive"
-              class="px-1.5 py-0 text-[10px]"
-            >
-              失败 {{ liveTraceSummary.failed }}
-            </Badge>
-            <Badge
-              variant="secondary"
-              class="px-1.5 py-0 text-[10px]"
-            >
-              跳过 {{ liveTraceSummary.skipped }}
-            </Badge>
+          </div>
+          <div
+            v-else
+            class="text-xs text-muted-foreground"
+          >
+            正在准备测试请求
           </div>
         </div>
 
         <div class="grid gap-3 sm:grid-cols-2">
           <div class="rounded-md border border-border/60 bg-background/80 p-3 space-y-1">
             <div class="text-xs text-muted-foreground">
-              测试账号
+              {{ liveEntityLabel }}
             </div>
             <div class="break-all text-sm font-medium">
               {{ liveAccountTitle }}
             </div>
-            <div class="break-all text-xs text-muted-foreground">
+            <div
+              v-if="liveAccountMeta"
+              class="break-all text-xs text-muted-foreground"
+            >
               {{ liveAccountMeta }}
             </div>
           </div>
           <div class="rounded-md border border-border/60 bg-background/80 p-3 space-y-1">
             <div class="text-xs text-muted-foreground">
-              实时状态
+              状态
             </div>
             <div class="text-sm font-medium">
               {{ liveStatusTitle }}
             </div>
-            <div class="break-all text-xs text-muted-foreground">
+            <div
+              v-if="liveStatusDetail"
+              class="break-all text-xs text-muted-foreground"
+            >
               {{ liveStatusDetail }}
             </div>
           </div>
@@ -267,7 +294,7 @@
           class="space-y-2"
         >
           <div class="text-xs font-medium text-muted-foreground">
-            最近状态
+            最近
           </div>
           <div class="space-y-2">
             <div
@@ -286,7 +313,10 @@
                   </Badge>
                   <span class="truncate font-medium">{{ formatTraceCandidateAccount(candidate) }}</span>
                 </div>
-                <div class="break-all text-muted-foreground">
+                <div
+                  v-if="traceCandidateDetail(candidate)"
+                  class="break-all text-muted-foreground"
+                >
                   {{ traceCandidateDetail(candidate) }}
                 </div>
               </div>
@@ -303,16 +333,68 @@
       v-else-if="result"
       class="space-y-4"
     >
-      <HorizontalRequestTimeline
-        v-if="showTraceTimeline && requestId"
-        :request-id="requestId"
-        :trace-data="trace"
-        :request-api-format="timelineRequestApiFormat"
-        @select-attempt="handleTraceAttemptSelect"
-      />
+      <div class="rounded-lg border border-border/60 bg-muted/20 p-4 space-y-4">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <div class="flex items-center gap-2">
+            <Badge
+              :variant="result.success ? 'success' : 'destructive'"
+              class="px-2 py-0.5"
+            >
+              {{ result.success ? '测试成功' : '测试失败' }}
+            </Badge>
+          </div>
+          <div
+            v-if="hasEffectiveModel"
+            class="text-xs text-muted-foreground"
+          >
+            请求模型：{{ resultModelTitle }}
+          </div>
+        </div>
+
+        <div class="grid gap-3 lg:grid-cols-3">
+          <div class="rounded-md border border-border/60 bg-background/80 p-3 space-y-1">
+            <div class="text-xs text-muted-foreground">
+              {{ resultEntityLabel }}
+            </div>
+            <div class="break-all text-sm font-medium">
+              {{ resultWinningTitle }}
+            </div>
+          </div>
+          <div class="rounded-md border border-border/60 bg-background/80 p-3 space-y-1">
+            <div class="text-xs text-muted-foreground">
+              调度结果
+            </div>
+            <div class="text-sm font-medium">
+              {{ resultDispatchTitle }}
+            </div>
+          </div>
+          <div class="rounded-md border border-border/60 bg-background/80 p-3 space-y-1">
+            <div class="text-xs text-muted-foreground">
+              实际请求
+            </div>
+            <div class="break-all text-sm font-medium">
+              {{ resultModelTitle }}
+            </div>
+          </div>
+        </div>
+
+        <div
+          v-if="showCandidateDiagnostics"
+          class="flex flex-wrap gap-1.5"
+        >
+          <Badge
+            v-for="item in resultSummaryItems"
+            :key="item.key"
+            :variant="item.variant"
+            class="px-1.5 py-0 text-[10px]"
+          >
+            {{ item.label }} {{ item.value }}
+          </Badge>
+        </div>
+      </div>
 
       <div
-        v-if="!showTraceTimeline && shouldCollapseAttempts"
+        v-if="shouldCollapseAttempts"
         class="flex items-center justify-between gap-3 text-xs text-muted-foreground"
       >
         <span>仅展示前 {{ visibleAttempts.length }} 条，共 {{ resultAttempts.length }} 条</span>
@@ -326,14 +408,19 @@
       </div>
 
       <div
-        v-if="!showTraceTimeline && resultAttempts.length > 0"
-        class="space-y-2 sm:hidden"
+        v-if="resultAttempts.length > 0"
+        class="max-h-[360px] space-y-2 overflow-y-auto pr-1 sm:hidden"
       >
         <div
           v-for="(attempt, idx) in visibleAttempts"
           :key="'m' + idx"
           class="rounded-md border px-3 py-2 text-xs"
-          :class="attemptRowClass(attempt.status)"
+          :class="attemptRowClass(attempt.status, selectedInspectionKey === inspectionKey(attempt))"
+          role="button"
+          tabindex="0"
+          @click="selectInspectionAttempt(attempt)"
+          @keydown.enter.prevent="selectInspectionAttempt(attempt)"
+          @keydown.space.prevent="selectInspectionAttempt(attempt)"
         >
           <div class="flex items-center justify-between gap-2">
             <div class="flex min-w-0 items-center gap-1.5">
@@ -351,26 +438,10 @@
                 {{ attempt.latency_ms }}ms
               </span>
             </div>
-            <code
-              v-if="showEndpointColumn"
-              class="shrink-0 rounded bg-muted px-1 py-0.5 text-[11px]"
-            >{{ attempt.endpoint_api_format }}</code>
           </div>
           <div class="mt-1.5 space-y-0.5">
-            <div
-              v-if="attempt.key_name"
-              class="truncate font-medium"
-            >
-              {{ attempt.key_name }}
-            </div>
-            <div class="text-muted-foreground">
-              {{ maskKey(attempt.key_id) }}
-            </div>
-            <div
-              v-if="hasEffectiveModel && attempt.effective_model"
-              class="text-muted-foreground"
-            >
-              模型: {{ attempt.effective_model }}
+            <div class="truncate font-medium">
+              {{ attempt.key_name || maskKey(attempt.key_id) }}
             </div>
             <div
               v-if="attemptDetail(attempt) !== '-'"
@@ -383,44 +454,24 @@
       </div>
 
       <div
-        v-if="!showTraceTimeline && resultAttempts.length > 0"
-        class="hidden overflow-hidden rounded-md border sm:block"
+        v-if="resultAttempts.length > 0"
+        class="hidden max-h-[360px] overflow-y-auto rounded-md border sm:block"
       >
         <table class="w-full table-fixed text-xs">
           <colgroup>
             <col class="w-8">
-            <col class="w-[22%]">
-            <col
-              v-if="showEndpointColumn"
-              class="w-20"
-            >
-            <col
-              v-if="hasEffectiveModel"
-              class="w-[16%]"
-            >
+            <col class="w-[28%]">
             <col class="w-16">
             <col class="w-16">
             <col>
           </colgroup>
-          <thead>
+          <thead class="sticky top-0 z-10">
             <tr class="border-b bg-muted/30">
               <th class="py-2 pl-3 pr-1 text-left font-medium">
                 #
               </th>
               <th class="px-3 py-2 text-left font-medium">
                 Key
-              </th>
-              <th
-                v-if="showEndpointColumn"
-                class="px-3 py-2 text-left font-medium"
-              >
-                端点
-              </th>
-              <th
-                v-if="hasEffectiveModel"
-                class="px-3 py-2 text-left font-medium"
-              >
-                发送模型
               </th>
               <th class="px-3 py-2 text-left font-medium">
                 状态
@@ -438,38 +489,22 @@
               v-for="(attempt, idx) in visibleAttempts"
               :key="idx"
               class="last:border-b-0 align-top border-b"
-              :class="attemptRowClass(attempt.status)"
+              :class="attemptRowClass(attempt.status, selectedInspectionKey === inspectionKey(attempt))"
+              tabindex="0"
+              @click="selectInspectionAttempt(attempt)"
+              @keydown.enter.prevent="selectInspectionAttempt(attempt)"
+              @keydown.space.prevent="selectInspectionAttempt(attempt)"
             >
               <td class="py-2 pl-3 pr-1 text-muted-foreground">
                 {{ formatAttemptIndex(attempt) }}
               </td>
               <td class="px-3 py-2">
                 <div
-                  v-if="attempt.key_name"
                   class="truncate font-medium"
-                  :title="attempt.key_name"
+                  :title="attempt.key_name || attempt.key_id"
                 >
-                  {{ attempt.key_name }}
+                  {{ attempt.key_name || maskKey(attempt.key_id) }}
                 </div>
-                <div
-                  class="truncate text-muted-foreground"
-                  :title="attempt.key_id"
-                >
-                  {{ maskKey(attempt.key_id) }}
-                </div>
-              </td>
-              <td
-                v-if="showEndpointColumn"
-                class="px-3 py-2"
-              >
-                <code class="rounded bg-muted px-1 py-0.5 text-[11px]">{{ attempt.endpoint_api_format }}</code>
-              </td>
-              <td
-                v-if="hasEffectiveModel"
-                class="truncate px-3 py-2"
-                :title="attempt.effective_model || '-'"
-              >
-                {{ attempt.effective_model || '-' }}
               </td>
               <td class="px-3 py-2">
                 <Badge
@@ -496,7 +531,7 @@
       </div>
 
       <div
-        v-else-if="!showTraceTimeline"
+        v-else-if="resultAttempts.length === 0"
         class="py-4 text-center text-sm text-muted-foreground"
       >
         {{ resultEmptyMessage }}
@@ -507,26 +542,11 @@
         class="space-y-3"
       >
         <div
-          v-if="!showTraceTimeline && inspectableAttempts.length > 0"
-          class="flex flex-wrap gap-2"
-        >
-          <Button
-            v-for="attempt in inspectableAttempts"
-            :key="inspectionKey(attempt)"
-            size="sm"
-            :variant="selectedInspectionKey === inspectionKey(attempt) ? 'default' : 'outline'"
-            @click="selectedInspectionKey = inspectionKey(attempt); selectedTraceCandidate = null"
-          >
-            {{ formatAttemptIndex(attempt) }} · {{ statusLabel(attempt.status) }}
-          </Button>
-        </div>
-
-        <div
           v-if="selectedInspectionAttempt"
           class="space-y-3"
         >
           <div
-            v-if="!showTraceTimeline"
+            v-if="showAttemptDiagnostics"
             class="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"
           >
             <span class="font-medium text-foreground">
@@ -662,18 +682,23 @@ import {
   Badge,
   Card,
   Dialog,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
   Tabs,
   TabsContent,
 } from '@/components/ui'
 import Button from '@/components/ui/button.vue'
 import Textarea from '@/components/ui/textarea.vue'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
-import type { TestAttemptDetail, TestModelFailoverResponse } from '@/api/endpoints/providers'
+import type { TestAttemptDetail, TestCandidateSummary, TestModelFailoverResponse } from '@/api/endpoints/providers'
 import type { CandidateRecord, RequestTrace } from '@/api/requestTrace'
-import HorizontalRequestTimeline from '@/features/usage/components/HorizontalRequestTimeline.vue'
 import JsonContent from '@/features/usage/components/RequestDetailDrawer/JsonContent.vue'
 import { useClipboard } from '@/composables/useClipboard'
 import { useDarkMode } from '@/composables/useDarkMode'
+import { extractModelTestResponsePreview, formatModelTestDiagnostic } from './model-test-request'
 
 type TestEndpointOption = {
   id: string
@@ -682,11 +707,18 @@ type TestEndpointOption = {
   is_active: boolean
 }
 
+type TestModelMappingOption = {
+  name: string
+  priority?: number
+}
+
 const props = defineProps<{
   open: boolean
   result: TestModelFailoverResponse | null
-  mode?: 'global' | 'direct'
+  mode?: 'global' | 'direct' | 'pool'
+  providerType?: string | null
   selectingModelName?: string | null
+  requestedModelName?: string | null
   endpoints?: TestEndpointOption[]
   selectedEndpoint?: TestEndpointOption | null
   testing?: boolean
@@ -698,6 +730,9 @@ const props = defineProps<{
   requestBodyDraft?: string
   requestBodyResetValue?: string
   requestBodyError?: string | null
+  modelMappingAvailable?: boolean
+  modelMappingOptions?: TestModelMappingOption[]
+  selectedModelMapping?: string | null
   startDisabled?: boolean
 }>()
 
@@ -706,19 +741,40 @@ const emit = defineEmits<{
   back: []
   start: []
   selectEndpoint: [endpointId: string]
+  selectModelMapping: [modelName: string]
   'update:requestHeadersDraft': [value: string]
   'update:requestBodyDraft': [value: string]
 }>()
 
 const endpoints = computed(() => props.endpoints ?? [])
+const modelMappingOptions = computed(() => props.modelMappingOptions ?? [])
+const modelMappingAvailable = computed(
+  () => props.modelMappingAvailable === true && modelMappingOptions.value.length > 0,
+)
+const requestedModelName = computed(() => props.requestedModelName?.trim() || '')
+const selectedModelMapping = computed(() => props.selectedModelMapping?.trim() || '')
+const selectedModelMappingValue = computed(() => (
+  selectedModelMapping.value || requestedModelName.value
+))
 const requestHeadersDraft = computed(() => props.requestHeadersDraft ?? '')
 const requestBodyDraft = computed(() => props.requestBodyDraft ?? '')
 const traceCandidates = computed(() => props.trace?.candidates ?? [])
 const showSetup = computed(() => props.open && !props.testing && !props.result)
 const showResult = computed(() => !!props.result)
-const showTraceTimeline = computed(() => Boolean(props.requestId) && traceCandidates.value.length > 0)
+const resultSummary = computed(() => deriveSummaryFromAttempts(props.result))
+const showCandidateDiagnostics = computed(() => resultSummary.value.total_candidates > 1)
+const showAttemptDiagnostics = computed(() => (
+  showCandidateDiagnostics.value
+))
 const { isDark } = useDarkMode()
 const { copyToClipboard } = useClipboard()
+
+function handleModelMappingValueChange(value: string) {
+  emit(
+    'selectModelMapping',
+    value === requestedModelName.value ? '' : value,
+  )
+}
 
 const dialogTitle = computed(() => {
   if (props.result) return '模型测试结果'
@@ -744,28 +800,20 @@ const hasEffectiveModel = computed(() => {
   )
 })
 
-const showEndpointColumn = computed(() => {
-  if (!props.result) return false
-  if (props.mode === 'direct') return true
-  const formats = new Set(resultAttempts.value.map(attempt => attempt.endpoint_api_format))
-  return formats.size > 1
-})
-
 const resultEmptyMessage = computed(() => {
   if (!props.result) return '没有可用的候选进行测试'
   if (typeof props.result.error === 'string' && props.result.error.trim()) {
-    return props.result.error.trim()
+    return formatModelTestDiagnostic(props.result.error)
   }
   const rawResult = props.result as TestModelFailoverResponse & { message?: string }
   if (typeof rawResult.message === 'string' && rawResult.message.trim()) {
-    return rawResult.message.trim()
+    return formatModelTestDiagnostic(rawResult.message)
   }
   return '没有可用的候选进行测试'
 })
 const showAllAttempts = ref(false)
 const inspectionTab = ref<'request-headers' | 'request-body' | 'response-headers' | 'response-body'>('request-body')
 const selectedInspectionKey = ref<string | null>(null)
-const selectedTraceCandidate = ref<CandidateRecord | null>(null)
 const inspectionExpandDepth = ref(0)
 const inspectionCopiedStates = ref<Record<string, boolean>>({})
 
@@ -774,7 +822,6 @@ watch(() => props.result, () => {
   inspectionTab.value = 'request-body'
   inspectionExpandDepth.value = 0
   inspectionCopiedStates.value = {}
-  selectedTraceCandidate.value = null
   const defaultAttempt = inspectableAttempts.value[0] ?? resultAttempts.value[0] ?? null
   selectedInspectionKey.value = defaultAttempt ? inspectionKey(defaultAttempt) : null
 })
@@ -788,32 +835,219 @@ const visibleAttempts = computed(() => {
   return resultAttempts.value.slice(0, 20)
 })
 
+type SummaryView = {
+  total_candidates: number
+  attempted: number
+  success: number
+  failed: number
+  skipped: number
+  unused: number
+  pending: number
+  available: number
+  completed: number
+  stop_reason?: string | null
+  winning_candidate_index?: number | null
+  winning_key_name?: string | null
+  winning_key_id?: string | null
+  winning_auth_type?: string | null
+  winning_effective_model?: string | null
+  winning_endpoint_api_format?: string | null
+  winning_endpoint_base_url?: string | null
+  winning_latency_ms?: number | null
+  winning_status_code?: number | null
+}
+
+type SummaryBadgeItem = {
+  key: string
+  label: string
+  value: number
+  variant: 'default' | 'secondary' | 'outline' | 'success' | 'destructive'
+}
+
+function toCount(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, value) : 0
+}
+
+function normalizeCandidateSummary(summary: TestCandidateSummary | null | undefined): SummaryView | null {
+  if (!summary) return null
+  const success = toCount(summary.success)
+  const failed = toCount(summary.failed)
+  const skipped = toCount(summary.skipped)
+  const unused = toCount(summary.unused)
+  const pending = toCount(summary.pending)
+  const available = toCount(summary.available)
+  return {
+    total_candidates: toCount(summary.total_candidates),
+    attempted: toCount(summary.attempted),
+    success,
+    failed,
+    skipped,
+    unused,
+    pending,
+    available,
+    completed: toCount(summary.completed) || success + failed + skipped + unused,
+    stop_reason: summary.stop_reason ?? null,
+    winning_candidate_index: summary.winning_candidate_index ?? null,
+    winning_key_name: summary.winning_key_name ?? null,
+    winning_key_id: summary.winning_key_id ?? null,
+    winning_auth_type: summary.winning_auth_type ?? null,
+    winning_effective_model: summary.winning_effective_model ?? null,
+    winning_endpoint_api_format: summary.winning_endpoint_api_format ?? null,
+    winning_endpoint_base_url: summary.winning_endpoint_base_url ?? null,
+    winning_latency_ms: summary.winning_latency_ms ?? null,
+    winning_status_code: summary.winning_status_code ?? null,
+  }
+}
+
+function deriveSummaryFromAttempts(result: TestModelFailoverResponse | null): SummaryView {
+  const normalized = normalizeCandidateSummary(result?.candidate_summary)
+  if (normalized) return normalized
+
+  const attempts = result?.attempts ?? []
+  const success = attempts.filter(attempt => attempt.status === 'success').length
+  const failed = attempts.filter(attempt => ['failed', 'cancelled', 'stream_interrupted'].includes(attempt.status)).length
+  const skipped = attempts.filter(attempt => attempt.status === 'skipped').length
+  const pending = attempts.filter(attempt => ['pending', 'streaming'].includes(attempt.status)).length
+  const available = attempts.filter(attempt => attempt.status === 'available').length
+  const totalCandidates = Math.max(result?.total_candidates ?? 0, attempts.length)
+  const explicitUnused = attempts.filter(attempt => attempt.status === 'unused').length
+  const winningAttempt = attempts.find(attempt => attempt.status === 'success') ?? null
+  const unused = explicitUnused > 0
+    ? explicitUnused
+    : success > 0 && winningAttempt
+      ? Math.max(0, totalCandidates - winningAttempt.candidate_index - 1)
+      : 0
+  const attempted = result?.total_attempts ?? attempts.filter(attempt => !['skipped', 'available', 'unused'].includes(attempt.status)).length
+  const stopReason = totalCandidates === 0
+    ? 'no_candidate'
+    : success > 0
+      ? 'first_success'
+      : attempted === 0 && skipped > 0
+        ? 'all_skipped'
+        : failed > 0 || skipped > 0
+          ? 'exhausted'
+          : 'pending'
+
+  return {
+    total_candidates: totalCandidates,
+    attempted,
+    success,
+    failed,
+    skipped,
+    unused,
+    pending,
+    available,
+    completed: success + failed + skipped + unused,
+    stop_reason: stopReason,
+    winning_candidate_index: winningAttempt?.candidate_index ?? null,
+    winning_key_name: winningAttempt?.key_name ?? null,
+    winning_key_id: winningAttempt?.key_id ?? null,
+    winning_auth_type: winningAttempt?.auth_type ?? null,
+    winning_effective_model: winningAttempt?.effective_model ?? null,
+    winning_endpoint_api_format: winningAttempt?.endpoint_api_format ?? null,
+    winning_endpoint_base_url: winningAttempt?.endpoint_base_url ?? null,
+    winning_latency_ms: winningAttempt?.latency_ms ?? null,
+    winning_status_code: winningAttempt?.status_code ?? null,
+  }
+}
+
 const liveTraceSummary = computed(() => {
-  const summary = {
-    total: traceCandidates.value.length,
+  const summary: SummaryView = {
+    total_candidates: traceCandidates.value.length,
+    attempted: 0,
     available: 0,
     pending: 0,
     success: 0,
     failed: 0,
     skipped: 0,
+    unused: 0,
     completed: 0,
+    stop_reason: traceCandidates.value.length > 0 ? 'pending' : 'no_candidate',
   }
 
   for (const candidate of traceCandidates.value) {
-    if (candidate.status === 'available' || candidate.status === 'unused') summary.available += 1
+    if (candidate.status === 'available') summary.available += 1
+    if (candidate.status === 'unused') summary.unused += 1
     if (candidate.status === 'pending' || candidate.status === 'streaming') summary.pending += 1
     if (candidate.status === 'success') summary.success += 1
     if (candidate.status === 'failed' || candidate.status === 'cancelled' || candidate.status === 'stream_interrupted') summary.failed += 1
     if (candidate.status === 'skipped') summary.skipped += 1
   }
 
-  summary.completed = summary.success + summary.failed + summary.skipped
+  summary.attempted = summary.pending + summary.success + summary.failed
+  summary.completed = summary.success + summary.failed + summary.skipped + summary.unused
+  if (summary.success > 0) summary.stop_reason = 'first_success'
+  if (summary.success === 0 && summary.pending === 0 && summary.failed + summary.skipped > 0) summary.stop_reason = 'exhausted'
   return summary
 })
 
+const normalizedProviderType = computed(() => (
+  props.providerType
+  || props.result?.provider?.provider_type
+  || ''
+).toLowerCase())
+
+const testScenario = computed<'pool' | 'custom' | 'direct' | 'provider'>(() => {
+  if (props.mode === 'pool') return 'pool'
+  if (normalizedProviderType.value === 'custom') return 'custom'
+  if (props.mode === 'direct') return 'direct'
+  return 'provider'
+})
+
+const candidateNoun = computed(() => {
+  if (testScenario.value === 'pool') return '账号'
+  if (testScenario.value === 'custom') return 'Key'
+  return '候选'
+})
+
+const liveEntityLabel = computed(() => {
+  if (testScenario.value === 'pool') return '当前账号'
+  if (testScenario.value === 'custom') return '当前 Key'
+  return '当前候选'
+})
+
+const resultEntityLabel = computed(() => {
+  if (testScenario.value === 'pool') return '命中账号'
+  if (testScenario.value === 'custom') return '命中 Key'
+  return '命中候选'
+})
+
+function buildSummaryItems(summary: SummaryView): SummaryBadgeItem[] {
+  const totalLabel = testScenario.value === 'pool'
+    ? '候选账号'
+    : testScenario.value === 'custom'
+      ? '候选 Key'
+      : '候选'
+  const successLabel = testScenario.value === 'pool'
+    ? '命中账号'
+    : testScenario.value === 'custom'
+      ? '命中 Key'
+      : '成功'
+  const failedLabel = testScenario.value === 'pool' ? '失败切换' : '失败'
+  const skippedLabel = testScenario.value === 'pool' ? '调度跳过' : '跳过'
+  const unusedLabel = testScenario.value === 'pool' ? '成功后未执行' : '未执行'
+
+  return [
+    { key: 'total', label: totalLabel, value: summary.total_candidates, variant: 'secondary' },
+    { key: 'attempted', label: '已尝试', value: summary.attempted, variant: 'outline' },
+    { key: 'success', label: successLabel, value: summary.success, variant: 'success' },
+    { key: 'failed', label: failedLabel, value: summary.failed, variant: 'destructive' },
+    { key: 'skipped', label: skippedLabel, value: summary.skipped, variant: 'secondary' },
+    { key: 'unused', label: unusedLabel, value: summary.unused, variant: 'secondary' },
+  ]
+}
+
+const liveSummaryItems = computed(() => buildSummaryItems(liveTraceSummary.value))
+const resultSummaryItems = computed(() => buildSummaryItems(resultSummary.value))
+
+const liveProgressText = computed(() => {
+  if (liveTraceSummary.value.total_candidates <= 0) return '准备中'
+  return `${liveTraceSummary.value.completed}/${liveTraceSummary.value.total_candidates}`
+})
+
 const liveProgressPercent = computed(() => {
-  if (liveTraceSummary.value.total <= 0) return 6
-  const raw = Math.round((liveTraceSummary.value.completed / liveTraceSummary.value.total) * 100)
+  if (liveTraceSummary.value.total_candidates <= 0) return 8
+  const raw = Math.round((liveTraceSummary.value.completed / liveTraceSummary.value.total_candidates) * 100)
   return Math.min(100, Math.max(raw, liveTraceSummary.value.pending > 0 ? 12 : 6))
 })
 
@@ -828,38 +1062,44 @@ const activeTraceCandidate = computed(() => {
 
 const liveAccountTitle = computed(() => {
   const candidate = activeTraceCandidate.value
-  if (!candidate) return '等待分配测试账号'
-  return candidate.key_account_label || candidate.key_name || candidate.key_preview || '等待分配测试账号'
+  if (!candidate) return '等待候选'
+  return candidate.key_account_label || candidate.key_name || candidate.key_preview || '-'
 })
 
 const liveAccountMeta = computed(() => {
   const candidate = activeTraceCandidate.value
-  if (!candidate) return '候选创建后会显示测试账号和认证方式'
+  if (!candidate) return ''
   const parts: string[] = []
   if (candidate.key_auth_type) parts.push(formatAuthType(candidate.key_auth_type))
   if (candidate.key_oauth_plan_type) parts.push(candidate.key_oauth_plan_type)
   if (candidate.key_preview && candidate.key_preview !== candidate.key_account_label) parts.push(candidate.key_preview)
-  return parts.join(' · ') || '正在等待候选进入执行阶段'
+  return parts.join(' · ')
 })
 
 const liveStatusTitle = computed(() => {
   const candidate = activeTraceCandidate.value
-  if (!candidate) return '正在创建测试请求'
+  if (!candidate) return '正在准备测试请求'
   if (candidate.status === 'pending' || candidate.status === 'streaming') {
-    return `正在测试 ${formatTraceCandidateIndex(candidate)}`
+    return `正在请求 ${formatTraceCandidateIndex(candidate)}`
+  }
+  if (candidate.status === 'success') {
+    return `命中 ${formatTraceCandidateIndex(candidate)}`
+  }
+  if (candidate.status === 'unused') {
+    return '成功后未执行'
   }
   return statusLabel(candidate.status)
 })
 
 const liveStatusDetail = computed(() => {
   const candidate = activeTraceCandidate.value
-  if (!candidate) return '等待后端写入候选状态'
+  if (!candidate) return ''
   return traceCandidateDetail(candidate)
 })
 
 const liveRecentCandidates = computed(() => {
   return traceCandidates.value
-    .filter(candidate => !['available', 'unused'].includes(candidate.status))
+    .filter(candidate => candidate.status !== 'available')
     .slice(-4)
     .reverse()
 })
@@ -869,7 +1109,7 @@ const inspectableAttempts = computed(() => {
 })
 
 const showDebugInspector = computed(() => {
-  return showTraceTimeline.value || inspectableAttempts.value.length > 0
+  return inspectableAttempts.value.length > 0
 })
 
 const detailTabs = [
@@ -880,11 +1120,6 @@ const detailTabs = [
 ] as const
 
 const selectedInspectionAttempt = computed(() => {
-  const fromTraceSelection = selectedTraceCandidate.value
-    ? findAttemptForTraceCandidate(selectedTraceCandidate.value)
-    : null
-  if (fromTraceSelection) return fromTraceSelection
-
   const key = selectedInspectionKey.value
   if (key) {
     const fromKey = resultAttempts.value.find(attempt => inspectionKey(attempt) === key)
@@ -894,8 +1129,58 @@ const selectedInspectionAttempt = computed(() => {
   return inspectableAttempts.value[0] ?? resultAttempts.value[0] ?? null
 })
 
-const timelineRequestApiFormat = computed(() => {
-  return props.selectedEndpoint?.api_format || resultAttempts.value[0]?.endpoint_api_format || null
+const resultWinningTitle = computed(() => {
+  const summary = resultSummary.value
+  const keyName = summary.winning_key_name || summary.winning_key_id
+  if (keyName) return keyName
+  if (props.result?.success) return `已命中 ${candidateNoun.value}`
+  return `无${resultEntityLabel.value}`
+})
+
+const resultDispatchTitle = computed(() => {
+  const summary = resultSummary.value
+  return `${summary.attempted}/${summary.total_candidates} 已尝试`
+})
+
+const attemptedEffectiveModelTitle = computed(() => {
+  const successAttempt = resultAttempts.value.find(
+    attempt => attempt.status === 'success' && attempt.effective_model,
+  )
+  if (successAttempt?.effective_model) return successAttempt.effective_model
+
+  const attempted = resultAttempts.value.find(
+    attempt => !['skipped', 'available', 'unused'].includes(attempt.status) && attempt.effective_model,
+  )
+  if (attempted?.effective_model) return attempted.effective_model
+
+  return resultAttempts.value.find(attempt => attempt.effective_model)?.effective_model ?? null
+})
+
+const attemptedRequestModelTitle = computed(() => {
+  const successAttempt = resultAttempts.value.find(
+    attempt => attempt.status === 'success' && extractAttemptRequestModel(attempt),
+  )
+  const successRequestModel = successAttempt ? extractAttemptRequestModel(successAttempt) : null
+  if (successRequestModel) return successRequestModel
+
+  const attempted = resultAttempts.value.find(
+    attempt => !['skipped', 'available', 'unused'].includes(attempt.status)
+      && extractAttemptRequestModel(attempt),
+  )
+  const attemptedRequestModel = attempted ? extractAttemptRequestModel(attempted) : null
+  if (attemptedRequestModel) return attemptedRequestModel
+
+  const anyAttempt = resultAttempts.value.find(attempt => extractAttemptRequestModel(attempt))
+  return anyAttempt ? extractAttemptRequestModel(anyAttempt) : null
+})
+
+const resultModelTitle = computed(() => {
+  return attemptedRequestModelTitle.value
+    || resultSummary.value.winning_effective_model
+    || attemptedEffectiveModelTitle.value
+    || props.result?.model
+    || props.selectingModelName
+    || '-'
 })
 
 function statusVariant(status: string) {
@@ -912,7 +1197,8 @@ function statusLabel(status: string) {
   if (status === 'streaming') return '测试中'
   if (status === 'cancelled') return '已取消'
   if (status === 'stream_interrupted') return '流中断'
-  if (status === 'available') return '待执行'
+  if (status === 'available') return '待请求'
+  if (status === 'unused') return '未执行'
   return status
 }
 
@@ -926,12 +1212,17 @@ function statusDisplay(item: { status: string; status_code?: number | null }): s
   return String(code)
 }
 
-function attemptRowClass(status: string) {
-  if (status === 'success') return 'bg-green-500/5'
-  if (status === 'failed') return 'bg-red-500/5'
-  if (status === 'cancelled') return 'bg-amber-500/5'
-  if (status === 'skipped') return 'bg-muted/20'
-  return ''
+function attemptRowClass(status: string, selected = false) {
+  const statusClass = (() => {
+    if (status === 'success') return 'bg-green-500/5'
+    if (status === 'failed') return 'bg-red-500/5'
+    if (status === 'cancelled') return 'bg-amber-500/5'
+    if (status === 'skipped') return 'bg-muted/20'
+    return ''
+  })()
+  const interactionClass = 'cursor-pointer transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/70'
+  const selectedClass = selected ? 'ring-1 ring-primary/70 bg-primary/5' : ''
+  return [statusClass, interactionClass, selectedClass].filter(Boolean).join(' ')
 }
 
 function maskKey(key: string): string {
@@ -960,21 +1251,47 @@ function formatTraceCandidateIndex(candidate: CandidateRecord): string {
 }
 
 function formatTraceCandidateAccount(candidate: CandidateRecord): string {
-  return candidate.key_account_label || candidate.key_name || candidate.key_preview || '待分配账号'
+  return candidate.key_account_label || candidate.key_name || candidate.key_preview || '-'
+}
+
+function extractAttemptRequestModel(attempt: TestAttemptDetail): string | null {
+  const body = attempt.request_body
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null
+
+  const model = (body as Record<string, unknown>).model
+  if (typeof model === 'string' && model.trim()) return model.trim()
+
+  const conversationState = (body as Record<string, unknown>).conversationState
+  if (!conversationState || typeof conversationState !== 'object' || Array.isArray(conversationState)) return null
+
+  const currentMessage = (conversationState as Record<string, unknown>).currentMessage
+  if (!currentMessage || typeof currentMessage !== 'object' || Array.isArray(currentMessage)) return null
+
+  const userInputMessage = (currentMessage as Record<string, unknown>).userInputMessage
+  if (!userInputMessage || typeof userInputMessage !== 'object' || Array.isArray(userInputMessage)) return null
+
+  const modelId = (userInputMessage as Record<string, unknown>).modelId
+  return typeof modelId === 'string' && modelId.trim() ? modelId.trim() : null
 }
 
 function traceCandidateDetail(candidate: CandidateRecord): string {
-  if (candidate.skip_reason) return candidate.skip_reason
-  if (candidate.error_message) return candidate.error_message
+  if (candidate.skip_reason) return formatModelTestDiagnostic(candidate.skip_reason)
+  if (candidate.error_message) return formatModelTestDiagnostic(candidate.error_message)
+  if (candidate.status === 'unused') return '成功后未请求'
+  if (candidate.status === 'available') return '待请求'
   if (candidate.endpoint_name) return `端点：${formatApiFormat(candidate.endpoint_name)}`
-  return '等待响应中…'
+  return ''
 }
 
 function attemptDetail(attempt: TestAttemptDetail): string {
   if (attempt.status === 'cancelled') return '测试已取消'
-  if (attempt.skip_reason) return attempt.skip_reason
-  if (attempt.error_message) return attempt.error_message
-  if (attempt.status === 'success') return attempt.endpoint_base_url
+  if (attempt.status === 'unused') return '成功后未请求'
+  if (attempt.skip_reason) return formatModelTestDiagnostic(attempt.skip_reason)
+  if (attempt.error_message) return formatModelTestDiagnostic(attempt.error_message)
+  if (attempt.status === 'success') {
+    return extractModelTestResponsePreview(attempt.response_body)
+      ?? (attempt.effective_model ? `请求模型：${attempt.effective_model}` : attempt.endpoint_base_url)
+  }
   return '-'
 }
 
@@ -982,21 +1299,9 @@ function inspectionKey(attempt: TestAttemptDetail): string {
   return `${attempt.candidate_index}:${attempt.retry_index ?? 0}:${attempt.key_id}`
 }
 
-function findAttemptForTraceCandidate(candidate: CandidateRecord): TestAttemptDetail | null {
-  return resultAttempts.value.find(attempt => (
-    attempt.candidate_index === candidate.candidate_index
-    && (attempt.retry_index ?? 0) === candidate.retry_index
-    && (!attempt.key_id || !candidate.key_id || attempt.key_id === candidate.key_id)
-  )) ?? null
-}
-
-function handleTraceAttemptSelect(candidate: CandidateRecord | null) {
-  selectedTraceCandidate.value = candidate
-  if (!candidate) return
-  const matchedAttempt = findAttemptForTraceCandidate(candidate)
-  if (matchedAttempt) {
-    selectedInspectionKey.value = inspectionKey(matchedAttempt)
-  }
+function selectInspectionAttempt(attempt: TestAttemptDetail) {
+  selectedInspectionKey.value = inspectionKey(attempt)
+  inspectionTab.value = 'request-body'
 }
 
 function hasDebugData(attempt: TestAttemptDetail): boolean {

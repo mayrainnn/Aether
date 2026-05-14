@@ -77,6 +77,36 @@ async fn local_admin_pool_response(
     .expect("pool route should resolve locally")
 }
 
+fn sample_pool_member_score(provider_id: &str, key_id: &str, score: f64) -> StoredPoolMemberScore {
+    let score_scope = provider_key_pool_score_scope();
+    let score_identity = PoolMemberIdentity::provider_api_key(provider_id, key_id);
+    StoredPoolMemberScore {
+        id: provider_key_pool_score_id(&score_identity, &score_scope),
+        pool_kind: score_identity.pool_kind.clone(),
+        pool_id: score_identity.pool_id.clone(),
+        member_kind: score_identity.member_kind.clone(),
+        member_id: score_identity.member_id.clone(),
+        capability: score_scope.capability.clone(),
+        scope_kind: score_scope.scope_kind.clone(),
+        scope_id: score_scope.scope_id.clone(),
+        score,
+        hard_state: PoolMemberHardState::Available,
+        score_version: 1,
+        score_reason: json!({ "weights": { "manual_priority": score } }),
+        last_ranked_at: Some(1_700_000_000),
+        last_scheduled_at: None,
+        last_success_at: None,
+        last_failure_at: None,
+        failure_count: 0,
+        last_probe_attempt_at: None,
+        last_probe_success_at: None,
+        last_probe_failure_at: None,
+        probe_failure_count: 0,
+        probe_status: PoolMemberProbeStatus::Ok,
+        updated_at: 1_700_000_050,
+    }
+}
+
 fn sample_provider_key_usage_row(
     id: &str,
     request_id: &str,
@@ -928,11 +958,16 @@ async fn gateway_sorts_admin_pool_keys_by_imported_and_last_used_time() {
         Vec::new(),
         vec![old_key, fresh_key, active_key],
     ));
+    let pool_score_repository = Arc::new(InMemoryPoolMemberScoreRepository::seed(vec![
+        sample_pool_member_score("provider-openai", "key-openai-fresh", 0.35),
+        sample_pool_member_score("provider-openai", "key-openai-active", 0.92),
+    ]));
     let state = AppState::new()
         .expect("gateway should build")
-        .with_data_state_for_tests(GatewayDataState::with_provider_catalog_reader_for_tests(
-            provider_catalog_repository,
-        ));
+        .with_data_state_for_tests(
+            GatewayDataState::with_provider_catalog_reader_for_tests(provider_catalog_repository)
+                .with_pool_score_repository_for_tests(pool_score_repository),
+        );
 
     let default_response = local_admin_pool_response(
         &state,
@@ -999,6 +1034,30 @@ async fn gateway_sorts_admin_pool_keys_by_imported_and_last_used_time() {
         .map(|item| item["key_name"].as_str().unwrap_or_default())
         .collect::<Vec<_>>();
     assert_eq!(last_used_names, vec!["active", "old", "fresh"]);
+
+    let score_response = local_admin_pool_response(
+        &state,
+        http::Method::GET,
+        "/api/admin/pool/provider-openai/keys?page=1&page_size=50&status=all&sort_by=score&sort_order=desc",
+        None,
+    )
+    .await;
+    assert_eq!(score_response.status(), StatusCode::OK);
+    let score_payload: serde_json::Value = serde_json::from_slice(
+        &to_bytes(score_response.into_body(), usize::MAX)
+            .await
+            .expect("body should read"),
+    )
+    .expect("json body should parse");
+    let score_names = score_payload["keys"]
+        .as_array()
+        .expect("keys should be array")
+        .iter()
+        .map(|item| item["key_name"].as_str().unwrap_or_default())
+        .collect::<Vec<_>>();
+    assert_eq!(score_names, vec!["active", "fresh", "old"]);
+    assert_eq!(score_payload["keys"][0]["pool_score"]["score"], json!(0.92));
+    assert!(score_payload["keys"][2]["pool_score"].is_null());
 }
 
 #[tokio::test]

@@ -1,7 +1,19 @@
 import apiClient from './client'
+import axios from 'axios'
 import { cachedRequest, buildCacheKey } from '@/utils/cache'
 import type { BillingSummary } from './auth'
 import type { ApiKeyInstallSession, InstallSessionTargetSystem, InstallTargetCli } from './me'
+
+function extractConflictPayload(error: unknown): ManualUsageCleanupConflict | null {
+  if (!axios.isAxiosError(error) || error.response?.status !== 409) {
+    return null
+  }
+  const data = error.response.data as ManualUsageCleanupConflict | undefined
+  if (!data || data.detail !== 'usage_cleanup_already_running') {
+    return null
+  }
+  return data
+}
 
 // LDAP 配置导出结构
 export interface LDAPConfigExport {
@@ -278,6 +290,43 @@ export interface CleanupRunListResponse {
 export interface CleanupTaskResponse {
   message: string
   task: CleanupRunRecord
+}
+
+export interface ManualUsageCleanupSummary {
+  body_externalized: number
+  legacy_body_refs_migrated: number
+  body_cleaned: number
+  header_cleaned: number
+  keys_cleaned: number
+  records_deleted: number
+}
+
+export interface ManualUsageCleanupResponse {
+  message: string
+  requested_older_than_days: number | null
+  summary: ManualUsageCleanupSummary
+  total_affected: number
+}
+
+export interface ManualUsageCleanupPreview {
+  requested_older_than_days: number | null
+  effective_cutoffs: {
+    detail: string
+    compressed: string
+    header: string
+    log: string
+  }
+  counts: {
+    detail: number
+    compressed: number
+    header: number
+    log: number
+  }
+}
+
+export interface ManualUsageCleanupConflict {
+  detail: 'usage_cleanup_already_running'
+  message: string
 }
 
 // 检查更新响应
@@ -1129,6 +1178,42 @@ export const adminApi = {
   },
   async getCleanupRuns(): Promise<CleanupRunListResponse> {
     const response = await apiClient.get<CleanupRunListResponse>('/api/admin/system/cleanup/runs')
+    return response.data
+  },
+
+  async runManualUsageCleanup(
+    params: { older_than_days?: number } = {}
+  ): Promise<ManualUsageCleanupResponse | ManualUsageCleanupConflict> {
+    const body: Record<string, number> = {}
+    if (typeof params.older_than_days === 'number') {
+      body.older_than_days = params.older_than_days
+    }
+    try {
+      const response = await apiClient.post<ManualUsageCleanupResponse>(
+        '/api/admin/system/cleanup/usage/manual',
+        body
+      )
+      return response.data
+    } catch (error) {
+      const conflict = extractConflictPayload(error)
+      if (conflict) {
+        return conflict
+      }
+      throw error
+    }
+  },
+
+  async previewManualUsageCleanup(
+    params: { older_than_days?: number } = {}
+  ): Promise<ManualUsageCleanupPreview> {
+    const query: Record<string, number> = {}
+    if (typeof params.older_than_days === 'number') {
+      query.older_than_days = params.older_than_days
+    }
+    const response = await apiClient.get<ManualUsageCleanupPreview>(
+      '/api/admin/system/cleanup/usage/preview',
+      { params: query }
+    )
     return response.data
   },
 

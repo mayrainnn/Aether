@@ -208,6 +208,7 @@ import {
 import { updateModel } from '@/api/endpoints/models'
 import { parseApiError, parseTestModelError } from '@/utils/errorParser'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
+import { buildExactModelMappingTestRequest } from './model-test-request'
 import type { ProviderWithEndpointsSummary } from '@/api/endpoints'
 
 const props = defineProps<{
@@ -428,11 +429,9 @@ async function testMapping(group: AliasGroup, mapping: ProviderModelAlias) {
       apiFormat = group.model.effective_api_format || group.model.api_format
     }
 
-    const result = await testModel({
-      provider_id: props.provider.id,
-      model_name: mapping.name,  // 使用映射名称进行测试
-      api_format: apiFormat
-    })
+    const result = await testModel(
+      buildExactModelMappingTestRequest(props.provider.id, mapping.name, apiFormat)
+    )
 
     if (result.success) {
       showSuccess(`映射 "${mapping.name}" 测试成功`)

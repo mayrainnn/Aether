@@ -7,6 +7,7 @@ use aether_data_contracts::repository::provider_catalog::{
 use serde_json::Value;
 use tracing::{info, warn};
 
+use crate::admin_api::provider_oauth_maintenance_endpoint_for_provider;
 use crate::provider_key_auth::provider_key_is_oauth_managed;
 use crate::{AppState, GatewayError};
 
@@ -75,9 +76,10 @@ pub(crate) async fn perform_oauth_token_refresh_once(
             }
             summary.eligible = summary.eligible.saturating_add(1);
 
-            let Some(endpoint) =
-                oauth_runtime_endpoint_for_provider(&provider.provider_type, provider_endpoints)
-            else {
+            let Some(endpoint) = provider_oauth_maintenance_endpoint_for_provider(
+                &provider.provider_type,
+                provider_endpoints,
+            ) else {
                 summary.skipped = summary.skipped.saturating_add(1);
                 continue;
             };
@@ -180,62 +182,6 @@ fn oauth_refresh_candidate(
             .expires_at_unix_secs
             .is_some_and(|expires_at| expires_at <= refresh_cutoff_unix_secs)
         && provider_key_is_oauth_managed(key, provider.provider_type.as_str())
-}
-
-fn oauth_runtime_endpoint_for_provider(
-    provider_type: &str,
-    endpoints: &[StoredProviderCatalogEndpoint],
-) -> Option<StoredProviderCatalogEndpoint> {
-    let provider_type = provider_type.trim().to_ascii_lowercase();
-    match provider_type.as_str() {
-        "codex" => endpoints
-            .iter()
-            .find(|endpoint| {
-                endpoint.is_active
-                    && crate::ai_serving::is_openai_responses_format(&endpoint.api_format)
-            })
-            .cloned(),
-        "chatgpt_web" => endpoints
-            .iter()
-            .find(|endpoint| {
-                endpoint.is_active
-                    && endpoint
-                        .api_format
-                        .trim()
-                        .eq_ignore_ascii_case("openai:image")
-            })
-            .cloned(),
-        "antigravity" => endpoints
-            .iter()
-            .find(|endpoint| {
-                endpoint.is_active
-                    && endpoint
-                        .api_format
-                        .trim()
-                        .eq_ignore_ascii_case("gemini:generate_content")
-            })
-            .cloned(),
-        "kiro" => endpoints
-            .iter()
-            .find(|endpoint| {
-                endpoint.is_active
-                    && endpoint
-                        .api_format
-                        .trim()
-                        .eq_ignore_ascii_case("claude:messages")
-            })
-            .cloned()
-            .or_else(|| {
-                endpoints
-                    .iter()
-                    .find(|endpoint| endpoint.is_active)
-                    .cloned()
-            }),
-        _ => endpoints
-            .iter()
-            .find(|endpoint| endpoint.is_active)
-            .cloned(),
-    }
 }
 
 async fn provider_key_credentials_changed(

@@ -1,7 +1,7 @@
 use super::super::super::errors::build_internal_control_error_response;
 use super::super::super::provisioning::provider_oauth_token_payload_expires_at_unix_secs;
 use super::super::super::quota::codex::refresh_codex_provider_quota_locally;
-use super::super::super::runtime::provider_oauth_runtime_endpoint_for_provider;
+use super::super::super::runtime::resolve_provider_oauth_runtime_endpoints;
 use super::super::super::state::{
     admin_provider_oauth_template, enrich_admin_provider_oauth_auth_config,
     is_fixed_provider_type_for_provider_oauth, json_non_empty_string,
@@ -126,10 +126,9 @@ pub(super) async fn handle_admin_provider_oauth_complete_key(
             "该 Provider 不支持 OAuth 授权",
         ));
     };
-    let endpoints = state
-        .list_provider_catalog_endpoints_by_provider_ids(std::slice::from_ref(&provider_id))
-        .await?;
-    let runtime_endpoint = provider_oauth_runtime_endpoint_for_provider(&provider_type, &endpoints);
+    let endpoint_resolution =
+        resolve_provider_oauth_runtime_endpoints(state, &provider, &provider_type).await?;
+    let runtime_endpoint = endpoint_resolution.runtime_endpoint;
     let request_proxy = state
         .resolve_admin_provider_oauth_operation_proxy_snapshot(
             payload.proxy_node_id.as_deref(),
@@ -223,13 +222,7 @@ pub(super) async fn handle_admin_provider_oauth_complete_key(
     let mut account_state_recheck_attempted = false;
     let mut account_state_recheck_error = None::<String>;
     if provider_type == "codex" {
-        let endpoints = state
-            .list_provider_catalog_endpoints_by_provider_ids(std::slice::from_ref(&provider_id))
-            .await?;
-        if let Some(endpoint) = endpoints.into_iter().find(|endpoint| {
-            endpoint.is_active
-                && crate::ai_serving::is_openai_responses_format(&endpoint.api_format)
-        }) {
+        if let Some(endpoint) = runtime_endpoint {
             let refreshed_key = state
                 .read_provider_catalog_keys_by_ids(std::slice::from_ref(&key_id))
                 .await?

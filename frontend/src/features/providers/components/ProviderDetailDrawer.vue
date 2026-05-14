@@ -658,7 +658,9 @@
                         v-if="hasCodexSparkQuotaDisplayData(key)"
                         class="mt-3 border-t border-border/60 pt-2"
                       >
-                        <div class="mb-1 text-[10px] text-muted-foreground">GPT-5.3 Codex Spark</div>
+                        <div class="mb-1 text-[10px] text-muted-foreground">
+                          GPT-5.3 Codex Spark
+                        </div>
                         <div class="grid gap-3 grid-cols-2">
                           <div v-if="getCodexQuotaDisplay(key)?.spark_secondary_used_percent !== undefined">
                             <div class="flex items-center justify-between text-[10px] mb-0.5">
@@ -1078,7 +1080,8 @@
                 :provider="provider"
                 :models="providerModels"
                 :endpoints="endpoints"
-                :loading="loadingProviderModels"
+                :provider-keys="providerKeys"
+                :loading="loadingProviderModels || loadingProviderKeys"
                 @edit-model="handleEditModel"
                 @batch-assign="handleBatchAssign"
                 @refresh="loadEndpoints"
@@ -1291,7 +1294,6 @@ import {
 import type {
   UpstreamMetadata,
   AntigravityModelQuota,
-  AntigravityUpstreamMetadata,
   CodexUpstreamMetadata,
   ChatGPTWebUpstreamMetadata,
   KiroUpstreamMetadata,

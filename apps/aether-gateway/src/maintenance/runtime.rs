@@ -56,7 +56,7 @@ use audit_cleanup::*;
 pub(crate) use cleanup_runs::{
     list_admin_cleanup_run_records, record_completed_cleanup_run, record_failed_cleanup_run,
     start_admin_request_body_cleanup_task, start_admin_system_purge_task, AdminCleanupRunRecord,
-    AdminCleanupTaskKind,
+    AdminCleanupTaskKind, USAGE_CLEANUP_KIND,
 };
 use config::*;
 use db_maintenance::*;
@@ -90,9 +90,11 @@ pub(crate) use proxy_upgrade_rollout::{
 };
 use request_candidate_cleanup::*;
 use runners::*;
+pub(crate) use runners::{run_manual_usage_cleanup_once, ManualUsageCleanupError};
 use schedule::*;
 use stats_daily::*;
 use stats_hourly::*;
+pub(crate) use usage_cleanup::preview_manual_usage_cleanup;
 use usage_cleanup::*;
 use wallet_daily_usage::*;
 pub(crate) use workers::*;

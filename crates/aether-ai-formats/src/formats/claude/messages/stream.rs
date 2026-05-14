@@ -25,6 +25,11 @@ pub struct ClaudeProviderState {
     finished: bool,
     usage: Option<CanonicalUsage>,
     tool_calls: BTreeMap<usize, ClaudeProviderToolState>,
+    /// True while we are inside a thinking content block. Used to emit
+    /// `ReasoningSummaryDone` when the block closes, so that downstream
+    /// emitters can insert paragraph separators between distinct thinking
+    /// blocks (CPA strategy).
+    in_thinking_block: bool,
 }
 
 impl ClaudeProviderState {
@@ -215,6 +220,7 @@ impl ClaudeProviderState {
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 if block_type == "thinking" {
+                    self.in_thinking_block = true;
                     let Some(piece) = block
                         .get("thinking")
                         .and_then(Value::as_str)
@@ -331,7 +337,22 @@ impl ClaudeProviderState {
                 });
                 self.finished = true;
             }
-            "content_block_stop" | "message_stop" | "ping" => {}
+            "content_block_stop" => {
+                // CPA strategy: when a thinking block closes, emit
+                // ReasoningSummaryDone so downstream emitters can insert
+                // paragraph separators between distinct thinking blocks.
+                if self.in_thinking_block {
+                    self.in_thinking_block = false;
+                    self.ensure_started(report_context, &mut out);
+                    let (id, model) = self.identity(report_context);
+                    out.push(CanonicalStreamFrame {
+                        id,
+                        model,
+                        event: CanonicalStreamEvent::ReasoningSummaryDone,
+                    });
+                }
+            }
+            "message_stop" | "ping" => {}
             _ => {
                 out.push(self.unknown_frame(report_context, value.clone()));
             }
@@ -745,6 +766,12 @@ impl ClaudeClientEmitter {
                 )?);
                 self.finished = true;
                 Ok(out)
+            }
+            CanonicalStreamEvent::ReasoningSummaryDone => {
+                // CPA strategy: close the current thinking block so the next
+                // ReasoningDelta opens a fresh one.  Each reasoning paragraph
+                // becomes its own thinking block in Claude's wire format.
+                Ok(self.close_open_block().unwrap_or_default())
             }
         }
     }

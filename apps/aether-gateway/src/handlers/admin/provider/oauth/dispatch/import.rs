@@ -6,7 +6,7 @@ use super::super::provisioning::{
     update_existing_provider_oauth_catalog_key,
 };
 use super::super::runtime::{
-    provider_oauth_runtime_endpoint_for_provider,
+    resolve_provider_oauth_runtime_endpoints,
     spawn_provider_oauth_account_state_refresh_after_update,
 };
 use super::super::state::{
@@ -300,10 +300,10 @@ pub(super) async fn handle_admin_provider_oauth_import_refresh_token(
     let Some(template) = admin_provider_oauth_template(&provider_type) else {
         return Ok(build_admin_provider_oauth_backend_unavailable_response());
     };
-    let endpoints = state
-        .list_provider_catalog_endpoints_by_provider_ids(std::slice::from_ref(&provider_id))
-        .await?;
-    let runtime_endpoint = provider_oauth_runtime_endpoint_for_provider(&provider_type, &endpoints);
+    let endpoint_resolution =
+        resolve_provider_oauth_runtime_endpoints(state, &provider, &provider_type).await?;
+    let endpoints = endpoint_resolution.endpoints;
+    let runtime_endpoint = endpoint_resolution.runtime_endpoint;
     let request_proxy = state
         .resolve_admin_provider_oauth_operation_proxy_snapshot(
             proxy_node_id.as_deref(),

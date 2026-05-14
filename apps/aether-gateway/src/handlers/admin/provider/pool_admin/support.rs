@@ -20,6 +20,7 @@ pub(crate) enum AdminPoolKeySortField {
     Default,
     ImportedAt,
     LastUsedAt,
+    Score,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,8 +122,11 @@ pub(crate) fn parse_admin_pool_key_sort(query: Option<&str>) -> Result<AdminPool
         Some("name") => AdminPoolKeySortField::Default,
         Some("imported_at") | Some("created_at") => AdminPoolKeySortField::ImportedAt,
         Some("last_used_at") | Some("last_used") => AdminPoolKeySortField::LastUsedAt,
+        Some("score") | Some("pool_score") => AdminPoolKeySortField::Score,
         Some(_) => {
-            return Err("sort_by must be one of: name, imported_at, last_used_at".to_string());
+            return Err(
+                "sort_by must be one of: name, imported_at, last_used_at, score".to_string(),
+            );
         }
     };
     let direction = match query_param_value(query, "sort_order")

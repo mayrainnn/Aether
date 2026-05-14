@@ -263,7 +263,7 @@ export interface PoolKeysQuery {
   status?: 'all' | 'active' | 'cooldown' | 'inactive'
   quick_selectors?: string[]
   search_scope?: 'name' | 'full'
-  sort_by?: 'imported_at' | 'last_used_at'
+  sort_by?: 'imported_at' | 'last_used_at' | 'score'
   sort_order?: 'asc' | 'desc'
 }
 

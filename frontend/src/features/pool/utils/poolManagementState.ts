@@ -1,5 +1,5 @@
 export type PoolManagementStatus = 'all' | 'active' | 'cooldown' | 'inactive'
-export type PoolManagementSortBy = 'imported_at' | 'last_used_at'
+export type PoolManagementSortBy = 'imported_at' | 'last_used_at' | 'score'
 export type PoolManagementSortOrder = 'asc' | 'desc'
 export type PoolManagementStatsMode = 'current_cycle' | 'account_total'
 
@@ -73,7 +73,7 @@ function normalizePositiveInteger(value: unknown, fallback: number): number {
 }
 
 function normalizeSortBy(value: unknown): PoolManagementSortBy | null {
-  if (value === 'imported_at' || value === 'last_used_at') {
+  if (value === 'imported_at' || value === 'last_used_at' || value === 'score') {
     return value
   }
   return DEFAULT_POOL_MANAGEMENT_VIEW_STATE.sortBy

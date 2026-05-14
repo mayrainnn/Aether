@@ -129,6 +129,28 @@
                 variant="ghost"
                 size="icon"
                 class="h-8 w-8 shrink-0"
+                title="编辑提供商"
+                @click="openProviderEditDialog"
+              >
+                <Edit class="w-3.5 h-3.5" />
+              </Button>
+            </div>
+            <div class="min-w-0 flex-1 flex justify-center">
+              <Button
+                variant="ghost"
+                size="icon"
+                class="h-8 w-8 shrink-0"
+                title="编辑端点"
+                @click="openEndpointEditDialog"
+              >
+                <Plug class="w-3.5 h-3.5" />
+              </Button>
+            </div>
+            <div class="min-w-0 flex-1 flex justify-center">
+              <Button
+                variant="ghost"
+                size="icon"
+                class="h-8 w-8 shrink-0"
                 title="高级设置"
                 @click="showAdvancedDialog = true"
               >
@@ -251,6 +273,26 @@
               @select="setProviderProxy"
               @clear="clearProviderProxy"
             />
+            <Button
+              v-if="selectedProviderId"
+              variant="ghost"
+              size="icon"
+              class="h-8 w-8"
+              title="编辑提供商"
+              @click="openProviderEditDialog"
+            >
+              <Edit class="w-3.5 h-3.5" />
+            </Button>
+            <Button
+              v-if="selectedProviderId"
+              variant="ghost"
+              size="icon"
+              class="h-8 w-8"
+              title="编辑端点"
+              @click="openEndpointEditDialog"
+            >
+              <Plug class="w-3.5 h-3.5" />
+            </Button>
             <Button
               v-if="selectedProviderId"
               variant="ghost"
@@ -405,12 +447,19 @@
                 >
                   最后使用
                 </SortableTableHead>
-                <TableHead
+                <SortableTableHead
                   class="font-semibold text-center whitespace-nowrap"
+                  column-key="score"
+                  :active-key="sortBy"
+                  :direction="sortOrder"
+                  default-direction="desc"
+                  align="center"
                   :style="{ width: desktopColumnWidths.score }"
+                  title="按分数排序"
+                  @sort="handleTableSort"
                 >
                   分数
-                </TableHead>
+                </SortableTableHead>
                 <SortableTableHead
                   class="font-semibold text-center whitespace-nowrap"
                   column-key="status"
@@ -1344,6 +1393,20 @@
       :current-claude-config="selectedProviderClaudeConfig"
       @saved="handleSchedulingSaved"
     />
+    <ProviderFormDialog
+      v-model="providerEditDialogOpen"
+      :provider="providerToEdit"
+      @provider-updated="handleProviderEditSaved"
+    />
+    <EndpointFormDialog
+      v-if="selectedProviderData"
+      v-model="endpointEditDialogOpen"
+      :provider="selectedProviderData"
+      :endpoints="providerEndpointsForEdit"
+      :provider-format-conversion-enabled="selectedProviderData.enable_format_conversion"
+      @endpoint-created="handleEndpointEditSaved"
+      @endpoint-updated="handleEndpointEditSaved"
+    />
     <PoolAccountBatchDialog
       v-if="selectedProviderId"
       v-model="showAccountBatchDialog"
@@ -1403,6 +1466,8 @@ import {
   Settings2,
   SlidersHorizontal,
   CircleHelp,
+  Edit,
+  Plug,
 } from 'lucide-vue-next'
 
 import {
@@ -1459,11 +1524,12 @@ import type {
 import type {
   ClaudeCodeAdvancedConfig,
   EndpointAPIKey,
+  ProviderEndpoint,
   PoolAdvancedConfig,
   ProviderWithEndpointsSummary,
 } from '@/api/endpoints/types/provider'
 import type { QuotaStatusSnapshot, QuotaWindowSnapshot } from '@/api/endpoints/types'
-import { getProvider, updateProvider } from '@/api/endpoints'
+import { getProvider, getProviderEndpoints, updateProvider } from '@/api/endpoints'
 import { useProxyNodesStore } from '@/stores/proxy-nodes'
 import PoolSchedulingDialog from '@/features/pool/components/PoolSchedulingDialog.vue'
 import PoolAdvancedDialog from '@/features/pool/components/PoolAdvancedDialog.vue'
@@ -1473,6 +1539,8 @@ import KeyAllowedModelsEditDialog from '@/features/providers/components/KeyAllow
 import KeyFormDialog from '@/features/providers/components/KeyFormDialog.vue'
 import OAuthKeyEditDialog from '@/features/providers/components/OAuthKeyEditDialog.vue'
 import OAuthAccountDialog from '@/features/providers/components/OAuthAccountDialog.vue'
+import EndpointFormDialog from '@/features/providers/components/EndpointFormDialog.vue'
+import ProviderFormDialog from '@/features/providers/components/ProviderFormDialog.vue'
 import ProxyNodeSelect from '@/features/providers/components/ProxyNodeSelect.vue'
 import {
   buildPoolMobileTagItems,
@@ -1635,6 +1703,8 @@ async function loadOverview(options: { cacheTtlMs?: number } = {}) {
       selectedProviderId.value = null
       selectedProviderData.value = null
       keysLoadedOnce.value = false
+      endpointEditDialogOpen.value = false
+      providerEndpointsForEdit.value = []
       showAccountBatchDialog.value = false
       closeProviderProxyPopovers()
       resetKeyPage()
@@ -1847,6 +1917,8 @@ async function selectProvider(
   hasHydratedInitialProviderSelection = true
   selectedProviderId.value = id
   selectedProviderData.value = null
+  endpointEditDialogOpen.value = false
+  providerEndpointsForEdit.value = []
   editingKeyDetail.value = null
   showAccountBatchDialog.value = false
   keyPermissionsDialogOpen.value = false
@@ -2509,7 +2581,7 @@ function sortCurrentPageKeysByPriority() {
 }
 
 function handleTableSort(payload: { key: string, direction: PoolManagementSortOrder }) {
-  if (payload.key !== 'imported_at' && payload.key !== 'last_used_at') return
+  if (payload.key !== 'imported_at' && payload.key !== 'last_used_at' && payload.key !== 'score') return
   sortBy.value = payload.key
   sortOrder.value = payload.direction
 }
@@ -2854,14 +2926,89 @@ async function toggleKeyActive(key: PoolKeyDetail) {
 const showImportDialog = ref(false)
 const showSchedulingDialog = ref(false)
 const showAdvancedDialog = ref(false)
+const providerEditDialogOpen = ref(false)
+const providerToEdit = ref<ProviderWithEndpointsSummary | null>(null)
+const endpointEditDialogOpen = ref(false)
+const providerEndpointsForEdit = ref<ProviderEndpoint[]>([])
 const showAccountBatchDialog = ref(false)
 const providerProxyMobilePopoverOpen = ref(false)
 const providerProxyDesktopPopoverOpen = ref(false)
 const savingProviderProxy = ref(false)
 const togglingProviderStatus = ref(false)
+let endpointEditRequestId = 0
 
 function openSchedulingDialog() {
   showSchedulingDialog.value = true
+}
+
+async function openProviderEditDialog(): Promise<void> {
+  const providerId = selectedProviderId.value
+  if (!providerId) return
+
+  try {
+    const latest = await getProvider(providerId)
+    if (selectedProviderId.value !== providerId) return
+    selectedProviderData.value = latest
+    providerToEdit.value = latest
+  } catch (err) {
+    if (selectedProviderId.value !== providerId) return
+    if (!selectedProviderData.value) {
+      showError(parseApiError(err, '刷新提供商状态失败'))
+      return
+    }
+    providerToEdit.value = selectedProviderData.value
+  }
+
+  providerEditDialogOpen.value = true
+}
+
+async function handleProviderEditSaved(updatedProvider: ProviderWithEndpointsSummary): Promise<void> {
+  if (selectedProviderId.value === updatedProvider.id) {
+    selectedProviderData.value = updatedProvider
+    providerToEdit.value = updatedProvider
+  }
+  providerEditDialogOpen.value = false
+  await loadOverview()
+}
+
+async function openEndpointEditDialog(): Promise<void> {
+  const providerId = selectedProviderId.value
+  if (!providerId) return
+
+  const requestId = ++endpointEditRequestId
+  try {
+    const [provider, endpoints] = await Promise.all([
+      getProvider(providerId),
+      getProviderEndpoints(providerId),
+    ])
+    if (requestId !== endpointEditRequestId || selectedProviderId.value !== providerId) return
+    selectedProviderData.value = provider
+    providerEndpointsForEdit.value = endpoints
+    endpointEditDialogOpen.value = true
+  } catch (err) {
+    if (requestId !== endpointEditRequestId || selectedProviderId.value !== providerId) return
+    showError(parseApiError(err, '加载端点失败'))
+  }
+}
+
+async function handleEndpointEditSaved(): Promise<void> {
+  const providerId = selectedProviderId.value
+  if (!providerId) return
+
+  const requestId = ++endpointEditRequestId
+  try {
+    const [provider, endpoints] = await Promise.all([
+      getProvider(providerId),
+      getProviderEndpoints(providerId),
+    ])
+    if (requestId !== endpointEditRequestId || selectedProviderId.value !== providerId) return
+    selectedProviderData.value = provider
+    providerEndpointsForEdit.value = endpoints
+    await Promise.all([loadOverview(), loadKeys()])
+  } catch (err) {
+    if (requestId !== endpointEditRequestId || selectedProviderId.value !== providerId) return
+    showError(parseApiError(err, '刷新端点失败'))
+  }
 }
 
 function getProviderProxyNodeName(): string | null {

@@ -1,1 +1,0 @@
-"""Antigravity integration package."""

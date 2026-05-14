@@ -28,11 +28,13 @@ dependencies = [
  "aether-contracts",
  "aether-data",
  "aether-data-contracts",
+ "aether-provider-pool",
  "axum",
  "base64 0.22.1",
  "chrono",
  "http",
  "reqwest",
+ "semver",
  "serde",
  "serde_json",
  "serde_path_to_error",
@@ -64,6 +66,7 @@ dependencies = [
  "aether-ai-formats",
  "aether-contracts",
  "aether-data-contracts",
+ "aether-pool-core",
  "aether-scheduler-core",
  "async-trait",
  "http",
@@ -189,6 +192,8 @@ dependencies = [
  "aether-http",
  "aether-model-fetch",
  "aether-oauth",
+ "aether-pool-core",
+ "aether-provider-pool",
  "aether-provider-transport",
  "aether-runtime",
  "aether-runtime-state",
@@ -281,6 +286,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-pool-core"
+version = "0.1.0"
+dependencies = [
+ "aether-data-contracts",
+ "serde_json",
+]
+
+[[package]]
+name = "aether-provider-pool"
+version = "0.1.0"
+dependencies = [
+ "aether-data-contracts",
+ "aether-pool-core",
+ "serde_json",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "aether-provider-transport"
 version = "0.1.0"
 dependencies = [
@@ -310,7 +334,7 @@ dependencies = [
 
 [[package]]
 name = "aether-proxy"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "aether-contracts",
  "aether-gateway",

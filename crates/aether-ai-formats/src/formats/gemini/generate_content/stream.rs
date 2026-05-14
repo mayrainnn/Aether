@@ -551,6 +551,7 @@ impl GeminiClientEmitter {
                 self.finished = true;
                 Ok(out)
             }
+            CanonicalStreamEvent::ReasoningSummaryDone => Ok(Vec::new()),
         }
     }
 

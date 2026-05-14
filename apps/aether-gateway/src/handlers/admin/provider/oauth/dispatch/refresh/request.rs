@@ -1,4 +1,4 @@
-use super::super::super::runtime::provider_oauth_runtime_endpoint_for_provider;
+use super::super::super::runtime::resolve_provider_oauth_runtime_endpoints;
 use super::super::super::state::is_fixed_provider_type_for_provider_oauth;
 use super::helpers::{self, RefreshDispatch, RefreshRequestContext};
 use super::response;
@@ -76,11 +76,19 @@ pub(super) async fn parse_admin_provider_oauth_refresh_request(
         )));
     }
 
-    let endpoints = state
-        .list_provider_catalog_endpoints_by_provider_ids(std::slice::from_ref(&provider_id))
-        .await?;
-    let Some(endpoint) = provider_oauth_runtime_endpoint_for_provider(&provider_type, &endpoints)
-    else {
+    let endpoint_resolution =
+        resolve_provider_oauth_runtime_endpoints(state, &provider, &provider_type).await?;
+    let Some(endpoint) = endpoint_resolution.runtime_endpoint else {
+        if state
+            .fixed_provider_template(&provider.provider_type)
+            .is_some()
+            && !state.has_provider_catalog_data_writer()
+        {
+            return Ok(RefreshDispatch::Respond(response::control_error_response(
+                http::StatusCode::BAD_REQUEST,
+                "固定 Provider 端点缺失，且 provider catalog writer 不可用，无法自动补全端点",
+            )));
+        }
         return Ok(RefreshDispatch::Respond(response::control_error_response(
             http::StatusCode::BAD_REQUEST,
             "找不到有效端点，无法 refresh",

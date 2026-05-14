@@ -112,7 +112,7 @@ async fn gateway_handles_admin_system_check_update_locally_with_trusted_admin_pr
         .is_some_and(|value| !value.is_empty()));
     assert_eq!(payload["latest_version"], serde_json::Value::Null);
     assert_eq!(payload["has_update"], json!(false));
-    assert_eq!(payload["error"], "检查更新需要 Rust 管理后端");
+    assert_eq!(payload["error"], "测试环境未请求 GitHub Releases");
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -151,7 +151,7 @@ async fn gateway_handles_admin_system_check_update_locally_with_bearer_admin_ses
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["has_update"], json!(false));
-    assert_eq!(payload["error"], "检查更新需要 Rust 管理后端");
+    assert_eq!(payload["error"], "测试环境未请求 GitHub Releases");
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

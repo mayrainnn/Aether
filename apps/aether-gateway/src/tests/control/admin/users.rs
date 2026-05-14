@@ -407,11 +407,7 @@ async fn gateway_handles_admin_users_root_locally_with_trusted_admin_principal()
             "password": "NewUser123!",
             "role": "user",
             "unlimited": false,
-            "initial_gift_usd": 6.5,
-            "allowed_providers": ["openai"],
-            "allowed_api_formats": ["openai:chat"],
-            "allowed_models": ["gpt-4.1"],
-            "rate_limit": 80
+            "initial_gift_usd": 6.5
         }))
         .send()
         .await
@@ -424,8 +420,33 @@ async fn gateway_handles_admin_users_root_locally_with_trusted_admin_principal()
     assert_eq!(create_payload["email"], "new-user@example.com");
     assert_eq!(create_payload["username"], "new_user");
     assert_eq!(create_payload["role"], "user");
-    assert_eq!(create_payload["rate_limit"], 80);
+    assert_eq!(create_payload["rate_limit"], serde_json::Value::Null);
     assert_eq!(create_payload["unlimited"], false);
+
+    let hidden_policy_response = reqwest::Client::new()
+        .post(format!("{create_gateway_url}/api/admin/users"))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "email": "hidden-policy@example.com",
+            "username": "hidden_policy",
+            "password": "Hidden123!",
+            "allowed_models": ["gpt-4.1"]
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(hidden_policy_response.status(), StatusCode::BAD_REQUEST);
+    let hidden_policy_payload: serde_json::Value = hidden_policy_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert_eq!(
+        hidden_policy_payload["detail"],
+        "allowed_models 已停用，请通过用户分组管理访问权限"
+    );
 
     create_gateway_handle.abort();
 }
@@ -717,10 +738,6 @@ async fn gateway_handles_admin_user_batch_actions_locally() {
             },
             "action": "update_access_control",
             "payload": {
-                "allowed_providers": null,
-                "allowed_api_formats": ["OPENAI:RESPONSES"],
-                "allowed_models": [],
-                "rate_limit": 0,
                 "unlimited": false
             }
         }))
@@ -735,15 +752,34 @@ async fn gateway_handles_admin_user_batch_actions_locally() {
     assert_eq!(access_payload["total"], 1);
     assert_eq!(access_payload["success"], 1);
     assert_eq!(access_payload["failed"], 0);
+    assert_eq!(access_payload["modified_fields"], json!(["unlimited"]));
+
+    let hidden_access_response = client
+        .post(format!("{gateway_url}/api/admin/users/batch-action"))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "selection": {
+                "user_ids": ["user-1"]
+            },
+            "action": "update_access_control",
+            "payload": {
+                "rate_limit": 0
+            }
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(hidden_access_response.status(), StatusCode::BAD_REQUEST);
+    let hidden_access_payload: serde_json::Value = hidden_access_response
+        .json()
+        .await
+        .expect("json body should parse");
     assert_eq!(
-        access_payload["modified_fields"],
-        json!([
-            "allowed_providers",
-            "allowed_api_formats",
-            "allowed_models",
-            "rate_limit",
-            "unlimited"
-        ])
+        hidden_access_payload["detail"],
+        "rate_limit 已停用，请通过用户分组管理访问权限"
     );
 
     let role_response = client
@@ -855,12 +891,6 @@ async fn gateway_handles_admin_user_batch_actions_locally() {
     assert_eq!(detail_payload["role"], "admin");
     assert_eq!(detail_payload["is_active"], true);
     assert_eq!(detail_payload["unlimited"], false);
-    assert_eq!(detail_payload["allowed_providers"], serde_json::Value::Null);
-    assert_eq!(
-        detail_payload["allowed_api_formats"],
-        json!(["openai:responses"])
-    );
-    assert_eq!(detail_payload["allowed_models"], json!([]));
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -967,10 +997,6 @@ async fn gateway_handles_admin_user_detail_routes_locally_with_trusted_admin_pri
             "email": "alice-updated@example.com",
             "username": "alice_updated",
             "role": "admin",
-            "allowed_providers": ["openai", "anthropic"],
-            "allowed_api_formats": ["openai:chat", "gemini:generate_content"],
-            "allowed_models": ["gpt-4.1", "gemini-2.5-pro"],
-            "rate_limit": 120,
             "is_active": false,
             "unlimited": true
         }))
@@ -985,9 +1011,31 @@ async fn gateway_handles_admin_user_detail_routes_locally_with_trusted_admin_pri
     assert_eq!(update_payload["email"], "alice-updated@example.com");
     assert_eq!(update_payload["username"], "alice_updated");
     assert_eq!(update_payload["role"], "admin");
-    assert_eq!(update_payload["rate_limit"], 120);
+    assert_eq!(update_payload["rate_limit"], serde_json::Value::Null);
     assert_eq!(update_payload["unlimited"], true);
     assert_eq!(update_payload["is_active"], false);
+
+    let hidden_update_response = client
+        .put(format!("{gateway_url}/api/admin/users/user-1"))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "allowed_providers": ["openai"]
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(hidden_update_response.status(), StatusCode::BAD_REQUEST);
+    let hidden_update_payload: serde_json::Value = hidden_update_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert_eq!(
+        hidden_update_payload["detail"],
+        "allowed_providers 已停用，请通过用户分组管理访问权限"
+    );
 
     let delete_response = client
         .delete(format!("{gateway_url}/api/admin/users/user-1"))

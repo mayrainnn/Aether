@@ -1,6 +1,6 @@
 use super::session::AdminProviderOAuthDeviceAuthorizePayload;
 use crate::handlers::admin::provider::oauth::errors::build_internal_control_error_response;
-use crate::handlers::admin::provider::oauth::runtime::provider_oauth_runtime_endpoint_for_provider;
+use crate::handlers::admin::provider::oauth::runtime::resolve_provider_oauth_runtime_endpoints;
 use crate::handlers::admin::provider::oauth::state::{
     build_admin_provider_oauth_backend_unavailable_response, current_unix_secs,
     default_kiro_device_start_url, generate_provider_oauth_nonce, json_non_empty_string,
@@ -169,10 +169,9 @@ pub(super) async fn handle_admin_provider_oauth_device_authorize(
             "设备授权仅支持 Kiro provider",
         ));
     }
-    let endpoints = state
-        .list_provider_catalog_endpoints_by_provider_ids(std::slice::from_ref(&provider_id))
-        .await?;
-    let runtime_endpoint = provider_oauth_runtime_endpoint_for_provider("kiro", &endpoints);
+    let endpoint_resolution =
+        resolve_provider_oauth_runtime_endpoints(state, &provider, "kiro").await?;
+    let runtime_endpoint = endpoint_resolution.runtime_endpoint;
     let request_proxy = state
         .resolve_admin_provider_oauth_operation_proxy_snapshot(
             payload.proxy_node_id.as_deref(),

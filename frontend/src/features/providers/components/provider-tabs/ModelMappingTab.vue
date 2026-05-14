@@ -321,8 +321,9 @@
     :open="modelTest.dialogOpen.value"
     :result="modelTest.testResult.value"
     mode="direct"
+    :provider-type="provider.provider_type"
     :selecting-model-name="testingModelName"
-    :endpoints="activeEndpoints"
+    :endpoints="selectableTestEndpoints"
     :selected-endpoint="selectedTestEndpoint"
     :testing="modelTest.testing.value"
     :trace="modelTest.testTrace.value"
@@ -365,13 +366,14 @@ import { type EndpointAPIKey } from '@/api/endpoints/keys'
 import { updateModel } from '@/api/endpoints/models'
 import { parseApiError } from '@/utils/errorParser'
 import type { ProviderWithEndpointsSummary } from '@/api/endpoints'
+import { normalizeApiFormatAlias } from '@/api/endpoints/types/api-format'
 import {
   buildDefaultModelTestRequestHeaders,
   buildDefaultModelTestRequestBody,
+  isModelTestableEndpoint,
   parseModelTestRequestHeadersDraft,
   parseModelTestRequestBodyDraft,
-  POOL_TEST_CONCURRENCY,
-  SINGLE_TEST_CONCURRENCY,
+  syncModelTestRequestBodyDraft,
 } from './model-test-request'
 
 interface MappingItem {
@@ -431,8 +433,11 @@ const testRequestHeadersDraft = ref('')
 const testRequestHeadersResetValue = ref('')
 const testRequestBodyDraft = ref('')
 const testRequestBodyResetValue = ref('')
-const isPoolManagedProvider = computed(() => Boolean(props.provider.pool_advanced))
-const activeEndpoints = computed(() => (props.endpoints ?? []).filter(endpoint => endpoint.is_active))
+const mappingTestEndpoints = ref<ProviderEndpoint[] | null>(null)
+const providerKeysState = computed(() => props.providerKeys ?? [])
+const activeEndpoints = computed(() => (props.endpoints ?? [])
+  .filter(endpoint => isModelTestableEndpoint(endpoint, providerKeysState.value)))
+const selectableTestEndpoints = computed(() => mappingTestEndpoints.value ?? activeEndpoints.value)
 const parsedTestRequestHeaders = computed(() => parseModelTestRequestHeadersDraft(testRequestHeadersDraft.value))
 const testRequestHeadersError = computed(() => parsedTestRequestHeaders.value.error)
 const parsedTestRequestBody = computed(() => parseModelTestRequestBodyDraft(testRequestBodyDraft.value))
@@ -442,7 +447,6 @@ const isLoading = computed(() => Boolean(props.loading) || localLoading.value)
 // 使用 props 传入的数据
 const models = computed(() => props.models ?? [])
 const aliasMappingPreview = computed(() => props.mappingPreview ?? null)
-const providerKeysState = computed(() => props.providerKeys ?? [])
 
 // 是否有 key 配置了自动获取上游模型
 const hasAutoFetchKey = computed(() => {
@@ -705,6 +709,7 @@ function handleTestDialogClose() {
   testingModelName.value = null
   testingMapping.value = null
   selectedTestEndpoint.value = null
+  mappingTestEndpoints.value = null
   testRequestHeadersDraft.value = ''
   testRequestHeadersResetValue.value = ''
   testRequestBodyDraft.value = ''
@@ -718,14 +723,16 @@ function handleTestDialogBack() {
 }
 
 function handleSelectTestEndpoint(endpointId: string) {
-  const endpoint = activeEndpoints.value.find(item => item.id === endpointId)
+  const endpoint = selectableTestEndpoints.value.find(item => item.id === endpointId)
   if (!endpoint) return
   selectedTestEndpoint.value = endpoint
+  syncMappingTestRequestBody()
 }
 
 // 测试映射（直连测试，带故障转移和实时进度）
-function runMappingTest(testingKey: string, modelName: string) {
-  if (activeEndpoints.value.length === 0) {
+function runMappingTest(testingKey: string, modelName: string, endpointsOverride?: ProviderEndpoint[]) {
+  const endpoints = endpointsOverride ?? activeEndpoints.value
+  if (endpoints.length === 0) {
     showError('暂无可用于测试的活跃端点')
     return
   }
@@ -734,16 +741,43 @@ function runMappingTest(testingKey: string, modelName: string) {
   modelTest.dialogOpen.value = true
   testingMapping.value = null
   testingModelName.value = modelName
-  selectedTestEndpoint.value = activeEndpoints.value[0] ?? null
+  mappingTestEndpoints.value = endpointsOverride ?? null
+  selectedTestEndpoint.value = endpoints[0] ?? null
   testRequestHeadersResetValue.value = buildDefaultModelTestRequestHeaders()
   testRequestHeadersDraft.value = testRequestHeadersResetValue.value
-  testRequestBodyResetValue.value = buildDefaultModelTestRequestBody(modelName, selectedTestEndpoint.value?.api_format)
+  resetMappingTestRequestBody()
+}
+
+function resetMappingTestRequestBody() {
+  if (!testingModelName.value) return
+
+  testRequestBodyResetValue.value = buildDefaultModelTestRequestBody(
+    testingModelName.value,
+    selectedTestEndpoint.value?.api_format,
+  )
   testRequestBodyDraft.value = testRequestBodyResetValue.value
+}
+
+function syncMappingTestRequestBody() {
+  if (!testingModelName.value) return
+
+  const nextResetValue = buildDefaultModelTestRequestBody(
+    testingModelName.value,
+    selectedTestEndpoint.value?.api_format,
+  )
+  const next = syncModelTestRequestBodyDraft(
+    testRequestBodyDraft.value,
+    testRequestBodyResetValue.value,
+    nextResetValue,
+    testingModelName.value,
+  )
+  testRequestBodyResetValue.value = next.resetValue
+  testRequestBodyDraft.value = next.draft
 }
 
 async function handleStartMappingTest() {
   if (modelTest.testing.value || !testingModelName.value) return
-  const endpoint = selectedTestEndpoint.value || activeEndpoints.value[0]
+  const endpoint = selectedTestEndpoint.value || selectableTestEndpoints.value[0]
   if (!endpoint) {
     showError('请选择要测试的端点')
     return
@@ -772,7 +806,6 @@ async function handleStartMappingTest() {
     endpointBaseUrl: endpoint.base_url,
     requestHeaders,
     requestBody,
-    concurrency: isPoolManagedProvider.value ? POOL_TEST_CONCURRENCY : SINGLE_TEST_CONCURRENCY,
   })
   if (pendingMappingKey.value === currentMappingKey) {
     pendingMappingKey.value = null
@@ -780,9 +813,25 @@ async function handleStartMappingTest() {
   testingMapping.value = null
 }
 
+function scopedMappingEndpoints(item: CombinedMapping): ProviderEndpoint[] {
+  const group = item.group
+  if (!group) return activeEndpoints.value
+
+  const apiFormats = new Set(normalizeStringList(group.apiFormats).map(normalizeApiFormatAlias))
+  const endpointIds = new Set(normalizeStringList(group.endpointIds))
+  const matched = activeEndpoints.value.filter((endpoint) => {
+    const apiFormatMatched = apiFormats.size === 0
+      || apiFormats.has(normalizeApiFormatAlias(endpoint.api_format))
+    const endpointMatched = endpointIds.size === 0 || endpointIds.has(endpoint.id)
+    return apiFormatMatched && endpointMatched
+  })
+
+  return matched.length > 0 ? matched : activeEndpoints.value
+}
+
 // 测试精确映射
 function testMapping(item: CombinedMapping, mapping: MappingItem) {
-  runMappingTest(`${item.key}-${mapping.name}`, mapping.name)
+  runMappingTest(`${item.key}-${mapping.name}`, mapping.name, scopedMappingEndpoints(item))
 }
 
 // 测试正则映射

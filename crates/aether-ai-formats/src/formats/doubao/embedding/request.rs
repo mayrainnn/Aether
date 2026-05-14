@@ -1,5 +1,5 @@
+use serde_json::Map;
 use serde_json::Value;
-use serde_json::{json, Map};
 
 use crate::formats::context::FormatContext;
 use crate::formats::openai::embedding::request::mapped_embedding_model;
@@ -24,7 +24,7 @@ pub fn to(request: &CanonicalRequest, ctx: &FormatContext) -> Option<Value> {
         Value::Array(
             items
                 .into_iter()
-                .map(|text| json!({"type": "text", "text": text}))
+                .map(|text| Value::String(text.to_string()))
                 .collect(),
         ),
     );

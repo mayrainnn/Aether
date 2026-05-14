@@ -99,6 +99,49 @@ describe('poolManagementState', () => {
     })
   })
 
+  it('supports score sort in storage and query state', () => {
+    writePoolManagementViewState(
+      {
+        providerId: 'provider-g',
+        search: 'score search',
+        status: 'cooldown',
+        page: 3,
+        pageSize: 25,
+        sortBy: 'score',
+        sortOrder: 'desc',
+        statsMode: 'current_cycle',
+      },
+      storage,
+    )
+
+    expect(readPoolManagementViewState({}, storage)).toMatchObject({
+      providerId: 'provider-g',
+      search: 'score search',
+      status: 'cooldown',
+      page: 3,
+      pageSize: 25,
+      sortBy: 'score',
+      sortOrder: 'desc',
+      statsMode: 'current_cycle',
+    })
+
+    expect(
+      buildPoolManagementQueryPatch({
+        providerId: 'provider-g',
+        search: 'score search',
+        status: 'cooldown',
+        page: 3,
+        pageSize: 25,
+        sortBy: 'score',
+        sortOrder: 'desc',
+        statsMode: 'current_cycle',
+      }),
+    ).toMatchObject({
+      sortBy: 'score',
+      sortOrder: 'desc',
+    })
+  })
+
   it('omits defaults when building query patch', () => {
     expect(
       buildPoolManagementQueryPatch({
@@ -131,13 +174,13 @@ describe('poolManagementState', () => {
         status: 'all',
         page: 1,
         pageSize: 50,
-        sortBy: 'last_used_at',
-        sortOrder: 'asc',
+        sortBy: 'score',
+        sortOrder: 'desc',
         statsMode: 'account_total',
       }),
     ).toMatchObject({
-      sortBy: 'last_used_at',
-      sortOrder: 'asc',
+      sortBy: 'score',
+      sortOrder: 'desc',
       statsMode: 'account_total',
     })
   })

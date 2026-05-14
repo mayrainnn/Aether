@@ -28,7 +28,8 @@ use super::{
     spawn_usage_cleanup_worker, spawn_wallet_daily_usage_aggregation_worker,
     start_proxy_upgrade_rollout, stats_aggregation_target_day,
     stats_hourly_aggregation_target_hour, summarize_database_pool, usage_cleanup_settings,
-    usage_cleanup_window, wallet_daily_usage_aggregation_target, AppState, DbMaintenanceRunSummary,
+    usage_cleanup_window, usage_cleanup_window_with_override,
+    wallet_daily_usage_aggregation_target, AppState, DbMaintenanceRunSummary,
     FailedPendingUsageRow, GatewayDataState, ProxyNodeMetricsCleanupSettings,
     ProxyUpgradeRolloutProbeConfig, StalePendingUsageRow, UsageCleanupSettings, USAGE_CLEANUP_HOUR,
     USAGE_CLEANUP_MINUTE, WALLET_DAILY_USAGE_AGGREGATION_HOUR,
@@ -938,6 +939,42 @@ fn usage_cleanup_window_uses_non_overlapping_ranges() {
     assert_eq!(window.log_cutoff.to_rfc3339(), "2025-03-18T03:00:00+00:00");
     assert!(window.detail_cutoff > window.compressed_cutoff);
     assert!(window.compressed_cutoff > window.log_cutoff);
+}
+
+#[test]
+fn usage_cleanup_window_with_override_is_always_non_aggressive() {
+    let now_utc = "2026-03-18T03:00:00Z"
+        .parse::<DateTime<Utc>>()
+        .expect("timestamp should parse");
+    let settings = UsageCleanupSettings {
+        detail_retention_days: 7,
+        compressed_retention_days: 30,
+        header_retention_days: 90,
+        log_retention_days: 365,
+        batch_size: 123,
+        auto_delete_expired_keys: false,
+    };
+    let policy = usage_cleanup_window(now_utc, settings);
+
+    let override_duration = chrono::Duration::days(180);
+    let clamped = usage_cleanup_window_with_override(now_utc, settings, Some(override_duration));
+
+    assert_eq!(clamped.detail_cutoff, policy.detail_cutoff);
+    assert_eq!(clamped.compressed_cutoff, policy.compressed_cutoff);
+    assert_eq!(clamped.header_cutoff, policy.header_cutoff);
+    assert_eq!(clamped.log_cutoff, now_utc - override_duration);
+    assert!(clamped.log_cutoff > policy.log_cutoff);
+
+    let far_override = chrono::Duration::days(5);
+    let far = usage_cleanup_window_with_override(now_utc, settings, Some(far_override));
+    assert_eq!(far.detail_cutoff, now_utc - far_override);
+    assert_eq!(far.compressed_cutoff, now_utc - far_override);
+    assert_eq!(far.header_cutoff, now_utc - far_override);
+    assert_eq!(far.log_cutoff, now_utc - far_override);
+    assert!(far.log_cutoff > policy.log_cutoff);
+
+    let passthrough = usage_cleanup_window_with_override(now_utc, settings, None);
+    assert_eq!(passthrough, policy);
 }
 
 #[tokio::test]
