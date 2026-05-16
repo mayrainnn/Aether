@@ -1,0 +1,5 @@
+{"type":"spec","path":".trellis/spec/aether-contracts/backend/protocol-contracts.md","reason":"ExecutionPlan and ResolvedTransportProfile compatibility rules"}
+{"type":"spec","path":".trellis/spec/aether-provider-transport/backend/streaming-and-request-building.md","reason":"Grok request/header/body construction and browser profile alignment rules"}
+{"type":"spec","path":".trellis/spec/aether-gateway/backend/request-execution-guidelines.md","reason":"Generic execution runtime transport branching and browser_wreq contracts"}
+{"type":"spec","path":".trellis/spec/aether-gateway/backend/quality-guidelines.md","reason":"Gateway test and boundary adapter conventions"}
+{"type":"research","path":".trellis/tasks/05-12-grok2api-provider-pool-integration/research/implementation-notes.md","reason":"Current Grok native provider implementation notes and verification history"}

@@ -1,0 +1,3 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python3 .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/spec/aether-gateway/backend/index.md", "reason": "Gateway backend model-test conventions"}
+{"file": ".trellis/spec/aether-provider-transport/backend/index.md", "reason": "Provider transport policy and Grok helpers"}
