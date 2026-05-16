@@ -1,0 +1,28 @@
+{
+  "id": "grok-image-surfaces",
+  "name": "grok-image-surfaces",
+  "title": "Unify Grok image generation across Aether surfaces",
+  "description": "Support Grok image generation through Aether's existing OpenAI chat, responses, and image surfaces without adding Grok-only public endpoints or duplicating grok2api route handlers.",
+  "status": "in_progress",
+  "dev_type": null,
+  "scope": "aether-provider-transport,aether-ai-formats,aether-gateway",
+  "package": "aether-gateway",
+  "priority": "P2",
+  "creator": "mayrain",
+  "assignee": "mayrain",
+  "createdAt": "2026-05-16",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "feat/grok2api-provider-pool-integration",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "Created manually because .trellis/scripts/task.py fails with ModuleNotFoundError: common.log.",
+  "meta": {
+    "manual_creation_reason": "task.py import failure: ModuleNotFoundError: No module named 'common.log'"
+  }
+}

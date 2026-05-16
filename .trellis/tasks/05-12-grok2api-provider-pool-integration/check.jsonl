@@ -1,0 +1,16 @@
+{"file": ".trellis/tasks/05-12-grok2api-provider-pool-integration/prd.md", "reason": "Acceptance criteria and explicit out-of-scope items to verify against any implementation or plan changes."}
+{"file": ".trellis/tasks/05-12-grok2api-provider-pool-integration/research/grok-native-provider-design.md", "reason": "Design baseline for checking provider skeleton, auth parsing, route support, model registry, images, quota, and phased scope."}
+{"file": ".trellis/tasks/05-12-grok2api-provider-pool-integration/research/integration-options.md", "reason": "Architecture decision baseline; verify implementation does not drift into sidecar or dual-control-plane ownership."}
+{"file": ".trellis/tasks/05-12-grok2api-provider-pool-integration/research/security-ops.md", "reason": "Security checklist for encrypted auth_config, secret redaction, admin auth, proxy handling, media fetch, and invalid-state mapping."}
+{"file": ".trellis/tasks/05-12-grok2api-provider-pool-integration/research/grok2api-non-video-capabilities.md", "reason": "Endpoint and model-scope checklist, especially video exclusion and image upload/cache non-ownership."}
+{"file": ".trellis/spec/aether-provider-transport/backend/index.md", "reason": "Provider transport quality gate and GitNexus detect_changes requirement for transport edits."}
+{"file": ".trellis/spec/aether-provider-transport/backend/error-handling.md", "reason": "Unsupported-provider and malformed-request behavior must fail loudly with stable reasons."}
+{"file": ".trellis/spec/aether-provider-transport/backend/logging-guidelines.md", "reason": "Secret-bearing Grok session material must not be logged or exposed through diagnostics."}
+{"file": ".trellis/spec/aether-provider-transport/backend/streaming-and-request-building.md", "reason": "Verification of URL/header/body/stream behavior and provider hook placement."}
+{"file": ".trellis/spec/aether-ai-formats/backend/index.md", "reason": "Format conversion and image request changes must preserve pure-crate boundaries and conversion matrix expectations."}
+{"file": ".trellis/spec/aether-gateway/backend/request-execution-guidelines.md", "reason": "Gateway route, buffering, stream/sync, and candidate-loop checks for new Grok public API surfaces."}
+{"file": ".trellis/spec/aether-admin/backend/index.md", "reason": "Admin payloads, helper boundaries, deterministic output, and redaction checks."}
+{"file": ".trellis/spec/aether-oauth/backend/index.md", "reason": "OAuth/provider adapter behavior, token preservation, provider_type normalization, and no-secret diagnostics checks."}
+{"file": ".trellis/spec/aether-model-fetch/backend/index.md", "reason": "Model fetch, preset model, and whitelist behavior checks for Grok chat/image model exposure."}
+{"file": ".trellis/spec/aether-scheduler-core/backend/index.md", "reason": "Candidate selectability, quota/health skip reasons, and ranking behavior checks for Grok pool keys."}
+{"file": ".trellis/spec/aether-data-contracts/backend/repository-contracts.md", "reason": "Provider catalog record shape and repository contract checks for key auth_config and metadata changes."}

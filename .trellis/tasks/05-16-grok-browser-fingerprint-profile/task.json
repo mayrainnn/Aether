@@ -1,0 +1,28 @@
+{
+  "id": "grok-browser-fingerprint-profile",
+  "name": "grok-browser-fingerprint-profile",
+  "title": "Design Grok browser transport profile integration",
+  "description": "Plan how Grok browser_wreq transport should be represented through the existing fingerprint.transport_profile system instead of a parallel Grok-specific fingerprint configuration.",
+  "status": "in_progress",
+  "dev_type": null,
+  "scope": "aether-provider-transport,aether-gateway",
+  "package": "aether-provider-transport",
+  "priority": "P2",
+  "creator": "mayrain",
+  "assignee": "mayrain",
+  "createdAt": "2026-05-16",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "feat/grok2api-provider-pool-integration",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "Created manually because .trellis/scripts/task.py is missing common.log in this workspace.",
+  "meta": {
+    "manual_creation_reason": "task.py import failure: ModuleNotFoundError: No module named 'common.log'"
+  }
+}

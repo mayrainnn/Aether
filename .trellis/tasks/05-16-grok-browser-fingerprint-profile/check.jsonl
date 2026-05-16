@@ -1,0 +1,4 @@
+{"type":"spec","path":".trellis/spec/aether-contracts/backend/protocol-contracts.md","reason":"Check transport contract compatibility"}
+{"type":"spec","path":".trellis/spec/aether-provider-transport/backend/streaming-and-request-building.md","reason":"Check Grok browser header/profile alignment"}
+{"type":"spec","path":".trellis/spec/aether-gateway/backend/request-execution-guidelines.md","reason":"Check browser_wreq execution behavior"}
+{"type":"research","path":".trellis/tasks/05-16-grok-browser-fingerprint-profile/design.md","reason":"Check implementation against accepted design"}
