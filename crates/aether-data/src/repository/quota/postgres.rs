@@ -1,26 +1,12 @@
 use async_trait::async_trait;
-use sqlx::{PgPool, Postgres, QueryBuilder, Row};
+use sqlx::{PgPool, Postgres, Row};
 
 use super::{
-    ProviderQuotaReadRepository, ProviderQuotaWriteRepository, StoredProviderQuotaSnapshot,
+    quota_snapshot_select, ProviderQuotaReadRepository, ProviderQuotaWriteRepository,
+    StoredProviderQuotaSnapshot,
 };
 use crate::{error::SqlxResultExt, DataLayerError};
-use aether_data_query::{push_in, WhereClause};
-
-const FIND_BY_PROVIDER_ID_SQL: &str = r#"
-SELECT
-  id AS provider_id,
-  CAST(billing_type AS TEXT) AS billing_type,
-  CAST(monthly_quota_usd AS DOUBLE PRECISION) AS monthly_quota_usd,
-  CAST(COALESCE(monthly_used_usd, 0) AS DOUBLE PRECISION) AS monthly_used_usd,
-  quota_reset_day,
-  CAST(EXTRACT(EPOCH FROM quota_last_reset_at) AS BIGINT) AS quota_last_reset_at_unix_secs,
-  CAST(EXTRACT(EPOCH FROM quota_expires_at) AS BIGINT) AS quota_expires_at_unix_secs,
-  is_active
-FROM providers
-WHERE id = $1
-LIMIT 1
-"#;
+use aether_data_query::SqlDialect;
 
 const RESET_DUE_SQL: &str = r#"
 UPDATE providers
@@ -54,8 +40,11 @@ impl ProviderQuotaReadRepository for SqlxProviderQuotaRepository {
         &self,
         provider_id: &str,
     ) -> Result<Option<StoredProviderQuotaSnapshot>, DataLayerError> {
-        let row = sqlx::query(FIND_BY_PROVIDER_ID_SQL)
-            .bind(provider_id)
+        let mut statement = quota_snapshot_select().statement::<Postgres>(SqlDialect::Postgres);
+        statement.where_eq("id", provider_id.to_string()).limit(1);
+        let row = statement
+            .finish()
+            .build()
             .fetch_optional(&self.pool)
             .await
             .map_postgres_err()?;
@@ -69,13 +58,13 @@ impl ProviderQuotaReadRepository for SqlxProviderQuotaRepository {
         if provider_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let mut builder = QueryBuilder::<Postgres>::new(
-            "SELECT id AS provider_id, CAST(billing_type AS TEXT) AS billing_type, CAST(monthly_quota_usd AS DOUBLE PRECISION) AS monthly_quota_usd, CAST(COALESCE(monthly_used_usd, 0) AS DOUBLE PRECISION) AS monthly_used_usd, quota_reset_day, CAST(EXTRACT(EPOCH FROM quota_last_reset_at) AS BIGINT) AS quota_last_reset_at_unix_secs, CAST(EXTRACT(EPOCH FROM quota_expires_at) AS BIGINT) AS quota_expires_at_unix_secs, is_active FROM providers",
-        );
-        let mut where_clause = WhereClause::new();
-        push_in(&mut builder, &mut where_clause, "id", provider_ids);
-        builder.push(" ORDER BY id ASC");
-        builder
+
+        let mut statement = quota_snapshot_select().statement::<Postgres>(SqlDialect::Postgres);
+        statement
+            .where_in("id", provider_ids)
+            .order_by_sql("id ASC");
+        statement
+            .finish()
             .build()
             .fetch_all(&self.pool)
             .await

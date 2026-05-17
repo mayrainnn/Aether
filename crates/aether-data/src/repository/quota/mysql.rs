@@ -1,26 +1,14 @@
 use async_trait::async_trait;
-use sqlx::{mysql::MySqlRow, MySql, QueryBuilder, Row};
+use sqlx::{mysql::MySqlRow, MySql, Row};
 
 use super::{
-    ProviderQuotaReadRepository, ProviderQuotaWriteRepository, StoredProviderQuotaSnapshot,
+    quota_snapshot_select, ProviderQuotaReadRepository, ProviderQuotaWriteRepository,
+    StoredProviderQuotaSnapshot,
 };
 use crate::driver::mysql::MysqlPool;
 use crate::error::SqlResultExt;
 use crate::DataLayerError;
-use aether_data_query::{push_in, WhereClause};
-
-const QUOTA_COLUMNS: &str = r#"
-SELECT
-  id AS provider_id,
-  billing_type,
-  monthly_quota_usd,
-  COALESCE(monthly_used_usd, 0) AS monthly_used_usd,
-  quota_reset_day,
-  quota_last_reset_at AS quota_last_reset_at_unix_secs,
-  quota_expires_at AS quota_expires_at_unix_secs,
-  is_active
-FROM providers
-"#;
+use aether_data_query::SqlDialect;
 
 #[derive(Debug, Clone)]
 pub struct MysqlProviderQuotaRepository {
@@ -39,8 +27,11 @@ impl ProviderQuotaReadRepository for MysqlProviderQuotaRepository {
         &self,
         provider_id: &str,
     ) -> Result<Option<StoredProviderQuotaSnapshot>, DataLayerError> {
-        let row = sqlx::query(&format!("{QUOTA_COLUMNS} WHERE id = ? LIMIT 1"))
-            .bind(provider_id)
+        let mut statement = quota_snapshot_select().statement::<MySql>(SqlDialect::Mysql);
+        statement.where_eq("id", provider_id.to_string()).limit(1);
+        let row = statement
+            .finish()
+            .build()
             .fetch_optional(&self.pool)
             .await
             .map_sql_err()?;
@@ -55,11 +46,16 @@ impl ProviderQuotaReadRepository for MysqlProviderQuotaRepository {
             return Ok(Vec::new());
         }
 
-        let mut builder = QueryBuilder::<MySql>::new(QUOTA_COLUMNS);
-        let mut where_clause = WhereClause::new();
-        push_in(&mut builder, &mut where_clause, "id", provider_ids);
-        builder.push(" ORDER BY id ASC");
-        let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
+        let mut statement = quota_snapshot_select().statement::<MySql>(SqlDialect::Mysql);
+        statement
+            .where_in("id", provider_ids)
+            .order_by_sql("id ASC");
+        let rows = statement
+            .finish()
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_sql_err()?;
         rows.iter().map(map_row).collect()
     }
 }

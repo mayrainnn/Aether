@@ -26,6 +26,290 @@ impl SqlDialect {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DialectSql<'a> {
+    common: Option<&'a str>,
+    postgres: Option<&'a str>,
+    sqlite: Option<&'a str>,
+    mysql: Option<&'a str>,
+}
+
+impl<'a> DialectSql<'a> {
+    pub const fn common(sql: &'a str) -> Self {
+        Self {
+            common: Some(sql),
+            postgres: None,
+            sqlite: None,
+            mysql: None,
+        }
+    }
+
+    pub const fn dialect(postgres: &'a str, sqlite: &'a str, mysql: &'a str) -> Self {
+        Self {
+            common: None,
+            postgres: Some(postgres),
+            sqlite: Some(sqlite),
+            mysql: Some(mysql),
+        }
+    }
+
+    pub fn with_postgres(mut self, sql: &'a str) -> Self {
+        self.postgres = Some(sql);
+        self
+    }
+
+    pub fn with_sqlite(mut self, sql: &'a str) -> Self {
+        self.sqlite = Some(sql);
+        self
+    }
+
+    pub fn with_mysql(mut self, sql: &'a str) -> Self {
+        self.mysql = Some(sql);
+        self
+    }
+
+    pub fn sql(self, dialect: SqlDialect) -> &'a str {
+        match dialect {
+            SqlDialect::Postgres => self.postgres.or(self.common),
+            SqlDialect::Sqlite => self.sqlite.or(self.common),
+            SqlDialect::Mysql => self.mysql.or(self.common),
+        }
+        .expect("dialect SQL expression is missing for selected dialect")
+    }
+}
+
+impl<'a> From<&'a str> for DialectSql<'a> {
+    fn from(value: &'a str) -> Self {
+        Self::common(value)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectColumn<'a> {
+    expr: DialectSql<'a>,
+    alias: Option<&'a str>,
+}
+
+impl<'a> SelectColumn<'a> {
+    pub fn expr(expr: impl Into<DialectSql<'a>>) -> Self {
+        Self {
+            expr: expr.into(),
+            alias: None,
+        }
+    }
+
+    pub fn alias(mut self, alias: &'a str) -> Self {
+        self.alias = Some(alias);
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectQuery<'a> {
+    distinct: bool,
+    columns: Vec<SelectColumn<'a>>,
+    from: DialectSql<'a>,
+    joins: Vec<DialectSql<'a>>,
+}
+
+impl<'a> SelectQuery<'a> {
+    pub fn new(from: impl Into<DialectSql<'a>>) -> Self {
+        Self {
+            distinct: false,
+            columns: Vec::new(),
+            from: from.into(),
+            joins: Vec::new(),
+        }
+    }
+
+    pub fn distinct(mut self) -> Self {
+        self.distinct = true;
+        self
+    }
+
+    pub fn select(mut self, column: SelectColumn<'a>) -> Self {
+        self.columns.push(column);
+        self
+    }
+
+    pub fn select_columns<I>(mut self, columns: I) -> Self
+    where
+        I: IntoIterator<Item = SelectColumn<'a>>,
+    {
+        self.columns.extend(columns);
+        self
+    }
+
+    pub fn join(mut self, join_sql: impl Into<DialectSql<'a>>) -> Self {
+        self.joins.push(join_sql.into());
+        self
+    }
+
+    pub fn render(&self, dialect: SqlDialect) -> String {
+        let mut sql = String::from("SELECT ");
+        if self.distinct {
+            sql.push_str("DISTINCT ");
+        }
+
+        if self.columns.is_empty() {
+            sql.push('*');
+        } else {
+            for (index, column) in self.columns.iter().enumerate() {
+                if index > 0 {
+                    sql.push_str(", ");
+                }
+                sql.push_str(column.expr.sql(dialect));
+                if let Some(alias) = column.alias {
+                    sql.push_str(" AS ");
+                    sql.push_str(&dialect.quote_ident(alias));
+                }
+            }
+        }
+
+        sql.push_str(" FROM ");
+        sql.push_str(self.from.sql(dialect));
+        for join in &self.joins {
+            sql.push(' ');
+            sql.push_str(join.sql(dialect));
+        }
+        sql
+    }
+
+    pub fn statement<'args, DB>(&self, dialect: SqlDialect) -> SelectStatement<'args, DB>
+    where
+        DB: Database,
+    {
+        SelectStatement {
+            dialect,
+            builder: QueryBuilder::<DB>::new(self.render(dialect)),
+            where_clause: WhereClause::new(),
+        }
+    }
+}
+
+pub struct SelectStatement<'args, DB>
+where
+    DB: Database,
+{
+    dialect: SqlDialect,
+    builder: QueryBuilder<'args, DB>,
+    where_clause: WhereClause,
+}
+
+impl<'args, DB> SelectStatement<'args, DB>
+where
+    DB: Database,
+{
+    pub fn where_eq<T>(&mut self, column_sql: &str, value: T) -> &mut Self
+    where
+        T: 'args + Encode<'args, DB> + Type<DB>,
+    {
+        push_eq(&mut self.builder, &mut self.where_clause, column_sql, value);
+        self
+    }
+
+    pub fn where_optional_eq<T>(&mut self, column_sql: &str, value: Option<T>) -> &mut Self
+    where
+        T: 'args + Encode<'args, DB> + Type<DB>,
+    {
+        push_optional_eq(&mut self.builder, &mut self.where_clause, column_sql, value);
+        self
+    }
+
+    pub fn where_in<T>(&mut self, column_sql: &str, values: &[T]) -> &mut Self
+    where
+        T: Clone + 'args + Encode<'args, DB> + Type<DB>,
+    {
+        push_in(
+            &mut self.builder,
+            &mut self.where_clause,
+            column_sql,
+            values,
+        );
+        self
+    }
+
+    pub fn where_ci_contains(&mut self, column_sql: &str, value: &str) -> &mut Self
+    where
+        String: 'args + Encode<'args, DB> + Type<DB>,
+    {
+        push_ci_contains(
+            &mut self.builder,
+            &mut self.where_clause,
+            self.dialect,
+            column_sql,
+            value,
+        );
+        self
+    }
+
+    pub fn where_ci_contains_any(&mut self, column_sqls: &[&str], value: &str) -> &mut Self
+    where
+        String: 'args + Encode<'args, DB> + Type<DB>,
+    {
+        push_ci_contains_any(
+            &mut self.builder,
+            &mut self.where_clause,
+            self.dialect,
+            column_sqls,
+            value,
+        );
+        self
+    }
+
+    pub fn where_raw(&mut self, predicate_sql: &str) -> &mut Self {
+        if !predicate_sql.trim().is_empty() {
+            self.where_clause.push_next(&mut self.builder);
+            self.builder.push(predicate_sql);
+        }
+        self
+    }
+
+    pub fn order_by_sql(&mut self, order_sql: &str) -> &mut Self {
+        if !order_sql.trim().is_empty() {
+            self.builder.push(" ORDER BY ").push(order_sql);
+        }
+        self
+    }
+
+    pub fn order_by(
+        &mut self,
+        requested_key: Option<&str>,
+        direction: SortDirection,
+        allowed: &[OrderByColumn<'_>],
+        default_key: &str,
+    ) -> &mut Self {
+        push_order_by(
+            &mut self.builder,
+            requested_key,
+            direction,
+            allowed,
+            default_key,
+        );
+        self
+    }
+
+    pub fn limit(&mut self, limit: i64) -> &mut Self
+    where
+        i64: 'args + Encode<'args, DB> + Type<DB>,
+    {
+        push_limit(&mut self.builder, limit);
+        self
+    }
+
+    pub fn limit_offset(&mut self, limit: i64, offset: i64) -> &mut Self
+    where
+        i64: 'args + Encode<'args, DB> + Type<DB>,
+    {
+        push_limit_offset(&mut self.builder, limit, offset);
+        self
+    }
+
+    pub fn finish(self) -> QueryBuilder<'args, DB> {
+        self.builder
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WhereClause {
     has_clause: bool,
@@ -359,5 +643,55 @@ mod tests {
         assert!(query.sql().contains(" WHERE id IN (?, ?)"));
         assert!(query.sql().contains(" ORDER BY created_at DESC"));
         assert!(query.sql().contains(" LIMIT ? OFFSET ?"));
+    }
+
+    #[test]
+    fn select_query_renders_dialect_specific_projection() {
+        let query = SelectQuery::new("providers").select_columns([
+            SelectColumn::expr("id").alias("provider_id"),
+            SelectColumn::expr(DialectSql::dialect(
+                "CAST(monthly_quota_usd AS DOUBLE PRECISION)",
+                "CAST(monthly_quota_usd AS REAL)",
+                "monthly_quota_usd",
+            ))
+            .alias("monthly_quota_usd"),
+        ]);
+
+        assert_eq!(
+            query.render(SqlDialect::Postgres),
+            "SELECT id AS \"provider_id\", CAST(monthly_quota_usd AS DOUBLE PRECISION) AS \"monthly_quota_usd\" FROM providers"
+        );
+        assert_eq!(
+            query.render(SqlDialect::Mysql),
+            "SELECT id AS `provider_id`, monthly_quota_usd AS `monthly_quota_usd` FROM providers"
+        );
+    }
+
+    #[test]
+    fn select_statement_keeps_bind_order_and_dialect_search() {
+        let query = SelectQuery::new("items")
+            .select(SelectColumn::expr("id"))
+            .select(SelectColumn::expr("name"));
+        let mut statement = query.statement::<Postgres>(SqlDialect::Postgres);
+        statement
+            .where_eq("kind", "scheduled".to_string())
+            .where_ci_contains_any(&["name", "description"], "Fetch")
+            .order_by(
+                Some("name"),
+                SortDirection::Asc,
+                &[OrderByColumn {
+                    key: "name",
+                    sql: "name",
+                }],
+                "name",
+            )
+            .limit_offset(20, 40);
+
+        let mut builder = statement.finish();
+        let query = builder.build();
+        assert_eq!(
+            query.sql(),
+            "SELECT id, name FROM items WHERE kind = $1 AND (name ILIKE $2 OR description ILIKE $3) ORDER BY name ASC LIMIT $4 OFFSET $5"
+        );
     }
 }

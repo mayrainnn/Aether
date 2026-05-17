@@ -1,9 +1,10 @@
 # Aether Data Simple Query Inventory
 
 This inventory tracks repository read paths that are intended to use the
-internal `aether-data-query` helpers. The helper layer is for SQL fragments only:
-repositories still own their table-specific projections, joins, row mapping, and
-business rules.
+internal `aether-data-query` helpers. The first layer centralizes SQL fragments;
+the newer `SelectQuery` layer lets repositories describe simple `SELECT`
+queries once and render dialect-specific projections for Postgres, SQLite, and
+MySQL.
 
 ## Included In This Pass
 
@@ -25,6 +26,8 @@ business rules.
 - `quota`
   - `find_by_provider_id`
   - `find_by_provider_ids`
+  - now uses one `SelectQuery` specification for the quota snapshot projection
+    across Postgres, SQLite, and MySQL
 - `provider_catalog`
   - provider by-id/provider list reads in PG/SQLite
   - endpoint/key by-id and by-provider-id `IN` reads in PG/SQLite
@@ -70,9 +73,22 @@ business rules.
 ## Helper Coverage
 
 - dialect-aware identifier quoting
+- dialect-specific SQL expressions through `DialectSql`
+- simple `SELECT` rendering through `SelectQuery`
 - `WHERE`/`AND` sequencing
 - equality and optional equality filters
 - `IN` filters
 - case-insensitive contains/search
 - whitelisted order-by rendering
 - `LIMIT` and `LIMIT/OFFSET`
+
+## Query Abstraction Shape
+
+The intended direction is:
+
+- repository defines table-specific projections, joins, and row mapping
+- `SelectQuery` renders `SELECT ... FROM ... JOIN ...` for the active dialect
+- `SelectStatement` owns dynamic filters, search, ordering, and pagination with
+  stable bind order
+- complex SQL remains hand-written until it has enough repeated structure to
+  justify a dedicated abstraction
