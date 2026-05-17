@@ -798,22 +798,14 @@
           <TableCell
             v-if="isColumnVisible('client_family')"
             class="py-4 w-[12%] text-xs"
-            :title="getClientTitle(record)"
+            :title="formatClientFamily(record.client_family)"
           >
-            <div class="flex min-w-0 flex-col gap-0.5">
-              <Badge
-                variant="outline"
-                class="w-fit max-w-full border-border/60 text-muted-foreground"
-              >
-                <span class="truncate">{{ getClientDisplayName(record) }}</span>
-              </Badge>
-              <span
-                v-if="record.client_ip"
-                class="truncate text-[11px] text-muted-foreground"
-              >
-                {{ record.client_ip }}
-              </span>
-            </div>
+            <Badge
+              variant="outline"
+              class="w-fit max-w-full border-border/60 text-muted-foreground"
+            >
+              <span class="truncate">{{ formatClientFamily(record.client_family) }}</span>
+            </Badge>
           </TableCell>
           <TableCell
             v-if="isColumnVisible('client_ip')"
@@ -1123,36 +1115,6 @@ function formatClientFamily(value: string | null | undefined): string {
   if (normalized === 'gemini_cli') return 'Gemini CLI'
   if (normalized === 'generic') return '通用客户端'
   return value?.trim() || '-'
-}
-
-function formatClientFromUserAgent(value: string | null | undefined): string | null {
-  const userAgent = value?.trim()
-  if (!userAgent) return null
-
-  const normalized = userAgent.toLowerCase()
-  if (normalized.startsWith('codex_vscode')) return 'Codex VS Code'
-  if (normalized.startsWith('codex')) return 'Codex'
-  if (normalized.includes('claude-code') || normalized.includes('claude_code')) return 'Claude Code'
-  if (normalized.includes('opencode')) return 'OpenCode'
-  if (normalized.includes('geminicli') || normalized.includes('gemini-cli')) return 'Gemini CLI'
-
-  const product = userAgent.split(/[\s/]/)[0]?.trim()
-  return product || null
-}
-
-function getClientDisplayName(record: UsageRecord): string {
-  const family = formatClientFamily(record.client_family)
-  if (family !== '-') return family
-  return formatClientFromUserAgent(record.user_agent) || record.client_ip?.trim() || '-'
-}
-
-function getClientTitle(record: UsageRecord): string {
-  const details = [
-    record.client_family?.trim() ? `客户端: ${formatClientFamily(record.client_family)}` : null,
-    record.client_ip?.trim() ? `IP: ${record.client_ip.trim()}` : null,
-    record.user_agent?.trim() ? `User-Agent: ${record.user_agent.trim()}` : null,
-  ].filter((detail): detail is string => Boolean(detail))
-  return details.length > 0 ? details.join('\n') : '-'
 }
 
 const clientFamilyFilterOptions = computed<FilterOption[]>(() => {
