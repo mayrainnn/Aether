@@ -34,6 +34,8 @@ pub struct StoredRequestUsageAudit {
     pub provider_endpoint_kind: Option<String>,
     pub has_format_conversion: bool,
     pub is_stream: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_family: Option<String>,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub total_tokens: u64,
@@ -211,6 +213,7 @@ impl StoredRequestUsageAudit {
             provider_endpoint_kind,
             has_format_conversion,
             is_stream,
+            client_family: None,
             input_tokens: parse_u64(input_tokens, "usage.input_tokens")?,
             output_tokens: parse_u64(output_tokens, "usage.output_tokens")?,
             total_tokens: parse_u64(total_tokens, "usage.total_tokens")?,
@@ -309,6 +312,10 @@ impl StoredRequestUsageAudit {
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty())
+    }
+
+    pub fn request_metadata_client_family(&self) -> Option<&str> {
+        usage_request_metadata_client_family(self.request_metadata.as_ref())
     }
 
     fn billing_snapshot_resolved_number(&self, key: &str) -> Option<f64> {
@@ -1792,6 +1799,18 @@ pub struct UsageCleanupPreviewCounts {
     pub compressed: u64,
     pub header: u64,
     pub log: u64,
+}
+
+pub fn usage_request_metadata_client_family(value: Option<&Value>) -> Option<&str> {
+    let metadata = value.and_then(Value::as_object)?;
+    metadata
+        .get("client_session_affinity")
+        .and_then(Value::as_object)
+        .and_then(|affinity| affinity.get("client_family"))
+        .and_then(Value::as_str)
+        .or_else(|| metadata.get("client_family").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 fn parse_u64(value: i32, field_name: &str) -> Result<u64, crate::DataLayerError> {

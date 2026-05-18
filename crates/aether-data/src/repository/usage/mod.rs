@@ -363,7 +363,8 @@ mod sqlite;
 
 #[allow(unused_imports)]
 pub(crate) use aether_data_contracts::repository::usage::{
-    PendingUsageCleanupSummary, ProviderApiKeyWindowUsageRequest, StoredProviderApiKeyUsageSummary,
+    usage_request_metadata_client_family, PendingUsageCleanupSummary,
+    ProviderApiKeyWindowUsageRequest, StoredProviderApiKeyUsageSummary,
     StoredProviderApiKeyWindowUsageSummary, StoredProviderUsageSummary, StoredProviderUsageWindow,
     StoredRequestUsageAudit, StoredUsageAuditAggregation, StoredUsageAuditSummary,
     StoredUsageBreakdownSummaryRow, StoredUsageCacheAffinityHitSummary,

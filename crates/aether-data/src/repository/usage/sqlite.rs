@@ -6,8 +6,8 @@ use sqlx::{sqlite::SqliteRow, Row};
 use super::{
     provider_api_key_usage_is_error, provider_api_key_usage_is_success,
     strip_deprecated_usage_display_fields, usage_can_recover_terminal_failure,
-    InMemoryUsageReadRepository, PendingUsageCleanupSummary, StoredRequestUsageAudit,
-    UpsertUsageRecord, UsageWriteRepository,
+    usage_request_metadata_client_family, InMemoryUsageReadRepository, PendingUsageCleanupSummary,
+    StoredRequestUsageAudit, UpsertUsageRecord, UsageWriteRepository,
 };
 use crate::driver::sqlite::{sqlite_optional_real, sqlite_real, SqlitePool};
 use crate::error::SqlResultExt;
@@ -847,6 +847,8 @@ fn map_usage_row(row: &SqliteRow) -> Result<StoredRequestUsageAudit, DataLayerEr
         .map(|raw| serde_json::from_str(&raw))
         .transpose()
         .map_err(|err| DataLayerError::UnexpectedValue(err.to_string()))?;
+    audit.client_family = usage_request_metadata_client_family(audit.request_metadata.as_ref())
+        .map(ToOwned::to_owned);
     let upstream_is_stream = row
         .try_get::<Option<i64>, _>("upstream_is_stream")
         .map_sql_err()?
