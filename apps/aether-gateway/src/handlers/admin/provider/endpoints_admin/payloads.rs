@@ -1,11 +1,9 @@
 use crate::handlers::admin::shared::AdminTypedObjectPatch;
-use crate::provider_key_auth::provider_key_effective_api_formats;
 use aether_admin::provider::endpoints as admin_provider_endpoints_pure;
 use aether_data_contracts::repository::provider_catalog::{
-    StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
+    StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
 };
 use serde::Deserialize;
-use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) fn key_api_formats_without_entry(
     key: &StoredProviderCatalogKey,
@@ -15,50 +13,14 @@ pub(super) fn key_api_formats_without_entry(
 }
 
 pub(super) fn endpoint_key_counts_by_format(
-    provider: &StoredProviderCatalogProvider,
+    provider_type: &str,
     endpoints: &[StoredProviderCatalogEndpoint],
     keys: &[StoredProviderCatalogKey],
 ) -> (
     std::collections::BTreeMap<String, usize>,
     std::collections::BTreeMap<String, usize>,
 ) {
-    let mut active_endpoint_formats = BTreeSet::new();
-    for endpoint in endpoints.iter().filter(|endpoint| endpoint.is_active) {
-        active_endpoint_formats.insert(endpoint.api_format.clone());
-    }
-
-    let mut total_by_format = BTreeMap::<String, BTreeSet<String>>::new();
-    let mut active_by_format = BTreeMap::<String, BTreeSet<String>>::new();
-    for key in keys {
-        for api_format in
-            provider_key_effective_api_formats(key, &provider.provider_type, endpoints)
-        {
-            if !active_endpoint_formats.contains(&api_format) {
-                continue;
-            }
-            total_by_format
-                .entry(api_format.clone())
-                .or_default()
-                .insert(key.id.clone());
-            if key.is_active {
-                active_by_format
-                    .entry(api_format)
-                    .or_default()
-                    .insert(key.id.clone());
-            }
-        }
-    }
-
-    (
-        total_by_format
-            .into_iter()
-            .map(|(api_format, keys)| (api_format, keys.len()))
-            .collect(),
-        active_by_format
-            .into_iter()
-            .map(|(api_format, keys)| (api_format, keys.len()))
-            .collect(),
-    )
+    admin_provider_endpoints_pure::endpoint_key_counts_by_format(provider_type, endpoints, keys)
 }
 
 pub(super) fn build_admin_provider_endpoint_response(
