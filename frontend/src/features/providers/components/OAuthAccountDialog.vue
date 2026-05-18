@@ -581,7 +581,70 @@
           class="flex flex-col gap-3 justify-center transition-opacity duration-150"
           :class="mode === 'import' ? 'opacity-100' : 'opacity-0 pointer-events-none'"
         >
+          <div
+            v-if="isWindsurfProvider"
+            class="grid grid-cols-2 gap-1.5 rounded-lg border border-border p-0.5 bg-muted/30"
+          >
+            <button
+              v-for="method in ([
+                { key: 'email_password', label: '邮箱密码' },
+                { key: 'token_json', label: 'Token / JSON' },
+              ] as const)"
+              :key="method.key"
+              class="h-8 text-xs font-medium rounded-md transition-colors"
+              :class="windsurfImportMethod === method.key
+                ? 'bg-background text-foreground shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'"
+              :disabled="importing"
+              @click="setWindsurfImportMethod(method.key)"
+            >
+              {{ method.label }}
+            </button>
+          </div>
+
+          <div
+            v-if="isWindsurfEmailPasswordImport"
+            class="space-y-3"
+          >
+            <div class="space-y-1.5">
+              <label class="text-xs font-medium">邮箱</label>
+              <input
+                v-model="windsurfEmail"
+                type="email"
+                autocomplete="username"
+                :disabled="importing"
+                placeholder="you@example.com"
+                class="w-full h-9 px-2.5 text-xs rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring focus:relative focus:z-10"
+                spellcheck="false"
+              >
+            </div>
+            <div class="space-y-1.5">
+              <label class="text-xs font-medium">密码</label>
+              <input
+                v-model="windsurfPassword"
+                type="password"
+                autocomplete="current-password"
+                :disabled="importing"
+                placeholder="Windsurf 密码"
+                class="w-full h-9 px-2.5 text-xs rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring focus:relative focus:z-10"
+              >
+            </div>
+            <div class="space-y-1.5">
+              <label class="text-xs font-medium text-muted-foreground">名称（可选）</label>
+              <input
+                v-model="windsurfAccountName"
+                type="text"
+                autocomplete="off"
+                :disabled="importing"
+                placeholder="未填写时使用邮箱"
+                class="w-full h-9 px-2.5 text-xs rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring focus:relative focus:z-10"
+                spellcheck="false"
+              >
+            </div>
+          </div>
+
           <JsonImportInput
+            v-else
             v-model="importText"
             :disabled="importing"
             :reset-key="importInputResetKey"
@@ -596,7 +659,7 @@
           />
 
           <div
-            v-if="importTask"
+            v-if="importTask && !isWindsurfEmailPasswordImport"
             class="rounded-xl border border-border bg-muted/20 p-3 space-y-2"
           >
             <div class="flex items-center justify-between text-xs">
@@ -669,7 +732,7 @@
         :disabled="!canImport"
         @click="handleImport"
       >
-        {{ importing ? (importTask ? `导入中 ${importTask.progress_percent}%` : '导入中...') : importButtonLabel }}
+        {{ importButtonText }}
       </Button>
     </template>
   </Dialog>
@@ -774,6 +837,7 @@ function getSelectedNodeLabel(): string {
 // 模式
 type DialogMode = 'oauth' | 'import'
 const mode = ref<DialogMode>((props.providerType || '').toLowerCase() === 'grok' ? 'import' : 'oauth')
+type WindsurfImportMethod = 'email_password' | 'token_json'
 
 // OAuth 状态
 interface OAuthState {
@@ -862,6 +926,10 @@ const importInputResetKey = ref(0)
 const importTask = ref<OAuthBatchImportTaskStatusResponse | null>(null)
 let importPollTimer: ReturnType<typeof setTimeout> | null = null
 const importPolling = ref(false)
+const windsurfImportMethod = ref<WindsurfImportMethod>('email_password')
+const windsurfEmail = ref('')
+const windsurfPassword = ref('')
+const windsurfAccountName = ref('')
 
 const isOpen = computed(() => props.open)
 
@@ -920,6 +988,11 @@ const canCompleteDeviceAuth = computed(() => {
 })
 
 const canImport = computed(() => {
+  if (isWindsurfEmailPasswordImport.value) {
+    return windsurfEmail.value.trim().length > 0
+      && windsurfPassword.value.trim().length > 0
+      && !importing.value
+  }
   return importText.value.trim().length > 0 && !importing.value
 })
 
@@ -934,7 +1007,9 @@ const importDropHint = computed(() => (
 const importManualPlaceholder = computed(() => (
   isGrokProvider.value
     ? '粘贴 Grok sso/session token，支持每行一个；或粘贴包含 token、sso_token、access_token、plan_type、pool_tier 的 JSON'
-    : '粘贴 Refresh Token / Access Token 或 JSON 内容'
+    : isWindsurfProvider.value
+      ? '粘贴 show-auth-token Token、API key 或 JSON 内容'
+      : '粘贴 Refresh Token / Access Token 或 JSON 内容'
 ))
 const importManualDescription = computed(() => (
   isGrokProvider.value
@@ -948,6 +1023,18 @@ const importFileToggleText = computed(() => (
   isGrokProvider.value ? '或选择 Grok Token 文件导入' : '或选择 JSON 文件导入'
 ))
 const providerCredentialActionLabel = computed(() => (isGrokProvider.value ? '导入' : '授权'))
+const isWindsurfEmailPasswordImport = computed(() =>
+  isWindsurfProvider.value && windsurfImportMethod.value === 'email_password'
+)
+
+const importButtonText = computed(() => {
+  if (importing.value) {
+    return importTask.value && !isWindsurfEmailPasswordImport.value
+      ? `导入中 ${importTask.value.progress_percent}%`
+      : '导入中...'
+  }
+  return isWindsurfEmailPasswordImport.value ? '登录并导入' : importButtonLabel.value
+})
 
 function stopImportPolling() {
   if (importPollTimer) {
@@ -1153,6 +1240,10 @@ function resetForm() {
   importing.value = false
   importTask.value = null
   importInputResetKey.value += 1
+  windsurfImportMethod.value = 'email_password'
+  windsurfEmail.value = ''
+  windsurfPassword.value = ''
+  windsurfAccountName.value = ''
   proxyPopoverOpen.value = false
   selectedProxyNodeId.value = ''
   mode.value = defaultMode.value
@@ -1468,8 +1559,47 @@ function handleImportInputError(payload: { message: string; title?: string }) {
   showError(payload.message, payload.title)
 }
 
+function setWindsurfImportMethod(method: WindsurfImportMethod) {
+  if (!isWindsurfProvider.value || importing.value) return
+  windsurfImportMethod.value = method
+  importTask.value = null
+}
+
+async function handleWindsurfEmailPasswordImport() {
+  if (!props.providerId) return
+
+  const email = windsurfEmail.value.trim()
+  const password = windsurfPassword.value.trim()
+  if (!email || !password) {
+    showError('请输入邮箱和密码', '格式错误')
+    return
+  }
+
+  importing.value = true
+  try {
+    const result = await importProviderRefreshToken(props.providerId, {
+      email,
+      password,
+      name: windsurfAccountName.value.trim() || email,
+      proxy_node_id: selectedProxyNodeId.value || undefined,
+    })
+    success(getOAuthSuccessMessage('导入', result))
+    emit('saved')
+    handleClose()
+  } catch (err: unknown) {
+    const errorMessage = parseApiError(err, '导入失败')
+    showError(errorMessage, '错误')
+  } finally {
+    importing.value = false
+  }
+}
+
 async function handleImport() {
   if (!canImport.value || !props.providerId) return
+  if (isWindsurfEmailPasswordImport.value) {
+    await handleWindsurfEmailPasswordImport()
+    return
+  }
 
   const inputText = importText.value.trim()
   if (!inputText) {
