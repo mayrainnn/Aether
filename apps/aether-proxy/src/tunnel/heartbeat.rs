@@ -13,8 +13,7 @@ use tracing::{debug, info, warn};
 
 use crate::registration::client::RemoteConfig;
 use crate::runtime;
-use crate::state::AppState;
-use crate::state::ServerContext;
+use crate::state::{AppState, ProxyMetricsSnapshot, ServerContext};
 
 use super::protocol::{Frame, MsgType};
 use super::writer::FrameSender;
@@ -45,7 +44,7 @@ impl HeartbeatHandle {
 
 /// Create a no-op heartbeat handle that silently discards ACKs.
 /// Used for non-primary tunnel connections (conn_idx > 0) to avoid
-/// resetting shared atomic metrics via `swap(0)`.
+/// duplicating heartbeat ACK processing.
 pub fn spawn_noop() -> HeartbeatHandle {
     let (ack_tx, _) = tokio::sync::mpsc::channel::<Bytes>(1);
     // receiver is immediately dropped; on_ack() calls will silently fail
@@ -54,17 +53,15 @@ pub fn spawn_noop() -> HeartbeatHandle {
 
 #[derive(Debug, Clone, Copy, Default)]
 struct HeartbeatSnapshot {
-    requests: u64,
-    latency_ns: u64,
-    failed: u64,
-    dns_failures: u64,
-    stream_errors: u64,
+    cumulative: ProxyMetricsSnapshot,
+    window: ProxyMetricsSnapshot,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct PendingHeartbeat {
     heartbeat_id: u64,
     snapshot: HeartbeatSnapshot,
+    cumulative: ProxyMetricsSnapshot,
     sent_at: Option<Instant>,
 }
 
@@ -82,9 +79,10 @@ pub fn spawn(
         let initial_interval = Duration::from_secs(server.dynamic.load().heartbeat_interval);
         let mut current_interval = initial_interval;
         // At most one in-flight heartbeat snapshot is tracked at a time.
-        // Snapshot is only cleared after receiving an ACK, which avoids losing
-        // interval counters when ACK/frame delivery is temporarily unstable.
+        // We keep the last ACKed cumulative snapshot so each payload can
+        // report both monotonic totals and the delta since the previous ACK.
         let mut pending: Option<PendingHeartbeat> = None;
+        let mut last_acked_snapshot = ProxyMetricsSnapshot::default();
         let mut next_heartbeat_id: u64 = 1;
         let heartbeat_session_id = format!(
             "{}-{}",
@@ -104,15 +102,17 @@ pub fn spawn(
                     let pending_entry = if let Some(entry) = pending {
                         entry
                     } else {
-                        let snap = collect_snapshot(&server);
+                        let cumulative = server.metrics.snapshot();
                         let id = next_heartbeat_id;
                         next_heartbeat_id = next_heartbeat_id.wrapping_add(1);
                         if next_heartbeat_id == 0 {
                             next_heartbeat_id = 1;
                         }
+                        let window = cumulative.delta_since(last_acked_snapshot);
                         let entry = PendingHeartbeat {
                             heartbeat_id: id,
-                            snapshot: snap,
+                            snapshot: HeartbeatSnapshot { cumulative, window },
+                            cumulative,
                             sent_at: None,
                         };
                         pending = Some(entry);
@@ -128,9 +128,6 @@ pub fn spawn(
                     ).await;
                     let frame = Frame::control(MsgType::HeartbeatData, payload);
                     if frame_tx.send(frame).await.is_err() {
-                        if let Some(entry) = pending.take() {
-                            restore_snapshot(&server, entry.snapshot);
-                        }
                         break; // Writer closed
                     }
                     server.tunnel_metrics.record_heartbeat_sent();
@@ -165,6 +162,7 @@ pub fn spawn(
                                     if let Some(sent_at) = entry.sent_at {
                                         server.tunnel_metrics.record_heartbeat_ack(sent_at.elapsed());
                                     }
+                                    last_acked_snapshot = entry.cumulative;
                                     pending = None;
                                 }
                             }
@@ -175,9 +173,6 @@ pub fn spawn(
                 }
                 _ = shutdown.changed() => {
                     debug!("heartbeat task shutting down");
-                    if let Some(entry) = pending.take() {
-                        restore_snapshot(&server, entry.snapshot);
-                    }
                     break;
                 }
             }
@@ -185,49 +180,6 @@ pub fn spawn(
     });
 
     HeartbeatHandle { ack_tx }
-}
-
-fn collect_snapshot(server: &ServerContext) -> HeartbeatSnapshot {
-    HeartbeatSnapshot {
-        requests: server.metrics.total_requests.swap(0, Ordering::AcqRel),
-        latency_ns: server.metrics.total_latency_ns.swap(0, Ordering::AcqRel),
-        failed: server.metrics.failed_requests.swap(0, Ordering::AcqRel),
-        dns_failures: server.metrics.dns_failures.swap(0, Ordering::AcqRel),
-        stream_errors: server.metrics.stream_errors.swap(0, Ordering::AcqRel),
-    }
-}
-
-fn restore_snapshot(server: &ServerContext, snap: HeartbeatSnapshot) {
-    if snap.requests > 0 {
-        server
-            .metrics
-            .total_requests
-            .fetch_add(snap.requests, Ordering::Release);
-    }
-    if snap.latency_ns > 0 {
-        server
-            .metrics
-            .total_latency_ns
-            .fetch_add(snap.latency_ns, Ordering::Release);
-    }
-    if snap.failed > 0 {
-        server
-            .metrics
-            .failed_requests
-            .fetch_add(snap.failed, Ordering::Release);
-    }
-    if snap.dns_failures > 0 {
-        server
-            .metrics
-            .dns_failures
-            .fetch_add(snap.dns_failures, Ordering::Release);
-    }
-    if snap.stream_errors > 0 {
-        server
-            .metrics
-            .stream_errors
-            .fetch_add(snap.stream_errors, Ordering::Release);
-    }
 }
 
 async fn build_heartbeat_payload(
@@ -242,12 +194,26 @@ async fn build_heartbeat_payload(
     let recent_errors = server.tunnel_metrics.recent_errors(8);
     let resource_usage = state.resource_monitor.snapshot();
 
-    let avg_latency_ms = if snapshot.requests > 0 {
-        Some(snapshot.latency_ns as f64 / snapshot.requests as f64 / 1_000_000.0)
-    } else {
-        None
-    };
-
+    let cumulative = snapshot.cumulative;
+    let window = snapshot.window;
+    let cumulative_metrics = serde_json::json!({
+        "total_requests": cumulative.total_requests,
+        "total_latency_ns": cumulative.total_latency_ns,
+        "avg_latency_ms": cumulative.average_latency_ms(),
+        "failed_requests": cumulative.failed_requests,
+        "dns_failures": cumulative.dns_failures,
+        "stream_errors": cumulative.stream_errors,
+        "slow_requests": cumulative.slow_requests,
+    });
+    let window_metrics = serde_json::json!({
+        "total_requests": window.total_requests,
+        "total_latency_ns": window.total_latency_ns,
+        "avg_latency_ms": window.average_latency_ms(),
+        "failed_requests": window.failed_requests,
+        "dns_failures": window.dns_failures,
+        "stream_errors": window.stream_errors,
+        "slow_requests": window.slow_requests,
+    });
     let local_admission = state.stream_concurrency_snapshot().map(|snapshot| {
         serde_json::json!({
             "limit": snapshot.limit,
@@ -284,11 +250,23 @@ async fn build_heartbeat_payload(
         "heartbeat_id": heartbeat_id,
         "heartbeat_interval": server.dynamic.load().heartbeat_interval,
         "active_connections": server.active_connections.load(Ordering::Acquire),
-        "total_requests": snapshot.requests,
-        "avg_latency_ms": avg_latency_ms,
-        "failed_requests": snapshot.failed,
-        "dns_failures": snapshot.dns_failures,
-        "stream_errors": snapshot.stream_errors,
+        "total_requests": cumulative.total_requests,
+        "avg_latency_ms": cumulative.average_latency_ms(),
+        "failed_requests": cumulative.failed_requests,
+        "dns_failures": cumulative.dns_failures,
+        "stream_errors": cumulative.stream_errors,
+        "slow_requests": cumulative.slow_requests,
+        "window_total_requests": window.total_requests,
+        "window_total_latency_ns": window.total_latency_ns,
+        "window_avg_latency_ms": window.average_latency_ms(),
+        "window_failed_requests": window.failed_requests,
+        "window_dns_failures": window.dns_failures,
+        "window_stream_errors": window.stream_errors,
+        "window_slow_requests": window.slow_requests,
+        "proxy_metrics": {
+            "cumulative": cumulative_metrics,
+            "window": window_metrics,
+        },
         "proxy_metadata": {
             "version": CURRENT_VERSION,
             "admission": admission,

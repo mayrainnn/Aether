@@ -6,7 +6,10 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use aether_runtime::{AdmissionPermit, ConcurrencyError, ConcurrencyGate, ConcurrencySnapshot};
+use aether_runtime::{
+    service_up_sample, AdmissionPermit, ConcurrencyError, ConcurrencyGate, ConcurrencySnapshot,
+    MetricKind, MetricLabel, MetricSample,
+};
 use aether_runtime_state::{RuntimeSemaphore, RuntimeSemaphoreError, RuntimeSemaphoreSnapshot};
 
 use crate::config::Config;
@@ -59,6 +62,23 @@ pub struct ServerContext {
     pub tunnel_metrics: Arc<TunnelMetrics>,
 }
 
+impl ServerContext {
+    pub fn metric_samples(&self) -> Vec<MetricSample> {
+        let mut samples = self.metrics.to_metric_samples(&self.server_label);
+        samples.extend(self.tunnel_metrics.to_metric_samples(&self.server_label));
+        samples.push(
+            MetricSample::new(
+                "proxy_active_connections",
+                "Current number of active tunneled streams handled by this proxy server context.",
+                MetricKind::Gauge,
+                self.active_connections.load(Ordering::Acquire),
+            )
+            .with_labels(vec![MetricLabel::new("server", self.server_label.clone())]),
+        );
+        samples
+    }
+}
+
 /// Aggregate metrics for reporting to Aether.
 pub struct ProxyMetrics {
     pub total_requests: AtomicU64,
@@ -68,6 +88,43 @@ pub struct ProxyMetrics {
     pub failed_requests: AtomicU64,
     pub dns_failures: AtomicU64,
     pub stream_errors: AtomicU64,
+    pub slow_requests: AtomicU64,
+}
+
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+pub struct ProxyMetricsSnapshot {
+    pub total_requests: u64,
+    pub total_latency_ns: u64,
+    pub failed_requests: u64,
+    pub dns_failures: u64,
+    pub stream_errors: u64,
+    pub slow_requests: u64,
+}
+
+impl ProxyMetricsSnapshot {
+    pub fn average_latency_ns(self) -> Option<u64> {
+        self.total_latency_ns.checked_div(self.total_requests)
+    }
+
+    pub fn average_latency_ms(self) -> Option<f64> {
+        self.average_latency_ns()
+            .map(|value| value as f64 / 1_000_000.0)
+    }
+
+    pub fn delta_since(self, baseline: Self) -> Self {
+        Self {
+            total_requests: self.total_requests.saturating_sub(baseline.total_requests),
+            total_latency_ns: self
+                .total_latency_ns
+                .saturating_sub(baseline.total_latency_ns),
+            failed_requests: self
+                .failed_requests
+                .saturating_sub(baseline.failed_requests),
+            dns_failures: self.dns_failures.saturating_sub(baseline.dns_failures),
+            stream_errors: self.stream_errors.saturating_sub(baseline.stream_errors),
+            slow_requests: self.slow_requests.saturating_sub(baseline.slow_requests),
+        }
+    }
 }
 
 impl ProxyMetrics {
@@ -78,6 +135,7 @@ impl ProxyMetrics {
             failed_requests: AtomicU64::new(0),
             dns_failures: AtomicU64::new(0),
             stream_errors: AtomicU64::new(0),
+            slow_requests: AtomicU64::new(0),
         }
     }
 
@@ -87,6 +145,77 @@ impl ProxyMetrics {
         let nanos = u64::try_from(connect_elapsed.as_nanos()).unwrap_or(u64::MAX);
         self.total_requests.fetch_add(1, Ordering::Release);
         self.total_latency_ns.fetch_add(nanos, Ordering::Release);
+    }
+
+    pub fn record_slow_request(&self) {
+        self.slow_requests.fetch_add(1, Ordering::Release);
+    }
+
+    pub fn snapshot(&self) -> ProxyMetricsSnapshot {
+        ProxyMetricsSnapshot {
+            total_requests: self.total_requests.load(Ordering::Acquire),
+            total_latency_ns: self.total_latency_ns.load(Ordering::Acquire),
+            failed_requests: self.failed_requests.load(Ordering::Acquire),
+            dns_failures: self.dns_failures.load(Ordering::Acquire),
+            stream_errors: self.stream_errors.load(Ordering::Acquire),
+            slow_requests: self.slow_requests.load(Ordering::Acquire),
+        }
+    }
+
+    pub fn to_metric_samples(&self, server_label: &str) -> Vec<MetricSample> {
+        let snapshot = self.snapshot();
+        let labels = vec![MetricLabel::new("server", server_label)];
+        vec![
+            MetricSample::new(
+                "proxy_requests_total",
+                "Total number of tunneled upstream requests completed by the proxy.",
+                MetricKind::Counter,
+                snapshot.total_requests,
+            )
+            .with_labels(labels.clone()),
+            MetricSample::new(
+                "proxy_request_latency_total_ns",
+                "Cumulative proxy request latency in nanoseconds through upstream response headers.",
+                MetricKind::Counter,
+                snapshot.total_latency_ns,
+            )
+            .with_labels(labels.clone()),
+            MetricSample::new(
+                "proxy_request_latency_avg_ns",
+                "Average proxy request latency in nanoseconds through upstream response headers.",
+                MetricKind::Gauge,
+                snapshot.average_latency_ns().unwrap_or(0),
+            )
+            .with_labels(labels.clone()),
+            MetricSample::new(
+                "proxy_failed_requests_total",
+                "Total number of tunneled upstream requests that failed before response headers.",
+                MetricKind::Counter,
+                snapshot.failed_requests,
+            )
+            .with_labels(labels.clone()),
+            MetricSample::new(
+                "proxy_dns_failures_total",
+                "Total number of tunneled upstream requests rejected or failed during target validation or DNS.",
+                MetricKind::Counter,
+                snapshot.dns_failures,
+            )
+            .with_labels(labels.clone()),
+            MetricSample::new(
+                "proxy_stream_errors_total",
+                "Total number of tunneled response body stream errors.",
+                MetricKind::Counter,
+                snapshot.stream_errors,
+            )
+            .with_labels(labels.clone()),
+            MetricSample::new(
+                "proxy_slow_requests_total",
+                "Total number of tunneled requests crossing the proxy slow-request threshold.",
+                MetricKind::Counter,
+                snapshot.slow_requests,
+            )
+            .with_labels(labels),
+        ]
     }
 }
 
@@ -106,7 +235,7 @@ pub struct TunnelErrorEvent {
     pub operator_action: String,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
 pub struct TunnelMetricsSnapshot {
     pub connect_attempts: u64,
     pub connect_successes: u64,
@@ -298,6 +427,104 @@ impl TunnelMetrics {
             error_events_total: self.error_events_total.load(Ordering::Acquire),
         }
     }
+
+    pub fn to_metric_samples(&self, server_label: &str) -> Vec<MetricSample> {
+        let snapshot = self.snapshot();
+        let labels = vec![MetricLabel::new("server", server_label)];
+        vec![
+            MetricSample::new(
+                "proxy_tunnel_connect_attempts_total",
+                "Total number of WebSocket tunnel connection attempts.",
+                MetricKind::Counter,
+                snapshot.connect_attempts,
+            )
+            .with_labels(labels.clone()),
+            MetricSample::new(
+                "proxy_tunnel_connect_successes_total",
+                "Total number of successful WebSocket tunnel connections.",
+                MetricKind::Counter,
+                snapshot.connect_successes,
+            )
+            .with_labels(labels.clone()),
+            MetricSample::new(
+                "proxy_tunnel_connect_errors_total",
+                "Total number of WebSocket tunnel connection errors.",
+                MetricKind::Counter,
+                snapshot.connect_errors,
+            )
+            .with_labels(labels.clone()),
+            MetricSample::new(
+                "proxy_tunnel_disconnects_total",
+                "Total number of WebSocket tunnel disconnects.",
+                MetricKind::Counter,
+                snapshot.disconnects,
+            )
+            .with_labels(labels.clone()),
+            MetricSample::new(
+                "proxy_tunnel_heartbeat_sent_total",
+                "Total number of tunnel heartbeats sent.",
+                MetricKind::Counter,
+                snapshot.heartbeat_sent,
+            )
+            .with_labels(labels.clone()),
+            MetricSample::new(
+                "proxy_tunnel_heartbeat_ack_total",
+                "Total number of tunnel heartbeat acknowledgements received.",
+                MetricKind::Counter,
+                snapshot.heartbeat_ack,
+            )
+            .with_labels(labels.clone()),
+            MetricSample::new(
+                "proxy_tunnel_heartbeat_rtt_last_ms",
+                "Last observed tunnel heartbeat round-trip time in milliseconds.",
+                MetricKind::Gauge,
+                snapshot.heartbeat_rtt_last_ms,
+            )
+            .with_labels(labels.clone()),
+            MetricSample::new(
+                "proxy_tunnel_heartbeat_rtt_avg_ms",
+                "Average observed tunnel heartbeat round-trip time in milliseconds.",
+                MetricKind::Gauge,
+                snapshot.heartbeat_rtt_avg_ms().unwrap_or(0.0) as u64,
+            )
+            .with_labels(labels.clone()),
+            MetricSample::new(
+                "proxy_tunnel_ws_in_frames_total",
+                "Total number of WebSocket frames received by the proxy tunnel.",
+                MetricKind::Counter,
+                snapshot.ws_in_frames,
+            )
+            .with_labels(labels.clone()),
+            MetricSample::new(
+                "proxy_tunnel_ws_in_bytes_total",
+                "Total number of WebSocket bytes received by the proxy tunnel.",
+                MetricKind::Counter,
+                snapshot.ws_in_bytes,
+            )
+            .with_labels(labels.clone()),
+            MetricSample::new(
+                "proxy_tunnel_ws_out_frames_total",
+                "Total number of WebSocket frames sent by the proxy tunnel.",
+                MetricKind::Counter,
+                snapshot.ws_out_frames,
+            )
+            .with_labels(labels.clone()),
+            MetricSample::new(
+                "proxy_tunnel_ws_out_bytes_total",
+                "Total number of WebSocket bytes sent by the proxy tunnel.",
+                MetricKind::Counter,
+                snapshot.ws_out_bytes,
+            )
+            .with_labels(labels.clone()),
+            MetricSample::new(
+                "proxy_tunnel_error_events_total",
+                "Total number of classified tunnel error events recorded by the proxy.",
+                MetricKind::Counter,
+                snapshot.error_events_total,
+            )
+            .with_labels(labels),
+        ]
+    }
 }
 
 fn now_unix_secs() -> u64 {
@@ -425,6 +652,30 @@ pub enum ProxyAdmissionError {
 }
 
 impl AppState {
+    pub async fn metric_samples(&self) -> Vec<MetricSample> {
+        let mut samples = vec![service_up_sample("aether-proxy")];
+        if let Some(snapshot) = self.stream_concurrency_snapshot() {
+            samples.extend(snapshot.to_metric_samples("proxy_streams"));
+        }
+        if let Some(gate) = self.distributed_stream_gate.as_ref() {
+            match gate.snapshot().await {
+                Ok(snapshot) => {
+                    samples.extend(snapshot.to_metric_samples("proxy_streams_distributed"));
+                }
+                Err(_) => samples.push(
+                    MetricSample::new(
+                        "concurrency_unavailable",
+                        "Whether the distributed concurrency gate is currently unavailable.",
+                        MetricKind::Gauge,
+                        1,
+                    )
+                    .with_labels(vec![MetricLabel::new("gate", "proxy_streams_distributed")]),
+                ),
+            }
+        }
+        samples
+    }
+
     pub fn with_stream_concurrency_gate(mut self, gate: Arc<ConcurrencyGate>) -> Self {
         self.stream_gate = Some(gate);
         self

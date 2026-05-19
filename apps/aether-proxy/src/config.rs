@@ -1,4 +1,5 @@
 use std::fmt;
+use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Duration;
 
@@ -372,6 +373,11 @@ pub struct Config {
     )]
     pub aether_retry_max_delay_ms: u64,
 
+    /// Optional local diagnostics listener for /health, /metrics, and /stats.
+    /// Bind only to loopback addresses, for example 127.0.0.1:9311.
+    #[arg(long, env = "AETHER_PROXY_DIAGNOSTICS_BIND")]
+    pub diagnostics_bind: Option<SocketAddr>,
+
     /// Maximum concurrent TCP connections (defaults to hardware estimate)
     #[arg(long, env = "AETHER_PROXY_MAX_CONCURRENT_CONNECTIONS")]
     pub max_concurrent_connections: Option<u64>,
@@ -478,6 +484,14 @@ pub struct Config {
         default_value = DEFAULT_REDIRECT_REPLAY_BUDGET_HUMAN
     )]
     pub redirect_replay_budget_bytes: usize,
+
+    /// Emit detailed x-proxy-timing headers on tunneled upstream responses.
+    #[arg(
+        long,
+        env = "AETHER_PROXY_EMIT_PROXY_TIMING_HEADER",
+        default_value_t = true
+    )]
+    pub emit_proxy_timing_header: bool,
 
     /// Log level (trace, debug, info, warn, error)
     #[arg(long, env = "AETHER_PROXY_LOG_LEVEL", default_value = "info")]
@@ -686,6 +700,11 @@ impl Config {
         if self.aether_retry_max_attempts == 0 {
             anyhow::bail!("aether_retry_max_attempts must be >= 1");
         }
+        if let Some(addr) = self.diagnostics_bind {
+            if !addr.ip().is_loopback() {
+                anyhow::bail!("diagnostics_bind must use a loopback address");
+            }
+        }
         if self.upstream_connect_timeout_secs == 0 {
             anyhow::bail!("upstream_connect_timeout_secs must be > 0");
         }
@@ -886,6 +905,8 @@ pub struct ConfigFile {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub aether_retry_max_delay_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostics_bind: Option<SocketAddr>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_concurrent_connections: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dns_cache_ttl_secs: Option<u64>,
@@ -909,6 +930,8 @@ pub struct ConfigFile {
         deserialize_with = "deserialize_optional_byte_size"
     )]
     pub redirect_replay_budget_bytes: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub emit_proxy_timing_header: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log_level: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1048,6 +1071,7 @@ impl ConfigFile {
             "AETHER_PROXY_AETHER_RETRY_MAX_DELAY_MS",
             self.aether_retry_max_delay_ms
         );
+        set!("AETHER_PROXY_DIAGNOSTICS_BIND", self.diagnostics_bind);
         set!(
             "AETHER_PROXY_MAX_CONCURRENT_CONNECTIONS",
             self.max_concurrent_connections
@@ -1078,6 +1102,10 @@ impl ConfigFile {
         set!(
             "AETHER_PROXY_REDIRECT_REPLAY_BUDGET_BYTES",
             self.redirect_replay_budget_bytes
+        );
+        set!(
+            "AETHER_PROXY_EMIT_PROXY_TIMING_HEADER",
+            self.emit_proxy_timing_header
         );
         set!("AETHER_PROXY_LOG_LEVEL", self.log_level);
         set!(

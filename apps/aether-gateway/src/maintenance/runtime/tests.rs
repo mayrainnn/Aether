@@ -475,6 +475,7 @@ async fn proxy_upgrade_rollout_active_probe_advances_next_wave_after_version_con
             proxy_tx,
             proxy_close_tx,
             16,
+            2,
         )));
 
     let responder_hub = tunnel_state.hub.clone();

@@ -5097,6 +5097,7 @@ mod tests {
             proxy_tx,
             proxy_close_tx,
             16,
+            2,
         )));
 
         let plan = ExecutionPlan {
@@ -5226,6 +5227,7 @@ mod tests {
             proxy_tx,
             proxy_close_tx,
             16,
+            2,
         )));
 
         let plan = ExecutionPlan {

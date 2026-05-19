@@ -343,7 +343,7 @@ fn stream_frame_dispatch_timeout() -> Duration {
 
     #[cfg(not(test))]
     {
-        Duration::from_secs(5)
+        Duration::from_millis(500)
     }
 }
 

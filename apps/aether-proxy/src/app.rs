@@ -6,9 +6,14 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use aether_http::{jittered_delay_for_retry, HttpRetryConfig};
-use aether_runtime::{init_reloadable_service_tracing, wait_for_shutdown_signal, ConcurrencyGate};
+use aether_runtime::{
+    init_reloadable_service_tracing, prometheus_response, wait_for_shutdown_signal, ConcurrencyGate,
+};
 use aether_runtime_state::{RedisClientConfig, RuntimeSemaphoreConfig, RuntimeState};
 use arc_swap::ArcSwap;
+use axum::extract::State as AxumState;
+use axum::routing::get;
+use axum::{Json, Router};
 use tokio::sync::{watch, Mutex};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
@@ -24,10 +29,14 @@ use crate::{hardware, target_filter, tunnel};
 type TaskHandles = Arc<Mutex<Vec<JoinHandle<()>>>>;
 
 const AUTO_STREAM_LIMIT_MIN: usize = 16;
-const AUTO_STREAM_LIMIT_MAX: usize = 512;
-const AUTO_STREAM_LIMIT_PER_CPU: u64 = 64;
+// Keep the automatic fallback large enough for real load while still
+// protecting tiny nodes from overcommitting by default.
+const AUTO_STREAM_LIMIT_MAX: usize = 2048;
+// Bias toward throughput: let a 16-core class box auto-land near 2k streams,
+// then rely on FD / memory estimates and the hard cap to keep smaller hosts safe.
+const AUTO_STREAM_LIMIT_PER_CPU: u64 = 128;
 const AUTO_STREAM_LIMIT_MEMORY_MB_PER_STREAM: u64 = 4;
-const AUTO_STREAM_LIMIT_ESTIMATED_DIVISOR: u64 = 40;
+const AUTO_STREAM_LIMIT_ESTIMATED_DIVISOR: u64 = 12;
 
 #[derive(Debug, Clone, Copy)]
 struct TunnelPoolPolicy {
@@ -73,6 +82,12 @@ struct ManagedTunnel {
     drain_tx: watch::Sender<bool>,
     handle: JoinHandle<()>,
     draining: bool,
+}
+
+#[derive(Clone)]
+struct DiagnosticsState {
+    state: Arc<AppState>,
+    server_contexts: Arc<Mutex<Vec<Arc<ServerContext>>>>,
 }
 
 /// Run the full application lifecycle after config has been parsed.
@@ -275,6 +290,20 @@ pub async fn run(mut config: Config, servers: Vec<ServerEntry>) -> anyhow::Resul
     // Shutdown signal channel
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
+    let diagnostics_handle = if let Some(bind_addr) = state.config.diagnostics_bind {
+        let listener = tokio::net::TcpListener::bind(bind_addr).await?;
+        Some(spawn_diagnostics_server(
+            listener,
+            DiagnosticsState {
+                state: Arc::clone(&state),
+                server_contexts: Arc::clone(&server_contexts),
+            },
+            shutdown_rx.clone(),
+        )?)
+    } else {
+        None
+    };
+
     info!(
         active_servers = server_contexts.lock().await.len(),
         "running in tunnel mode"
@@ -314,6 +343,9 @@ pub async fn run(mut config: Config, servers: Vec<ServerEntry>) -> anyhow::Resul
     wait_for_shutdown().await;
     info!("shutdown signal received, cleaning up...");
     let _ = shutdown_tx.send(true);
+    if let Some(handle) = diagnostics_handle {
+        let _ = handle.await;
+    }
     await_all_handles(&retry_handles).await;
 
     // Graceful unregister from all servers (including retry-registered ones)
@@ -333,6 +365,160 @@ pub async fn run(mut config: Config, servers: Vec<ServerEntry>) -> anyhow::Resul
 
     info!("aether-proxy stopped");
     Ok(())
+}
+
+fn spawn_diagnostics_server(
+    listener: tokio::net::TcpListener,
+    diagnostics_state: DiagnosticsState,
+    mut shutdown: watch::Receiver<bool>,
+) -> std::io::Result<JoinHandle<()>> {
+    let bind_addr = listener.local_addr()?;
+    let app = Router::new()
+        .route("/health", get(diagnostics_health))
+        .route("/metrics", get(diagnostics_metrics))
+        .route("/stats", get(diagnostics_stats))
+        .with_state(diagnostics_state);
+
+    info!(bind = %bind_addr, "proxy diagnostics server listening");
+    Ok(tokio::spawn(async move {
+        let graceful_shutdown = async move {
+            while !*shutdown.borrow() {
+                if shutdown.changed().await.is_err() {
+                    break;
+                }
+            }
+        };
+        if let Err(error) = axum::serve(listener, app)
+            .with_graceful_shutdown(graceful_shutdown)
+            .await
+        {
+            error!(error = %error, "proxy diagnostics server exited with error");
+        }
+    }))
+}
+
+async fn diagnostics_health(
+    AxumState(diagnostics): AxumState<DiagnosticsState>,
+) -> Json<serde_json::Value> {
+    let servers = diagnostics.server_contexts.lock().await.clone();
+    let active_connections = servers
+        .iter()
+        .map(|server| server.active_connections.load(Ordering::Acquire))
+        .sum::<u64>();
+    let stream_concurrency = diagnostics
+        .state
+        .stream_concurrency_snapshot()
+        .map(concurrency_snapshot_json);
+    let distributed_stream_concurrency =
+        distributed_stream_concurrency_json(&diagnostics.state).await;
+
+    Json(serde_json::json!({
+        "status": "ok",
+        "service": "aether-proxy",
+        "version": env!("CARGO_PKG_VERSION"),
+        "protocol_version": aether_contracts::tunnel::CURRENT_TUNNEL_PROTOCOL_VERSION,
+        "server_count": servers.len(),
+        "active_connections": active_connections,
+        "stream_concurrency": stream_concurrency,
+        "distributed_stream_concurrency": distributed_stream_concurrency,
+    }))
+}
+
+async fn diagnostics_metrics(
+    AxumState(diagnostics): AxumState<DiagnosticsState>,
+) -> impl axum::response::IntoResponse {
+    let mut samples = diagnostics.state.metric_samples().await;
+    let servers = diagnostics.server_contexts.lock().await.clone();
+    for server in servers {
+        samples.extend(server.metric_samples());
+    }
+    prometheus_response(&samples)
+}
+
+async fn diagnostics_stats(
+    AxumState(diagnostics): AxumState<DiagnosticsState>,
+) -> Json<serde_json::Value> {
+    let servers = diagnostics.server_contexts.lock().await.clone();
+    let active_connections = servers
+        .iter()
+        .map(|server| server.active_connections.load(Ordering::Acquire))
+        .sum::<u64>();
+    let server_stats = servers
+        .iter()
+        .map(|server| diagnostics_server_stats(server))
+        .collect::<Vec<_>>();
+    let stream_concurrency = diagnostics
+        .state
+        .stream_concurrency_snapshot()
+        .map(concurrency_snapshot_json);
+    let distributed_stream_concurrency =
+        distributed_stream_concurrency_json(&diagnostics.state).await;
+
+    Json(serde_json::json!({
+        "status": "ok",
+        "service": "aether-proxy",
+        "version": env!("CARGO_PKG_VERSION"),
+        "protocol_version": aether_contracts::tunnel::CURRENT_TUNNEL_PROTOCOL_VERSION,
+        "capacities": {
+            "max_concurrent_connections": diagnostics.state.config.max_concurrent_connections,
+            "max_in_flight_streams": diagnostics.state.config.max_in_flight_streams,
+            "distributed_stream_limit": diagnostics.state.config.distributed_stream_limit,
+            "tunnel_max_streams": diagnostics.state.config.tunnel_max_streams,
+            "tunnel_connections": diagnostics.state.config.tunnel_connections,
+            "tunnel_connections_max": diagnostics.state.config.tunnel_connections_max,
+            "diagnostics_bind": diagnostics.state.config.diagnostics_bind.map(|addr| addr.to_string()),
+        },
+        "server_count": servers.len(),
+        "active_connections": active_connections,
+        "stream_concurrency": stream_concurrency,
+        "distributed_stream_concurrency": distributed_stream_concurrency,
+        "resource_usage": diagnostics.state.resource_monitor.snapshot(),
+        "servers": server_stats,
+    }))
+}
+
+fn diagnostics_server_stats(server: &ServerContext) -> serde_json::Value {
+    let node_id = server.node_id.read().unwrap().clone();
+    let dynamic = server.dynamic.load();
+    serde_json::json!({
+        "server": server.server_label.clone(),
+        "node_id": node_id,
+        "node_name": dynamic.node_name.clone(),
+        "active_connections": server.active_connections.load(Ordering::Acquire),
+        "proxy_metrics": server.metrics.snapshot(),
+        "tunnel_metrics": server.tunnel_metrics.snapshot(),
+        "recent_tunnel_errors": server.tunnel_metrics.recent_errors(16),
+    })
+}
+
+fn concurrency_snapshot_json(snapshot: aether_runtime::ConcurrencySnapshot) -> serde_json::Value {
+    serde_json::json!({
+        "limit": snapshot.limit,
+        "in_flight": snapshot.in_flight,
+        "available_permits": snapshot.available_permits,
+        "high_watermark": snapshot.high_watermark,
+        "rejected_total": snapshot.rejected,
+    })
+}
+
+fn runtime_semaphore_snapshot_json(
+    snapshot: aether_runtime_state::RuntimeSemaphoreSnapshot,
+) -> serde_json::Value {
+    serde_json::json!({
+        "limit": snapshot.limit,
+        "in_flight": snapshot.in_flight,
+        "available_permits": snapshot.available_permits,
+        "high_watermark": snapshot.high_watermark,
+        "rejected_total": snapshot.rejected,
+    })
+}
+
+async fn distributed_stream_concurrency_json(state: &AppState) -> Option<serde_json::Value> {
+    match state.distributed_stream_concurrency_snapshot().await {
+        Ok(Some(snapshot)) => Some(runtime_semaphore_snapshot_json(snapshot)),
+        Ok(None) => None,
+        Err(error) => Some(serde_json::json!({ "error": error.to_string() })),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -771,7 +957,7 @@ mod tests {
 
     use axum::extract::State as AxumState;
     use axum::http::StatusCode as AxumStatusCode;
-    use axum::routing::post;
+    use axum::routing::{get, post};
     use axum::Router;
     use serde_json::json;
 
@@ -845,6 +1031,72 @@ mod tests {
         gateway_handle.abort();
     }
 
+    #[tokio::test]
+    async fn diagnostics_routes_report_health_metrics_and_stats() {
+        ensure_rustls_provider();
+
+        let state = sample_state(sample_config("https://aether.example.com"));
+        let server = sample_registered_server(&state, "server", "node-diagnostics");
+        let server_contexts = Arc::new(Mutex::new(vec![server]));
+        let router = Router::new()
+            .route("/health", get(diagnostics_health))
+            .route("/metrics", get(diagnostics_metrics))
+            .route("/stats", get(diagnostics_stats))
+            .with_state(DiagnosticsState {
+                state: Arc::clone(&state),
+                server_contexts,
+            });
+        let port = reserve_local_port().expect("diagnostics port should reserve");
+        let handle = spawn_router_on_port(port, router)
+            .await
+            .expect("diagnostics test server should start");
+        let client = reqwest::Client::new();
+        let base_url = format!("http://127.0.0.1:{port}");
+
+        let health: serde_json::Value = client
+            .get(format!("{base_url}/health"))
+            .send()
+            .await
+            .expect("health request should send")
+            .error_for_status()
+            .expect("health response should be success")
+            .json()
+            .await
+            .expect("health response should parse");
+        assert_eq!(health["status"], "ok");
+        assert_eq!(health["service"], "aether-proxy");
+        assert_eq!(health["server_count"], 1);
+
+        let metrics = client
+            .get(format!("{base_url}/metrics"))
+            .send()
+            .await
+            .expect("metrics request should send")
+            .error_for_status()
+            .expect("metrics response should be success")
+            .text()
+            .await
+            .expect("metrics response should read");
+        assert!(metrics.contains("service_up{service=\"aether-proxy\"} 1"));
+        assert!(metrics.contains("proxy_active_connections{server=\"server\"} 0"));
+
+        let stats: serde_json::Value = client
+            .get(format!("{base_url}/stats"))
+            .send()
+            .await
+            .expect("stats request should send")
+            .error_for_status()
+            .expect("stats response should be success")
+            .json()
+            .await
+            .expect("stats response should parse");
+        assert_eq!(stats["status"], "ok");
+        assert_eq!(stats["protocol_version"], 2);
+        assert_eq!(stats["servers"][0]["node_id"], "node-diagnostics");
+
+        handle.abort();
+    }
+
     #[test]
     fn desired_tunnel_connections_expands_when_load_crosses_high_water() {
         let policy = TunnelPoolPolicy {
@@ -890,6 +1142,19 @@ mod tests {
         };
 
         assert_eq!(auto_max_in_flight_streams(&hw), 45);
+    }
+
+    #[test]
+    fn auto_stream_limit_scales_to_high_band_on_mid_size_nodes() {
+        let hw = HardwareInfo {
+            cpu_cores: 16,
+            total_memory_mb: 65_536,
+            os_info: "test".to_string(),
+            fd_limit: 1_048_576,
+            estimated_max_concurrency: 500_000,
+        };
+
+        assert_eq!(auto_max_in_flight_streams(&hw), AUTO_STREAM_LIMIT_MAX);
     }
 
     #[test]
@@ -1015,6 +1280,31 @@ mod tests {
         })
     }
 
+    fn sample_registered_server(
+        state: &Arc<ProxyAppState>,
+        label: &str,
+        node_id: &str,
+    ) -> Arc<ServerContext> {
+        let entry = ServerEntry {
+            aether_url: state.config.aether_url.clone(),
+            management_token: state.config.management_token.clone(),
+            node_name: Some(state.config.node_name.clone()),
+        };
+        let client = Arc::new(AetherClient::new(
+            &state.config,
+            &state.config.aether_url,
+            &state.config.management_token,
+        ));
+        build_server_context(
+            &state.config,
+            label,
+            &entry,
+            client,
+            &state.config.node_name,
+            node_id.to_string(),
+        )
+    }
+
     fn sample_config(aether_url: &str) -> Config {
         Config {
             aether_url: aether_url.to_string(),
@@ -1036,6 +1326,7 @@ mod tests {
             aether_retry_max_attempts: 1,
             aether_retry_base_delay_ms: 50,
             aether_retry_max_delay_ms: 100,
+            diagnostics_bind: None,
             max_concurrent_connections: None,
             max_in_flight_streams: None,
             distributed_stream_limit: None,
@@ -1053,6 +1344,7 @@ mod tests {
             upstream_tcp_nodelay: true,
             upstream_proxy_url: None,
             redirect_replay_budget_bytes: DEFAULT_REDIRECT_REPLAY_BUDGET_BYTES,
+            emit_proxy_timing_header: true,
             log_level: "info".to_string(),
             log_destination: ProxyLogDestinationArg::Stdout,
             log_dir: None,

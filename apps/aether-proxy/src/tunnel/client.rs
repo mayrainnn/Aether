@@ -12,6 +12,7 @@ use tracing::{debug, info, warn};
 
 use crate::egress_proxy::{connect_target_via_proxy, ProxyConnectOptions, UpstreamProxyConfig};
 use crate::state::{AppState, ServerContext};
+use aether_contracts::tunnel::{CURRENT_TUNNEL_PROTOCOL_VERSION, TUNNEL_PROTOCOL_VERSION_HEADER};
 
 use super::{dispatcher, heartbeat, writer};
 
@@ -43,6 +44,10 @@ pub async fn connect_and_run(
     headers.insert(
         "Authorization",
         http::HeaderValue::from_str(&format!("Bearer {}", server.management_token))?,
+    );
+    headers.insert(
+        TUNNEL_PROTOCOL_VERSION_HEADER,
+        http::HeaderValue::from_str(&CURRENT_TUNNEL_PROTOCOL_VERSION.to_string())?,
     );
     let node_id = server.node_id.read().unwrap().clone();
     headers.insert("X-Node-Id", http::HeaderValue::from_str(&node_id)?);
