@@ -1741,9 +1741,9 @@ fn local_execution_runtime_miss_all_candidates_skipped_detail(
         (_, Some(summary), Some(model)) => format!(
             "支持模型 {model} 的候选提供商全部不可用：{summary}（原因代码: all_candidates_skipped）"
         ),
-        (_, Some(summary), None) => format!(
-            "候选提供商全部不可用：{summary}（原因代码: all_candidates_skipped）"
-        ),
+        (_, Some(summary), None) => {
+            format!("候选提供商全部不可用：{summary}（原因代码: all_candidates_skipped）")
+        }
         (count, None, Some(model)) if count > 0 => format!(
             "找到 {count} 个支持模型 {model} 的候选提供商，但都不满足本次{request_mode}请求要求（原因代码: all_candidates_skipped）"
         ),
@@ -1801,6 +1801,7 @@ fn local_execution_runtime_miss_skip_reason_label(reason: &str) -> &str {
         "key_inactive" => "API Key 未启用",
         "key_model_disabled" => "API Key 未允许该模型",
         "mapped_model_missing" => "模型映射缺失",
+        "pool_active_probe_sealed" => "池内账号未进入主动探测热池",
         "pool_cooldown" => "池内账号处于冷却中",
         "pool_cost_limit_reached" => "池内账号成本额度已用尽",
         "pool_group_exhausted" => "池化提供商没有可调度账号",
