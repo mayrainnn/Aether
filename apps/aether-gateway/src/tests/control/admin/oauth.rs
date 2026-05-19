@@ -5695,6 +5695,117 @@ async fn gateway_marks_manual_oauth_refresh_failures_as_invalid_in_pool_payload(
 }
 
 #[tokio::test]
+async fn gateway_auto_removes_manual_oauth_refresh_failure_after_access_token_expired() {
+    let token_server = Router::new().route(
+        "/oauth/token",
+        post(move |_request: Request| async move {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({
+                    "error": {
+                        "message": "Could not validate your refresh token. Please try signing in again.",
+                        "type": "invalid_request_error",
+                        "param": serde_json::Value::Null,
+                        "code": "refresh_token_expired"
+                    }
+                })),
+            )
+        }),
+    );
+
+    let mut provider = sample_provider("provider-codex", "codex", 10).with_transport_fields(
+        true,
+        false,
+        true,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(json!({
+            "pool_advanced": {
+                "enabled": true,
+                "auto_remove_banned_keys": true
+            }
+        })),
+    );
+    provider.provider_type = "codex".to_string();
+    let endpoint = sample_endpoint(
+        "endpoint-codex-cli",
+        "provider-codex",
+        "openai:responses",
+        "https://chatgpt.com/backend-api/codex",
+    );
+    let mut key = sample_key(
+        "key-codex-oauth-refresh-expired",
+        "provider-codex",
+        "openai:responses",
+        "expired-codex-access-token",
+    );
+    key.auth_type = "oauth".to_string();
+    key.expires_at_unix_secs = Some(1);
+    key.encrypted_auth_config = Some(
+        encrypt_python_fernet_plaintext(
+            DEVELOPMENT_ENCRYPTION_KEY,
+            r#"{"provider_type":"codex","refresh_token":"expired-refresh-token","email":"alice@example.com","account_id":"acct-codex-123","plan_type":"plus","expires_at":1}"#,
+        )
+        .expect("auth config ciphertext should build"),
+    );
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![endpoint],
+        vec![key],
+    ));
+    let (token_url, token_handle) = start_server(token_server).await;
+    let oauth_refresh =
+        crate::provider_transport::LocalOAuthRefreshCoordinator::with_adapters_for_tests(vec![
+            Arc::new(
+                crate::provider_transport::oauth_refresh::GenericOAuthRefreshAdapter::default()
+                    .with_token_url_for_tests("codex", format!("{token_url}/oauth/token")),
+            ),
+        ]);
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(
+                    provider_catalog_repository.clone(),
+                )
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            )
+            .with_oauth_refresh_coordinator_for_tests(oauth_refresh),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/provider-oauth/keys/key-codex-oauth-refresh-expired/refresh"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .send()
+        .await
+        .expect("refresh request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["status"], json!("auto_removed"));
+    assert_eq!(payload["message"], json!("已自动删除"));
+
+    let stored_keys = provider_catalog_repository
+        .list_keys_by_ids(&["key-codex-oauth-refresh-expired".to_string()])
+        .await
+        .expect("keys should list");
+    assert!(stored_keys.is_empty());
+
+    gateway_handle.abort();
+    token_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_refreshes_admin_provider_oauth_key_locally_via_execution_runtime_provider_proxy_before_system_proxy(
 ) {
     let execution_plans = Arc::new(Mutex::new(Vec::<ExecutionPlan>::new()));

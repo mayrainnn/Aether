@@ -42,7 +42,6 @@ const AUTO_REMOVABLE_ACCOUNT_STATE_CODES: &[&str] = &[
     "account_disabled",
     "workspace_deactivated",
     "account_forbidden",
-    "oauth_token_invalid",
 ];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -604,7 +603,7 @@ mod tests {
     }
 
     #[test]
-    fn oauth_expired_state_is_auto_removed() {
+    fn oauth_expired_state_is_not_auto_removed() {
         let state = resolve_pool_account_state(
             Some("codex"),
             None,
@@ -613,7 +612,7 @@ mod tests {
 
         assert!(state.blocked);
         assert_eq!(state.code.as_deref(), Some("oauth_token_invalid"));
-        assert!(should_auto_remove_account_state(&state));
+        assert!(!should_auto_remove_account_state(&state));
     }
 
     #[test]

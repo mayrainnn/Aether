@@ -1211,6 +1211,7 @@ async fn perform_pool_quota_probe_for_provider(
         if auto_removed > 0 {
             summary.auto_removed += auto_removed;
             info!(
+                event_name = "auto_removed_hard_banned",
                 provider_id = %provider_short_id,
                 provider_type,
                 auto_removed,

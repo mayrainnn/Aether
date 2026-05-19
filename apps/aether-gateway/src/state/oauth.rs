@@ -289,9 +289,6 @@ fn merge_local_oauth_refresh_failure_reason(
     if current_reason.is_empty() {
         return Some(refresh_reason.to_string());
     }
-    if current_reason.starts_with(OAUTH_EXPIRED_PREFIX) {
-        return Some(current_reason.to_string());
-    }
     if oauth_invalid_reason_is_account_block(Some(current_reason)) {
         return None;
     }
@@ -1157,7 +1154,6 @@ impl AppState {
 
         latest_key.encrypted_api_key = Some(encrypted_api_key);
         latest_key.encrypted_auth_config = encrypted_auth_config;
-        latest_key.is_active = true;
         latest_key.expires_at_unix_secs = entry.expires_at_unix_secs;
         let (oauth_invalid_at_unix_secs, oauth_invalid_reason) =
             local_oauth_refresh_success_invalid_state(&latest_key);
@@ -1717,13 +1713,13 @@ mod tests {
     }
 
     #[test]
-    fn local_refresh_failure_does_not_replace_access_token_expired_marker() {
+    fn local_refresh_failure_replaces_access_token_expired_marker() {
         assert_eq!(
             super::merge_local_oauth_refresh_failure_reason(
                 Some("[OAUTH_EXPIRED] access token invalid"),
                 "[REFRESH_FAILED] Token 续期失败 (401): refresh_token 无效",
             ),
-            Some("[OAUTH_EXPIRED] access token invalid".to_string()),
+            Some("[REFRESH_FAILED] Token 续期失败 (401): refresh_token 无效".to_string()),
         );
     }
 

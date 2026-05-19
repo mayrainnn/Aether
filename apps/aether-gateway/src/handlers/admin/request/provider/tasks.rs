@@ -1,5 +1,7 @@
 use super::*;
-use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogProvider;
+use aether_data_contracts::repository::provider_catalog::{
+    StoredProviderCatalogKey, StoredProviderCatalogProvider,
+};
 use axum::{
     body::Body,
     http,
@@ -262,6 +264,41 @@ impl<'a> AdminAppState<'a> {
             .await?;
 
         Ok(affected)
+    }
+
+    pub(crate) async fn cleanup_provider_catalog_key_if_current<F>(
+        &self,
+        provider: &StoredProviderCatalogProvider,
+        key_id: &str,
+        should_delete: F,
+    ) -> Result<bool, GatewayError>
+    where
+        F: FnOnce(&StoredProviderCatalogKey) -> bool,
+    {
+        let key_ids = [key_id.to_string()];
+        let Some(key) = self
+            .read_provider_catalog_keys_by_ids(&key_ids)
+            .await?
+            .into_iter()
+            .next()
+        else {
+            return Ok(false);
+        };
+        if key.provider_id != provider.id || !should_delete(&key) {
+            return Ok(false);
+        }
+
+        self.clear_admin_provider_pool_cooldown(&provider.id, &key.id)
+            .await;
+        self.reset_admin_provider_pool_cost(&provider.id, &key.id)
+            .await;
+        let deleted = self.delete_provider_catalog_key(&key.id).await?;
+        if deleted {
+            let deleted_key_ids = [key.id.clone()];
+            self.cleanup_deleted_provider_catalog_refs(&provider.id, &[], &deleted_key_ids)
+                .await?;
+        }
+        Ok(deleted)
     }
 
     pub(crate) async fn build_admin_pool_batch_action_response(

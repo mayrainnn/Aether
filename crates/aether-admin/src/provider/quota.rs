@@ -26,6 +26,25 @@ pub fn should_auto_remove_structured_reason(reason: Option<&str>) -> bool {
     ))
 }
 
+pub fn should_auto_remove_oauth_refresh_failed_key(
+    key: &StoredProviderCatalogKey,
+    now_unix_secs: u64,
+) -> bool {
+    if !key.auth_type.trim().eq_ignore_ascii_case("oauth") {
+        return false;
+    }
+    let Some(reason) = key.oauth_invalid_reason.as_deref().map(str::trim) else {
+        return false;
+    };
+    reason
+        .lines()
+        .map(str::trim)
+        .any(|line| line.starts_with(OAUTH_REFRESH_FAILED_PREFIX))
+        && key
+            .expires_at_unix_secs
+            .is_none_or(|value| value == 0 || value <= now_unix_secs)
+}
+
 pub fn normalize_string_id_list(values: Option<Vec<String>>) -> Option<Vec<String>> {
     let mut out = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
@@ -116,7 +135,7 @@ pub fn quota_refresh_success_invalid_state(
         .as_deref()
         .map(str::trim)
         .unwrap_or_default();
-    if current_reason.starts_with(OAUTH_REFRESH_FAILED_PREFIX) {
+    if current_reason.starts_with(OAUTH_ACCOUNT_BLOCK_PREFIX) {
         return (
             key.oauth_invalid_at_unix_secs,
             (!current_reason.is_empty()).then_some(current_reason.to_string()),
@@ -435,8 +454,7 @@ fn codex_merge_invalid_reason(current: &str, candidate_reason: &str) -> String {
         return current.to_string();
     }
     if current.starts_with(OAUTH_EXPIRED_PREFIX)
-        && (candidate_reason.starts_with(OAUTH_REQUEST_FAILED_PREFIX)
-            || candidate_reason.starts_with(OAUTH_REFRESH_FAILED_PREFIX))
+        && candidate_reason.starts_with(OAUTH_REQUEST_FAILED_PREFIX)
     {
         return current.to_string();
     }
@@ -914,8 +932,9 @@ mod tests {
     use super::{
         codex_build_invalid_state, codex_runtime_invalid_reason,
         parse_chatgpt_web_conversation_init_response, parse_codex_wham_usage_response,
-        should_auto_remove_structured_reason, OAUTH_ACCOUNT_BLOCK_PREFIX, OAUTH_EXPIRED_PREFIX,
-        OAUTH_REFRESH_FAILED_PREFIX, OAUTH_REQUEST_FAILED_PREFIX,
+        quota_refresh_success_invalid_state, should_auto_remove_structured_reason,
+        should_auto_remove_oauth_refresh_failed_key, OAUTH_ACCOUNT_BLOCK_PREFIX,
+        OAUTH_EXPIRED_PREFIX, OAUTH_REFRESH_FAILED_PREFIX, OAUTH_REQUEST_FAILED_PREFIX,
     };
     use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
     use serde_json::json;
@@ -944,7 +963,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_invalid_state_keeps_oauth_expired_over_refresh_failure() {
+    fn codex_invalid_state_replaces_oauth_expired_with_refresh_failure() {
         let mut key = StoredProviderCatalogKey::new(
             "key-1".to_string(),
             "provider-1".to_string(),
@@ -964,10 +983,26 @@ mod tests {
                 200,
             ),
             (
-                Some(100),
-                Some(format!("{OAUTH_EXPIRED_PREFIX}session expired"))
+                Some(200),
+                Some(format!("{OAUTH_REFRESH_FAILED_PREFIX}Token 续期失败"))
             )
         );
+    }
+
+    #[test]
+    fn codex_invalid_state_keeps_oauth_expired_over_request_failure() {
+        let mut key = StoredProviderCatalogKey::new(
+            "key-1".to_string(),
+            "provider-1".to_string(),
+            "key-1".to_string(),
+            "oauth".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build");
+        key.oauth_invalid_at_unix_secs = Some(100);
+        key.oauth_invalid_reason = Some(format!("{OAUTH_EXPIRED_PREFIX}session expired"));
+
         assert_eq!(
             codex_build_invalid_state(
                 &key,
@@ -1011,10 +1046,44 @@ mod tests {
     }
 
     #[test]
-    fn auto_remove_structured_reason_removes_oauth_expired_token_invalid() {
-        assert!(should_auto_remove_structured_reason(Some(
+    fn auto_remove_structured_reason_keeps_oauth_expired_token_invalid() {
+        assert!(!should_auto_remove_structured_reason(Some(
             "[OAUTH_EXPIRED] token invalidated"
         )));
+    }
+
+    #[test]
+    fn auto_remove_oauth_refresh_failed_requires_expired_access_token() {
+        let mut key = StoredProviderCatalogKey::new(
+            "key-1".to_string(),
+            "provider-1".to_string(),
+            "key-1".to_string(),
+            "oauth".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build");
+        key.oauth_invalid_reason = Some(format!("{OAUTH_REFRESH_FAILED_PREFIX}Token 续期失败"));
+        key.expires_at_unix_secs = Some(2_000);
+
+        assert!(!should_auto_remove_oauth_refresh_failed_key(&key, 1_000));
+        assert!(should_auto_remove_oauth_refresh_failed_key(&key, 2_000));
+    }
+
+    #[test]
+    fn quota_refresh_success_clears_refresh_failed_marker() {
+        let mut key = StoredProviderCatalogKey::new(
+            "key-1".to_string(),
+            "provider-1".to_string(),
+            "key-1".to_string(),
+            "oauth".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build");
+        key.oauth_invalid_reason = Some("[REFRESH_FAILED] Token 续期失败".to_string());
+
+        assert_eq!(quota_refresh_success_invalid_state(&key), (None, None));
     }
 
     #[test]

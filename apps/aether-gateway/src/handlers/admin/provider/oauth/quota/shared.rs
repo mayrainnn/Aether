@@ -44,12 +44,19 @@ pub(super) fn default_provider_quota_execution_timeouts(
     }
 }
 
-pub(super) fn provider_auto_remove_banned_keys(config: Option<&serde_json::Value>) -> bool {
+pub(crate) fn provider_auto_remove_banned_keys(config: Option<&serde_json::Value>) -> bool {
     admin_provider_quota_pure::provider_auto_remove_banned_keys(config)
 }
 
 pub(super) fn should_auto_remove_structured_reason(reason: Option<&str>) -> bool {
     admin_provider_quota_pure::should_auto_remove_structured_reason(reason)
+}
+
+pub(crate) fn should_auto_remove_oauth_refresh_failed_key(
+    key: &StoredProviderCatalogKey,
+    now_unix_secs: u64,
+) -> bool {
+    admin_provider_quota_pure::should_auto_remove_oauth_refresh_failed_key(key, now_unix_secs)
 }
 
 pub(crate) fn normalize_string_id_list(values: Option<Vec<String>>) -> Option<Vec<String>> {
