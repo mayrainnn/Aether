@@ -1,4 +1,5 @@
 import type { ImageProgress } from '@/api/requestTrace'
+import type { RequestSchedulingFailure } from '@/api/dashboard'
 
 // 统计数据状态
 export interface UsageStatsState {
@@ -106,15 +107,21 @@ export interface UsageRecord {
   total_tokens: number
   cost: number
   actual_cost?: number
-  response_time_ms?: number
-  first_byte_time_ms?: number  // 首字时间 (TTFB)
+  response_time_ms?: number | null
+  first_byte_time_ms?: number | null  // 首字时间 (TTFB)
   is_stream: boolean
   upstream_is_stream?: boolean
   client_requested_stream?: boolean
   client_is_stream?: boolean
+  client_family?: string | null
+  client_ip?: string | null
+  user_agent?: string | null
+  request_path?: string | null
+  request_path_and_query?: string | null
   status_code?: number
   error_message?: string
   status?: RequestStatus  // 请求状态: pending, streaming, completed, failed
+  scheduling_failure?: RequestSchedulingFailure | null
   created_at: string
   has_fallback?: boolean
   has_retry?: boolean
@@ -142,7 +149,8 @@ export type FilterStatusValue =
   'active' |
   'failed' |
   'cancelled' |
-  'has_fallback'
+  'has_fallback' |
+  'has_retry'
 
 // 默认统计状态
 export function createDefaultStats(): UsageStatsState {

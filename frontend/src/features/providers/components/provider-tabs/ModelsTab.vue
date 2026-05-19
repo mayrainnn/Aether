@@ -272,6 +272,7 @@ import {
   normalizeModelTestMappedModelSelection,
   parseModelTestRequestHeadersDraft,
   parseModelTestRequestBodyDraft,
+  selectPreferredModelTestEndpoint,
   syncModelTestRequestBodyDraft,
 } from './model-test-request'
 
@@ -312,9 +313,10 @@ const activeEndpoints = computed(() => (props.endpoints ?? [])
     if (typeof endpoint.active_keys === 'number') {
       return endpoint.is_active !== false
         && isModelTestableApiFormat(endpoint.api_format)
-        && endpoint.active_keys > 0
+        && (endpoint.active_keys > 0
+          || isModelTestableEndpoint(endpoint, props.providerKeys ?? [], props.provider.provider_type))
     }
-    return isModelTestableEndpoint(endpoint, props.providerKeys ?? [])
+    return isModelTestableEndpoint(endpoint, props.providerKeys ?? [], props.provider.provider_type)
   }))
 const parsedTestRequestHeaders = computed(() => parseModelTestRequestHeadersDraft(testRequestHeadersDraft.value))
 const testRequestHeadersError = computed(() => parsedTestRequestHeaders.value.error)
@@ -586,7 +588,7 @@ async function testModelConnection(model: Model) {
   }
 
   pendingTestModel.value = model
-  selectedTestEndpoint.value = activeEndpoints.value[0] ?? null
+  selectedTestEndpoint.value = selectPreferredModelTestEndpoint(model, activeEndpoints.value)
   const requestedModelName = getModelTestRequestedModelName(model)
   selectedTestMappedModelName.value = null
   testRequestHeadersResetValue.value = buildDefaultModelTestRequestHeaders()
@@ -594,6 +596,7 @@ async function testModelConnection(model: Model) {
   testRequestBodyResetValue.value = buildDefaultModelTestRequestBody(
     requestedModelName,
     selectedTestEndpoint.value?.api_format,
+    model,
   )
   testRequestBodyDraft.value = testRequestBodyResetValue.value
   modelTest.testResult.value = null
@@ -619,7 +622,11 @@ function syncTestRequestBodyModel() {
   if (!modelName) return
 
   const resetDraft = testRequestBodyResetValue.value
-    || buildDefaultModelTestRequestBody(modelName, selectedTestEndpoint.value?.api_format)
+    || buildDefaultModelTestRequestBody(
+      modelName,
+      selectedTestEndpoint.value?.api_format,
+      pendingTestModel.value,
+    )
   const next = syncModelTestRequestBodyDraft(
     testRequestBodyDraft.value,
     testRequestBodyResetValue.value,
@@ -637,6 +644,7 @@ function resetTestRequestBodyForSelectedEndpoint() {
   const nextResetValue = buildDefaultModelTestRequestBody(
     modelName,
     selectedTestEndpoint.value?.api_format,
+    pendingTestModel.value,
   )
   const next = syncModelTestRequestBodyDraft(
     testRequestBodyDraft.value,

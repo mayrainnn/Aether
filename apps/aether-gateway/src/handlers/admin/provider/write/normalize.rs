@@ -4,9 +4,9 @@ pub(crate) fn normalize_provider_type_input(value: &str) -> Result<String, Strin
     let normalized = value.trim().to_ascii_lowercase();
     match normalized.as_str() {
         "custom" | "claude_code" | "kiro" | "codex" | "chatgpt_web" | "gemini_cli"
-        | "antigravity" | "vertex_ai" => Ok(normalized),
+        | "antigravity" | "vertex_ai" | "grok" => Ok(normalized),
         _ => Err(
-            "provider_type 仅支持 custom / claude_code / kiro / codex / chatgpt_web / gemini_cli / antigravity / vertex_ai"
+            "provider_type 仅支持 custom / claude_code / kiro / codex / chatgpt_web / gemini_cli / antigravity / vertex_ai / grok"
                 .to_string(),
         ),
     }
@@ -161,8 +161,12 @@ pub(crate) fn validate_vertex_api_formats(
     }
 
     let allowed = match auth_type {
-        "api_key" => &["gemini:generate_content"][..],
-        "service_account" | "vertex_ai" => &["claude:messages", "gemini:generate_content"][..],
+        "api_key" => &["gemini:generate_content", "gemini:embedding"][..],
+        "service_account" | "vertex_ai" => &[
+            "claude:messages",
+            "gemini:generate_content",
+            "gemini:embedding",
+        ][..],
         _ => return Ok(()),
     };
     let invalid = api_formats
@@ -257,6 +261,14 @@ mod tests {
         assert_eq!(
             normalize_provider_type_input(" ChatGPT_Web ").expect("type should normalize"),
             "chatgpt_web"
+        );
+    }
+
+    #[test]
+    fn normalize_provider_type_supports_grok() {
+        assert_eq!(
+            normalize_provider_type_input(" Grok ").expect("type should normalize"),
+            "grok"
         );
     }
 
@@ -366,5 +378,28 @@ mod tests {
             &["claude:chat".to_string()],
         )
         .is_err());
+    }
+
+    #[test]
+    fn validate_vertex_api_formats_allows_gemini_embedding() {
+        assert!(validate_vertex_api_formats(
+            "vertex_ai",
+            "api_key",
+            &[
+                "gemini:generate_content".to_string(),
+                "gemini:embedding".to_string()
+            ],
+        )
+        .is_ok());
+        assert!(validate_vertex_api_formats(
+            "vertex_ai",
+            "service_account",
+            &[
+                "claude:messages".to_string(),
+                "gemini:generate_content".to_string(),
+                "gemini:embedding".to_string()
+            ],
+        )
+        .is_ok());
     }
 }
