@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS public.api_keys (
     allowed_models jsonb,
     allowed_providers jsonb,
     allowed_api_formats jsonb,
+    allowed_ips jsonb,
     rate_limit integer DEFAULT 100,
     concurrent_limit integer,
     force_capabilities jsonb,

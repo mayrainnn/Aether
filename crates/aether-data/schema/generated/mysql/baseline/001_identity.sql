@@ -73,6 +73,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
     `allowed_models` JSON,
     `allowed_providers` JSON,
     `allowed_api_formats` JSON,
+    `allowed_ips` JSON,
     `rate_limit` INT DEFAULT 100,
     `concurrent_limit` INT,
     `force_capabilities` JSON,
