@@ -9,11 +9,15 @@ const SETTLEMENT_EPSILON_USD: f64 = 0.000_000_01;
 struct WalletDebitPlan {
     recharge_deduction: f64,
     gift_deduction: f64,
+    recharge_overdraft: f64,
 }
 
 impl WalletDebitPlan {
-    fn covered_usd(self) -> f64 {
-        self.recharge_deduction + self.gift_deduction
+    fn after_balances(self, recharge_balance: f64, gift_balance: f64) -> (f64, f64) {
+        (
+            recharge_balance - self.recharge_deduction - self.recharge_overdraft,
+            gift_balance - self.gift_deduction,
+        )
     }
 }
 
@@ -26,13 +30,15 @@ fn plan_finite_wallet_debit(
     gift_balance: f64,
     requested_usd: f64,
 ) -> WalletDebitPlan {
-    let recharge_deduction = recharge_balance.max(0.0).min(requested_usd.max(0.0));
-    let gift_deduction = gift_balance
-        .max(0.0)
-        .min((requested_usd - recharge_deduction).max(0.0));
+    let requested_usd = requested_usd.max(0.0);
+    let recharge_deduction = recharge_balance.max(0.0).min(requested_usd);
+    let after_recharge_remaining = (requested_usd - recharge_deduction).max(0.0);
+    let gift_deduction = gift_balance.max(0.0).min(after_recharge_remaining);
+    let recharge_overdraft = (after_recharge_remaining - gift_deduction).max(0.0);
     WalletDebitPlan {
         recharge_deduction,
         gift_deduction,
+        recharge_overdraft,
     }
 }
 
