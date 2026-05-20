@@ -221,6 +221,7 @@ pub(crate) fn admin_proxy_local_requires_buffered_body(
                 | (Some("endpoints_manage"), http::Method::POST, Some("create_endpoint"))
                 | (Some("endpoints_manage"), http::Method::POST, Some("batch_delete_keys"))
                 | (Some("endpoints_manage"), http::Method::POST, Some("refresh_quota"))
+                | (Some("endpoints_manage"), http::Method::POST, Some("query_key_balance"))
                 | (Some("endpoints_manage"), http::Method::PUT, Some("update_key"))
                 | (Some("endpoints_manage"), http::Method::PUT, Some("update_endpoint"))
                 | (Some("modules_manage"), http::Method::PUT, Some("set_enabled"))
@@ -313,7 +314,11 @@ pub(crate) fn admin_proxy_local_requires_buffered_body(
                 | (Some("billing_manage"), http::Method::POST, Some("create_plan"))
                 | (Some("billing_manage"), http::Method::PUT, Some("update_plan"))
                 | (Some("billing_manage"), http::Method::PATCH, Some("set_plan_status"))
-                | (Some("payments_manage"), http::Method::PUT, Some("update_epay_gateway"))
+                | (
+                    Some("payments_manage"),
+                    http::Method::PUT,
+                    Some("update_epay_gateway" | "update_payment_gateway"),
+                )
                 | (Some("payments_manage"), http::Method::POST, Some("credit_order"))
                 | (Some("payments_manage"), http::Method::POST, Some("create_redeem_code_batch"))
                 | (Some("payments_manage"), http::Method::POST, Some("delete_redeem_code_batch"))
@@ -483,7 +488,14 @@ pub(crate) fn public_support_local_requires_buffered_body(
                     | (
                         Some("payment_callback"),
                         http::Method::POST,
-                        Some("callback" | "epay_notify" | "epay_return"),
+                        Some(
+                            "callback"
+                                | "epay_notify"
+                                | "epay_return"
+                                | "alipay_notify"
+                                | "wxpay_notify"
+                                | "stripe_webhook",
+                        ),
                     )
             )
         })
