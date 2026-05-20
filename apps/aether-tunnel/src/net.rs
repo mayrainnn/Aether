@@ -15,7 +15,7 @@ pub async fn detect_public_ip() -> anyhow::Result<String> {
 
     let client = build_http_client(&HttpClientConfig {
         request_timeout_ms: Some(5_000),
-        user_agent: Some("aether-proxy/net".to_string()),
+        user_agent: Some("aether-tunnel/net".to_string()),
         ..HttpClientConfig::default()
     })?;
 
@@ -52,7 +52,7 @@ pub async fn detect_region(ip: &str) -> Option<String> {
 
     let client = build_http_client(&HttpClientConfig {
         request_timeout_ms: Some(5_000),
-        user_agent: Some("aether-proxy/net".to_string()),
+        user_agent: Some("aether-tunnel/net".to_string()),
         ..HttpClientConfig::default()
     })
     .ok()?;

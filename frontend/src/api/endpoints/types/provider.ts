@@ -10,7 +10,7 @@ export interface ProxyConfig {
   url?: string
   username?: string
   password?: string
-  node_id?: string    // 代理节点 ID（aether-proxy 注册的节点，与 url 互斥）
+  node_id?: string    // 代理节点 ID（aether-tunnel 注册的节点，与 url 互斥）
   enabled?: boolean   // 是否启用代理（false 时保留配置但不使用）
 }
 
@@ -423,11 +423,20 @@ export interface FormatHealthData {
 // 按格式的熔断器数据
 export interface FormatCircuitBreakerData {
   open: boolean
+  reason?: string | null
   open_at?: string | null
   next_probe_at?: string | null
+  next_probe_at_unix_secs?: number | null
+  probe_interval_minutes?: number | null
+  max_probe_interval_minutes?: number | null
+  failure_count?: number | null
+  consecutive_failures?: number | null
+  last_failure_at?: string | null
+  last_probe_failure_at?: string | null
   half_open_until?: string | null
   half_open_successes: number
   half_open_failures: number
+  request_results_window?: Array<{ ts: number; ok: boolean }>
 }
 
 export interface EndpointAPIKeyUpdate {
@@ -675,6 +684,7 @@ export interface ProviderWithEndpointsSummary {
   failover_rules?: FailoverRulesConfig | null
   ops_configured: boolean  // 是否配置了扩展操作（余额监控等）
   ops_architecture_id?: string  // 扩展操作使用的架构 ID（如 cubence, anyrouter）
+  kiro_simulated_cache_enabled?: boolean
   created_at: string
   updated_at: string
 }

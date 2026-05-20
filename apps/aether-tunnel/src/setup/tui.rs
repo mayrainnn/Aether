@@ -1,6 +1,6 @@
-//! Interactive TUI for configuring aether-proxy.
+//! Interactive TUI for configuring aether-tunnel.
 //!
-//! Launched via `aether-proxy setup [path]`.  Presents a full-screen form
+//! Launched via `aether-tunnel setup [path]`.  Presents a full-screen form
 //! backed by ratatui where the user can navigate fields, edit values, and
 //! save to a TOML config file.  Supports multi-server configuration via
 //! a tabbed interface.
@@ -21,8 +21,8 @@ use ratatui::Frame;
 use ratatui::Terminal;
 
 use crate::config::{
-    format_byte_size_human, parse_byte_size, ConfigFile, ProxyLogDestinationArg,
-    ProxyLogRotationArg, ServerEntry, DEFAULT_HEARTBEAT_INTERVAL_SECS, DEFAULT_LOG_MAX_FILES,
+    format_byte_size_human, parse_byte_size, ConfigFile, ServerEntry, TunnelLogDestinationArg,
+    TunnelLogRotationArg, DEFAULT_HEARTBEAT_INTERVAL_SECS, DEFAULT_LOG_MAX_FILES,
     DEFAULT_LOG_RETENTION_DAYS, DEFAULT_REDIRECT_REPLAY_BUDGET_HUMAN,
 };
 use crate::egress_proxy::UpstreamProxyConfig;
@@ -31,7 +31,7 @@ use crate::egress_proxy::UpstreamProxyConfig;
 pub enum SetupOutcome {
     /// Config saved and the selected host service was installed.
     ServiceInstalled,
-    /// Config saved; no service -- caller should start the proxy directly.
+    /// Config saved; no service -- caller should start the tunnel directly.
     ReadyToRun(PathBuf),
     /// User quit without saving.
     Cancelled,
@@ -269,7 +269,7 @@ impl App {
                 "save_logs_to_file" => cfg.log_destination.map(|value| {
                     matches!(
                         value,
-                        ProxyLogDestinationArg::File | ProxyLogDestinationArg::Both
+                        TunnelLogDestinationArg::File | TunnelLogDestinationArg::Both
                     )
                     .to_string()
                 }),
@@ -371,7 +371,7 @@ impl App {
 
     fn default_file_log_dir(&self) -> String {
         if self.toggle_enabled("install_service") {
-            return "/var/log/aether-proxy".to_string();
+            return "/var/log/aether-tunnel".to_string();
         }
 
         let base = self
@@ -401,12 +401,12 @@ impl App {
             redirect_replay_budget_bytes: self.parse_optional_redirect_replay_budget()?,
             upstream_proxy_url: self.parse_optional_upstream_proxy_url()?,
             log_destination: Some(if save_logs_to_file {
-                ProxyLogDestinationArg::Both
+                TunnelLogDestinationArg::Both
             } else {
-                ProxyLogDestinationArg::Stdout
+                TunnelLogDestinationArg::Stdout
             }),
             log_dir: save_logs_to_file.then(|| self.default_file_log_dir()),
-            log_rotation: save_logs_to_file.then_some(ProxyLogRotationArg::Daily),
+            log_rotation: save_logs_to_file.then_some(TunnelLogRotationArg::Daily),
             log_retention_days: save_logs_to_file.then_some(DEFAULT_LOG_RETENTION_DAYS),
             log_max_files: save_logs_to_file.then_some(DEFAULT_LOG_MAX_FILES),
             ..ConfigFile::default()
@@ -733,9 +733,9 @@ fn ui(f: &mut Frame, app: &mut App) {
     let area = f.area();
 
     let title = if app.modified {
-        " Aether Proxy Setup [*] "
+        " Aether Tunnel Setup [*] "
     } else {
-        " Aether Proxy Setup "
+        " Aether Tunnel Setup "
     };
 
     let outer = Block::default()
@@ -1014,7 +1014,7 @@ pub fn run(config_path: PathBuf) -> anyhow::Result<SetupOutcome> {
             Ok(()) => return Ok(SetupOutcome::ServiceInstalled),
             Err(e) => {
                 eprintln!("  Service install failed: {}", e);
-                eprintln!("  Starting proxy directly instead.\n");
+                eprintln!("  Starting tunnel directly instead.\n");
             }
         }
     } else if super::service::is_installed() {
@@ -1070,7 +1070,7 @@ mod tests {
     }
 
     fn sample_app() -> App {
-        let mut app = App::new(PathBuf::from("aether-proxy.toml"));
+        let mut app = App::new(PathBuf::from("aether-tunnel.toml"));
         set_server_field(&mut app, "aether_url", "https://aether.example.com");
         set_server_field(&mut app, "management_token", "ae_test");
         set_server_field(&mut app, "node_name", "jp-proxy-01");
@@ -1082,7 +1082,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock should work")
             .as_nanos();
-        std::env::temp_dir().join(format!("aether-proxy-{name}-{nanos}.toml"))
+        std::env::temp_dir().join(format!("aether-tunnel-{name}-{nanos}.toml"))
     }
 
     #[test]
@@ -1119,9 +1119,9 @@ mod tests {
         set_global_field(&mut app, "save_logs_to_file", "true");
 
         let cfg = app.to_config().expect("config should serialize");
-        assert_eq!(cfg.log_destination, Some(ProxyLogDestinationArg::Both));
+        assert_eq!(cfg.log_destination, Some(TunnelLogDestinationArg::Both));
         assert_eq!(cfg.log_dir.as_deref(), Some("logs"));
-        assert_eq!(cfg.log_rotation, Some(ProxyLogRotationArg::Daily));
+        assert_eq!(cfg.log_rotation, Some(TunnelLogRotationArg::Daily));
         assert_eq!(cfg.log_retention_days, Some(DEFAULT_LOG_RETENTION_DAYS));
         assert_eq!(cfg.log_max_files, Some(DEFAULT_LOG_MAX_FILES));
     }
@@ -1133,7 +1133,7 @@ mod tests {
         set_global_field(&mut app, "save_logs_to_file", "true");
 
         let cfg = app.to_config().expect("config should serialize");
-        assert_eq!(cfg.log_dir.as_deref(), Some("/var/log/aether-proxy"));
+        assert_eq!(cfg.log_dir.as_deref(), Some("/var/log/aether-tunnel"));
     }
 
     #[test]

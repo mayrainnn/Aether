@@ -207,6 +207,7 @@ async fn consume_daily_quota_mysql(
     request_id: &str,
     total_cost_usd: f64,
     wallet_available_usd: Option<f64>,
+    wallet_can_overdraft: bool,
     now_unix_secs: i64,
 ) -> Result<DailyQuotaDebitResult, DataLayerError> {
     if total_cost_usd <= 0.0 {
@@ -280,6 +281,7 @@ WHERE user_entitlement_id = ?
         });
     }
     if allow_wallet_overage
+        && !wallet_can_overdraft
         && wallet_available_usd.is_some_and(|available| {
             total_remaining + available + SETTLEMENT_EPSILON_USD < total_cost_usd
         })
@@ -448,6 +450,7 @@ FOR UPDATE
                 None
             };
 
+            let wallet_can_overdraft = wallet_row.is_some();
             let wallet_available_usd = match wallet_row.as_ref() {
                 Some(row) => {
                     let limit_mode: String = row.try_get("limit_mode").map_sql_err()?;
@@ -484,6 +487,7 @@ FOR UPDATE
                         &input.request_id,
                         input.total_cost_usd,
                         wallet_available_usd,
+                        wallet_can_overdraft,
                         updated_at,
                     )
                     .await?;
@@ -544,14 +548,8 @@ FOR UPDATE
                             before_gift,
                             wallet_debit_cost_usd,
                         );
-                        if debit_plan.covered_usd() + SETTLEMENT_EPSILON_USD < wallet_debit_cost_usd
-                        {
-                            final_billing_status = "insufficient_quota".to_string();
-                            settlement.billing_status = final_billing_status.clone();
-                        } else {
-                            after_recharge = before_recharge - debit_plan.recharge_deduction;
-                            after_gift = before_gift - debit_plan.gift_deduction;
-                        }
+                        (after_recharge, after_gift) =
+                            debit_plan.after_balances(before_recharge, before_gift);
                     }
                     if final_billing_status == "settled" {
                         sqlx::query(

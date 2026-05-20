@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use aether_runtime::hold_admission_permit_until;
+use aether_runtime::{AdmissionPermit, QueueSendError};
 use bytes::{Bytes, BytesMut};
 use futures_util::stream;
 use futures_util::StreamExt;
@@ -24,8 +24,8 @@ use crate::target_filter;
 use crate::upstream_client;
 
 use super::protocol::{
-    compress_payload, decompress_if_gzip, flags, Frame as TunnelFrame, MsgType, RequestMeta,
-    ResponseMeta,
+    compress_payload, decompress_if_gzip, flags, raw_payload, Frame as TunnelFrame, MsgType,
+    RequestMeta, ResponseMeta,
 };
 use super::writer::FrameSender;
 
@@ -33,9 +33,11 @@ use super::writer::FrameSender;
 const MAX_CHUNK_SIZE: usize = 32 * 1024;
 
 /// Timeout for sending a single frame to the writer channel.
-/// If the writer is congested (TCP backpressure), we abandon the stream
-/// rather than blocking indefinitely and exhausting the stream pool.
-const FRAME_SEND_TIMEOUT: Duration = Duration::from_secs(30);
+/// Control frames are allowed a short wait; body frames fail fast.
+const CONTROL_FRAME_SEND_TIMEOUT: Duration = Duration::from_millis(250);
+const SLOW_STREAM_LOG_THRESHOLD: Duration = Duration::from_secs(2);
+const SUCCESS_LOG_SAMPLE_MODULO: u32 = 256;
+const REQUEST_BODY_SPOOL_QUEUE_CAPACITY: usize = 64;
 
 /// Minimum allowed upstream request timeout (seconds).
 const MIN_TIMEOUT_SECS: u64 = 5;
@@ -203,21 +205,51 @@ fn log_stream_success(ctx: StreamLogContext<'_>, status: u16, duration: Duration
     let url = ctx
         .url
         .expect("successful requests should always have a URL");
-    info!(
-        server = %ctx.server.server_label,
-        stream_id = ctx.stream_id,
-        method = %ctx.method,
-        scheme = url.scheme(),
-        host = request_log_host(url),
-        port = request_log_port(url),
-        path = request_log_path(url),
-        query_present = url.query().is_some(),
-        status,
-        duration_ms = duration.as_millis() as u64,
-        redirect_count = ctx.redirect_count,
-        request_body_bytes = ctx.request_body_size,
-        "proxy request completed"
-    );
+    let slow = duration >= SLOW_STREAM_LOG_THRESHOLD;
+    if slow {
+        ctx.server.metrics.record_slow_request();
+    }
+    let sampled = slow
+        || ctx.redirect_count > 0
+        || ctx.request_body_size >= 1_048_576
+        || ctx.stream_id.is_multiple_of(SUCCESS_LOG_SAMPLE_MODULO);
+    if sampled {
+        info!(
+            server = %ctx.server.server_label,
+            stream_id = ctx.stream_id,
+            method = %ctx.method,
+            scheme = url.scheme(),
+            host = request_log_host(url),
+            port = request_log_port(url),
+            path = request_log_path(url),
+            query_present = url.query().is_some(),
+            status,
+            duration_ms = duration.as_millis() as u64,
+            redirect_count = ctx.redirect_count,
+            request_body_bytes = ctx.request_body_size,
+            slow,
+            sampled,
+            "tunnel request completed"
+        );
+    } else {
+        debug!(
+            server = %ctx.server.server_label,
+            stream_id = ctx.stream_id,
+            method = %ctx.method,
+            scheme = url.scheme(),
+            host = request_log_host(url),
+            port = request_log_port(url),
+            path = request_log_path(url),
+            query_present = url.query().is_some(),
+            status,
+            duration_ms = duration.as_millis() as u64,
+            redirect_count = ctx.redirect_count,
+            request_body_bytes = ctx.request_body_size,
+            slow,
+            sampled,
+            "tunnel request completed"
+        );
+    }
 }
 
 fn log_stream_failure(ctx: StreamLogContext<'_>, error: &str, duration: Duration) {
@@ -236,7 +268,7 @@ fn log_stream_failure(ctx: StreamLogContext<'_>, error: &str, duration: Duration
                 duration_ms = duration.as_millis() as u64,
                 redirect_count = ctx.redirect_count,
                 request_body_bytes = ctx.request_body_size,
-                "proxy request failed"
+                "tunnel request failed"
             );
         }
         None => {
@@ -248,7 +280,7 @@ fn log_stream_failure(ctx: StreamLogContext<'_>, error: &str, duration: Duration
                 duration_ms = duration.as_millis() as u64,
                 redirect_count = ctx.redirect_count,
                 request_body_bytes = ctx.request_body_size,
-                "proxy request failed"
+                "tunnel request failed"
             );
         }
     }
@@ -458,7 +490,7 @@ fn prepare_request_body(
     deadline: Instant,
     replay_budget_bytes: usize,
 ) -> PreparedRequestBody {
-    let (spool_tx, spool_rx) = mpsc::unbounded_channel();
+    let (spool_tx, spool_rx) = mpsc::channel(REQUEST_BODY_SPOOL_QUEUE_CAPACITY);
     let replay_state = if replay_budget_bytes == 0 {
         None
     } else {
@@ -558,12 +590,11 @@ fn remaining_timeout(deadline: Instant) -> Option<Duration> {
 
 async fn spool_request_body(
     mut body_rx: mpsc::Receiver<TunnelFrame>,
-    spool_tx: mpsc::UnboundedSender<SpoolBodyEvent>,
+    mut spool_tx: mpsc::Sender<SpoolBodyEvent>,
     replay_state: Option<Arc<RequestBodyReplayState>>,
     body_size: Arc<AtomicUsize>,
     deadline: Instant,
 ) {
-    let mut spool_tx = Some(spool_tx);
     loop {
         let frame = match recv_body_frame_with_deadline(&mut body_rx, deadline).await {
             Ok(frame) => frame,
@@ -571,7 +602,7 @@ async fn spool_request_body(
                 if let Some(state) = &replay_state {
                     state.fail(message.clone());
                 }
-                send_spool_event(&mut spool_tx, SpoolBodyEvent::Error(message));
+                let _ = send_spool_event(&mut spool_tx, SpoolBodyEvent::Error(message)).await;
                 return;
             }
         };
@@ -580,7 +611,7 @@ async fn spool_request_body(
             if let Some(state) = &replay_state {
                 state.finish();
             }
-            send_spool_event(&mut spool_tx, SpoolBodyEvent::End);
+            let _ = send_spool_event(&mut spool_tx, SpoolBodyEvent::End).await;
             return;
         };
 
@@ -594,7 +625,8 @@ async fn spool_request_body(
                         if let Some(state) = &replay_state {
                             state.fail(message.clone());
                         }
-                        send_spool_event(&mut spool_tx, SpoolBodyEvent::Error(message));
+                        let _ =
+                            send_spool_event(&mut spool_tx, SpoolBodyEvent::Error(message)).await;
                         return;
                     }
                 };
@@ -604,14 +636,22 @@ async fn spool_request_body(
                     if let Some(state) = &replay_state {
                         state.push_chunk(payload.clone());
                     }
-                    send_spool_event(&mut spool_tx, SpoolBodyEvent::Data(payload));
+                    if send_spool_event(&mut spool_tx, SpoolBodyEvent::Data(payload))
+                        .await
+                        .is_err()
+                    {
+                        if let Some(state) = &replay_state {
+                            state.fail("request body replay channel closed".to_string());
+                        }
+                        return;
+                    }
                 }
 
                 if end_stream {
                     if let Some(state) = &replay_state {
                         state.finish();
                     }
-                    send_spool_event(&mut spool_tx, SpoolBodyEvent::End);
+                    let _ = send_spool_event(&mut spool_tx, SpoolBodyEvent::End).await;
                     return;
                 }
             }
@@ -621,14 +661,14 @@ async fn spool_request_body(
                 if let Some(state) = &replay_state {
                     state.fail(message.clone());
                 }
-                send_spool_event(&mut spool_tx, SpoolBodyEvent::Error(message));
+                let _ = send_spool_event(&mut spool_tx, SpoolBodyEvent::Error(message)).await;
                 return;
             }
             MsgType::StreamEnd => {
                 if let Some(state) = &replay_state {
                     state.finish();
                 }
-                send_spool_event(&mut spool_tx, SpoolBodyEvent::End);
+                let _ = send_spool_event(&mut spool_tx, SpoolBodyEvent::End).await;
                 return;
             }
             _ => continue,
@@ -636,15 +676,11 @@ async fn spool_request_body(
     }
 }
 
-fn send_spool_event(
-    spool_tx: &mut Option<mpsc::UnboundedSender<SpoolBodyEvent>>,
+async fn send_spool_event(
+    spool_tx: &mut mpsc::Sender<SpoolBodyEvent>,
     event: SpoolBodyEvent,
-) {
-    if let Some(sender) = spool_tx.as_ref() {
-        if sender.send(event).is_err() {
-            *spool_tx = None;
-        }
-    }
+) -> Result<(), ()> {
+    spool_tx.send(event).await.map_err(|_| ())
 }
 
 fn remove_headers_case_insensitive(headers: &mut Vec<(String, String)>, blocked: &[&str]) {
@@ -851,6 +887,7 @@ async fn relay_upstream_response<B>(
     request_body_size: &AtomicUsize,
     redirect_count: usize,
     request_body_mode: &'static str,
+    emit_proxy_timing_header: bool,
     deadline: Instant,
 ) -> Option<Duration>
 where
@@ -882,7 +919,9 @@ where
         "mode": "tunnel",
         "redirect_count": redirect_count,
     });
-    resp_headers.push(("x-proxy-timing".to_string(), timing.to_string()));
+    if emit_proxy_timing_header {
+        resp_headers.push(("x-proxy-timing".to_string(), timing.to_string()));
+    }
     let resp_meta = ResponseMeta {
         status,
         headers: resp_headers,
@@ -965,7 +1004,7 @@ where
         match chunk_result {
             Ok(chunk) => {
                 if chunk.len() <= MAX_CHUNK_SIZE {
-                    let (payload, extra_flags) = compress_payload(chunk);
+                    let (payload, extra_flags) = raw_payload(chunk);
                     if !send_frame(
                         frame_tx,
                         TunnelFrame::new(stream_id, MsgType::ResponseBody, extra_flags, payload),
@@ -991,7 +1030,7 @@ where
                     while offset < chunk.len() {
                         let end = (offset + MAX_CHUNK_SIZE).min(chunk.len());
                         let slice = chunk.slice(offset..end);
-                        let (payload, extra_flags) = compress_payload(slice);
+                        let (payload, extra_flags) = raw_payload(slice);
                         if !send_frame(
                             frame_tx,
                             TunnelFrame::new(
@@ -1118,9 +1157,9 @@ pub async fn handle_stream(
         Ok(permit) => permit,
         Err(err) => {
             let message = match err {
-                crate::state::ProxyAdmissionError::Saturated { .. } => "proxy overloaded",
-                crate::state::ProxyAdmissionError::Unavailable { .. } => {
-                    "proxy admission unavailable"
+                crate::state::TunnelAdmissionError::Saturated { .. } => "tunnel overloaded",
+                crate::state::TunnelAdmissionError::Unavailable { .. } => {
+                    "tunnel admission unavailable"
                 }
             };
             log_stream_failure(
@@ -1142,10 +1181,8 @@ pub async fn handle_stream(
 
     server.active_connections.fetch_add(1, Ordering::Release);
 
-    let connect_elapsed = hold_admission_permit_until(permit, async {
-        handle_stream_inner(&state, &server, stream_id, meta, body_rx, &frame_tx).await
-    })
-    .await;
+    let connect_elapsed =
+        handle_stream_inner(&state, &server, stream_id, meta, body_rx, &frame_tx, permit).await;
 
     server.active_connections.fetch_sub(1, Ordering::Release);
     if let Some(d) = connect_elapsed {
@@ -1155,16 +1192,41 @@ pub async fn handle_stream(
 
 /// Send a frame to the writer with a timeout. Returns false if send failed.
 async fn send_frame(tx: &FrameSender, frame: TunnelFrame) -> bool {
-    match tokio::time::timeout(FRAME_SEND_TIMEOUT, tx.send(frame)).await {
-        Ok(Ok(())) => true,
-        Ok(Err(_)) => {
-            // Channel closed (writer exited)
-            false
+    let stream_id = frame.stream_id;
+    let msg_type = frame.msg_type;
+    let flags = frame.flags;
+    let is_body_frame = matches!(
+        msg_type,
+        MsgType::RequestBody | MsgType::ResponseBody | MsgType::StreamEnd
+    );
+
+    if is_body_frame {
+        match tx.try_send(frame) {
+            Ok(()) => true,
+            Err(QueueSendError::Full(_)) => {
+                warn!(
+                    stream_id,
+                    msg_type = ?msg_type,
+                    flags = flags,
+                    "writer channel full for body frame, abandoning stream"
+                );
+                false
+            }
+            Err(QueueSendError::Closed(_)) => false,
         }
-        Err(_) => {
-            // Timeout — writer is congested
-            warn!("frame send timeout (writer congested), abandoning stream");
-            false
+    } else {
+        match tokio::time::timeout(CONTROL_FRAME_SEND_TIMEOUT, tx.send(frame)).await {
+            Ok(Ok(())) => true,
+            Ok(Err(_)) => false,
+            Err(_) => {
+                warn!(
+                    stream_id,
+                    msg_type = ?msg_type,
+                    flags = flags,
+                    "control frame send timeout (writer congested), abandoning stream"
+                );
+                false
+            }
         }
     }
 }
@@ -1179,6 +1241,7 @@ async fn handle_stream_inner(
     meta: RequestMeta,
     body_rx: mpsc::Receiver<TunnelFrame>,
     frame_tx: &FrameSender,
+    mut admission_permit: Option<AdmissionPermit>,
 ) -> Option<Duration> {
     let mut current_method: hyper::Method = parse_request_method(&meta.method);
     let mut current_url = match url::Url::parse(&meta.url) {
@@ -1341,6 +1404,7 @@ async fn handle_stream_inner(
                 redirects_followed,
             ) {
                 RedirectDecision::Stop => {
+                    drop(admission_permit.take());
                     return relay_upstream_response(
                         server,
                         stream_id,
@@ -1354,6 +1418,7 @@ async fn handle_stream_inner(
                         request_body_size.as_ref(),
                         redirects_followed,
                         request_body_mode,
+                        state.config.emit_proxy_timing_header,
                         deadline,
                     )
                     .await;
@@ -1379,6 +1444,7 @@ async fn handle_stream_inner(
                         continue;
                     }
                     Ok(None) => {
+                        drop(admission_permit.take());
                         return relay_upstream_response(
                             server,
                             stream_id,
@@ -1392,6 +1458,7 @@ async fn handle_stream_inner(
                             request_body_size.as_ref(),
                             redirects_followed,
                             request_body_mode,
+                            state.config.emit_proxy_timing_header,
                             deadline,
                         )
                         .await;
@@ -1433,6 +1500,7 @@ async fn handle_stream_inner(
             }
         }
 
+        drop(admission_permit.take());
         return relay_upstream_response(
             server,
             stream_id,
@@ -1446,6 +1514,7 @@ async fn handle_stream_inner(
             request_body_size.as_ref(),
             redirects_followed,
             request_body_mode,
+            state.config.emit_proxy_timing_header,
             deadline,
         )
         .await;
@@ -1474,7 +1543,7 @@ fn build_streaming_request_body(
 }
 
 fn build_spooled_request_body(
-    spool_rx: mpsc::UnboundedReceiver<SpoolBodyEvent>,
+    spool_rx: mpsc::Receiver<SpoolBodyEvent>,
 ) -> upstream_client::UpstreamRequestBody {
     let body_stream = stream::unfold((spool_rx, false), |(mut spool_rx, finished)| async move {
         if finished {
@@ -1585,7 +1654,7 @@ mod tests {
     use crate::config::Config;
     use crate::registration::client::AetherClient;
     use crate::runtime::DynamicConfig;
-    use crate::state::{ProxyMetrics, TunnelMetrics};
+    use crate::state::{TunnelMetrics, TunnelRequestMetrics};
     use crate::target_filter::DnsCache;
     use crate::tunnel::client::build_tls_config;
 
@@ -2003,6 +2072,7 @@ mod tests {
             &request_body_size,
             0,
             "empty",
+            true,
             Instant::now(),
         )
         .await;
@@ -2265,7 +2335,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_stream_when_local_admission_gate_is_saturated() {
-        let gate = Arc::new(ConcurrencyGate::new("proxy_streams", 1));
+        let gate = Arc::new(ConcurrencyGate::new("tunnel_streams", 1));
         let _permit = gate.try_acquire().expect("first permit");
         let state = sample_state(Some(gate), None);
         let server = sample_server(&state);
@@ -2289,7 +2359,7 @@ mod tests {
             .expect("overload frame");
         assert_eq!(frame.stream_id, 7);
         assert_eq!(frame.msg_type, MsgType::StreamError);
-        assert_eq!(frame.payload, Bytes::from_static(b"proxy overloaded"));
+        assert_eq!(frame.payload, Bytes::from_static(b"tunnel overloaded"));
         assert_eq!(
             state
                 .stream_gate
@@ -2306,7 +2376,7 @@ mod tests {
         let gate = Arc::new(
             RuntimeState::memory(MemoryRuntimeStateConfig::default())
                 .semaphore(
-                    "proxy_streams_distributed",
+                    "tunnel_streams_distributed",
                     1,
                     RuntimeSemaphoreConfig::default(),
                 )
@@ -2335,7 +2405,7 @@ mod tests {
             .expect("overload frame");
         assert_eq!(frame.stream_id, 9);
         assert_eq!(frame.msg_type, MsgType::StreamError);
-        assert_eq!(frame.payload, Bytes::from_static(b"proxy overloaded"));
+        assert_eq!(frame.payload, Bytes::from_static(b"tunnel overloaded"));
         assert_eq!(
             state
                 .distributed_stream_gate
@@ -2430,7 +2500,7 @@ mod tests {
             )),
             dynamic: Arc::new(ArcSwap::from_pointee(DynamicConfig::from_config(&config))),
             active_connections: Arc::new(AtomicU64::new(0)),
-            metrics: Arc::new(ProxyMetrics::new()),
+            metrics: Arc::new(TunnelRequestMetrics::new()),
             tunnel_metrics: Arc::new(TunnelMetrics::new()),
         })
     }
@@ -2440,7 +2510,7 @@ mod tests {
             aether_url: "https://aether.example.com".to_string(),
             management_token: "token".to_string(),
             public_ip: None,
-            node_name: "proxy-test".to_string(),
+            node_name: "tunnel-test".to_string(),
             node_region: None,
             heartbeat_interval: 30,
             allowed_ports: vec![80, 443],
@@ -2452,10 +2522,11 @@ mod tests {
             aether_tcp_keepalive_secs: 60,
             aether_tcp_nodelay: true,
             aether_http2: true,
-            aether_proxy_url: None,
+            aether_outbound_proxy_url: None,
             aether_retry_max_attempts: 3,
             aether_retry_base_delay_ms: 200,
             aether_retry_max_delay_ms: 2_000,
+            diagnostics_bind: None,
             max_concurrent_connections: None,
             max_in_flight_streams: None,
             distributed_stream_limit: None,
@@ -2473,10 +2544,11 @@ mod tests {
             upstream_tcp_nodelay: true,
             upstream_proxy_url: None,
             redirect_replay_budget_bytes: crate::config::DEFAULT_REDIRECT_REPLAY_BUDGET_BYTES,
+            emit_proxy_timing_header: true,
             log_level: "info".to_string(),
-            log_destination: crate::config::ProxyLogDestinationArg::Stdout,
+            log_destination: crate::config::TunnelLogDestinationArg::Stdout,
             log_dir: None,
-            log_rotation: crate::config::ProxyLogRotationArg::Daily,
+            log_rotation: crate::config::TunnelLogRotationArg::Daily,
             log_retention_days: 7,
             log_max_files: 30,
             tunnel_reconnect_base_ms: 500,

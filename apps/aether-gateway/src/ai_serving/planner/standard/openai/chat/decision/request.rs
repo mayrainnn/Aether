@@ -986,20 +986,15 @@ fn build_openai_image_provider_body_from_openai_chat_body(
     } else {
         "edit"
     };
-    let mut tool = serde_json::Map::new();
-    tool.insert(
-        "type".to_string(),
-        Value::String("image_generation".to_string()),
-    );
-    tool.insert("action".to_string(), Value::String(operation.to_string()));
-    copy_openai_chat_image_tool_option(body_json, &mut tool, "size");
-    copy_openai_chat_image_tool_option(body_json, &mut tool, "quality");
-    copy_openai_chat_image_tool_option(body_json, &mut tool, "background");
-    copy_openai_chat_image_tool_option(body_json, &mut tool, "output_format");
-    copy_openai_chat_image_tool_option(body_json, &mut tool, "output_compression");
-    copy_openai_chat_image_tool_option(body_json, &mut tool, "moderation");
-    copy_openai_chat_image_tool_option(body_json, &mut tool, "input_fidelity");
-    copy_openai_chat_image_tool_option(body_json, &mut tool, "partial_images");
+    let mut image_options = serde_json::Map::new();
+    copy_openai_chat_image_option(body_json, &mut image_options, "size");
+    copy_openai_chat_image_option(body_json, &mut image_options, "quality");
+    copy_openai_chat_image_option(body_json, &mut image_options, "background");
+    copy_openai_chat_image_option(body_json, &mut image_options, "output_format");
+    copy_openai_chat_image_option(body_json, &mut image_options, "output_compression");
+    copy_openai_chat_image_option(body_json, &mut image_options, "moderation");
+    copy_openai_chat_image_option(body_json, &mut image_options, "input_fidelity");
+    copy_openai_chat_image_option(body_json, &mut image_options, "partial_images");
 
     let input = if images.is_empty() {
         serde_json::json!([{
@@ -1032,10 +1027,6 @@ fn build_openai_image_provider_body_from_openai_chat_body(
         body.insert("model".to_string(), Value::String(model.to_string()));
     }
     body.insert("input".to_string(), input);
-    body.insert(
-        "tools".to_string(),
-        Value::Array(vec![Value::Object(tool.clone())]),
-    );
     if upstream_is_stream {
         body.insert("stream".to_string(), Value::Bool(true));
     }
@@ -1054,7 +1045,7 @@ fn build_openai_image_provider_body_from_openai_chat_body(
         Value::String(operation.to_string()),
     );
     for key in ["output_format", "partial_images", "size", "quality"] {
-        if let Some(value) = tool.get(key) {
+        if let Some(value) = image_options.get(key) {
             summary.insert(key.to_string(), value.clone());
         }
     }
@@ -1122,13 +1113,13 @@ fn build_chatgpt_web_image_provider_body_from_openai_chat_body(
     Some((body, summary))
 }
 
-fn copy_openai_chat_image_tool_option(
+fn copy_openai_chat_image_option(
     body_json: &Value,
-    tool: &mut serde_json::Map<String, Value>,
+    image_options: &mut serde_json::Map<String, Value>,
     key: &str,
 ) {
     if let Some(value) = body_json.get(key) {
-        tool.insert(key.to_string(), value.clone());
+        image_options.insert(key.to_string(), value.clone());
     }
 }
 
@@ -1513,5 +1504,28 @@ mod tests {
         assert_eq!(provider_body["images"][0], "https://example.com/ref.png");
         assert_eq!(summary["operation"], "edit");
         assert_eq!(summary["output_format"], "webp");
+    }
+
+    #[test]
+    fn openai_chat_image_bridge_body_does_not_inject_tools() {
+        let body_json = json!({
+            "model": "gpt-image-2",
+            "messages": [
+                {"role": "user", "content": "Draw a glass city"}
+            ],
+            "size": "1024x1024",
+            "output_format": "png"
+        });
+
+        let (provider_body, summary) =
+            build_openai_image_provider_body_from_openai_chat_body(&body_json, "gpt-image-2", true)
+                .expect("chat image body should convert");
+
+        assert!(provider_body.get("tools").is_none());
+        assert_eq!(provider_body["model"], "gpt-image-2");
+        assert_eq!(provider_body["stream"], true);
+        assert_eq!(provider_body["input"][0]["content"], "Draw a glass city");
+        assert_eq!(summary["operation"], "generate");
+        assert_eq!(summary["output_format"], "png");
     }
 }

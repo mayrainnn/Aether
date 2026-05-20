@@ -1,4 +1,4 @@
-//! Self-upgrade support for `aether-proxy`.
+//! Self-upgrade support for `aether-tunnel`.
 //!
 //! Downloads a release from GitHub, verifies the SHA256 checksum, replaces the
 //! running binary atomically, and restarts the active managed service when
@@ -69,7 +69,7 @@ fn build_github_client() -> anyhow::Result<reqwest::Client> {
         reqwest::Client::builder().default_headers(headers),
         &HttpClientConfig {
             request_timeout_ms: Some(300_000),
-            user_agent: Some(format!("aether-proxy/{}", CURRENT_VERSION)),
+            user_agent: Some(format!("aether-tunnel/{}", CURRENT_VERSION)),
             ..HttpClientConfig::default()
         },
     )
@@ -84,11 +84,11 @@ async fn fetch_release(
 ) -> anyhow::Result<GithubRelease> {
     match version {
         Some(ver) => {
-            // Accept both "proxy-v0.2.0" and bare "0.2.0"
-            let tag = if ver.starts_with("proxy-v") {
+            // Accept both "tunnel-v0.2.0" and the legacy "proxy-v0.2.0".
+            let tag = if ver.starts_with("tunnel-v") || ver.starts_with("proxy-v") {
                 ver.to_string()
             } else {
-                format!("proxy-v{}", ver)
+                format!("tunnel-v{}", ver)
             };
             let url = format!(
                 "{}/repos/{}/releases/tags/{}",
@@ -103,7 +103,7 @@ async fn fetch_release(
             Ok(resp.json().await?)
         }
         None => {
-            // List releases and find the latest proxy-v* tag
+            // List releases and find the latest tunnel-v* tag
             let url = format!(
                 "{}/repos/{}/releases?per_page=20",
                 GITHUB_API_BASE, GITHUB_REPO
@@ -117,8 +117,8 @@ async fn fetch_release(
             let releases: Vec<GithubRelease> = resp.json().await?;
             releases
                 .into_iter()
-                .find(|r| r.tag_name.starts_with("proxy-v"))
-                .ok_or_else(|| anyhow::anyhow!("no proxy-v* release found"))
+                .find(|r| r.tag_name.starts_with("tunnel-v") || r.tag_name.starts_with("proxy-v"))
+                .ok_or_else(|| anyhow::anyhow!("no tunnel-v* release found"))
         }
     }
 }
@@ -171,7 +171,7 @@ async fn download_and_verify(
     platform: &str,
     dest: &Path,
 ) -> anyhow::Result<()> {
-    let archive_name = format!("aether-proxy-{}.tar.gz", platform);
+    let archive_name = format!("aether-tunnel-{}.tar.gz", platform);
 
     eprintln!("  Downloading {}...", archive_name);
     let (archive_bytes, checksum_bytes) = tokio::try_join!(
@@ -220,9 +220,9 @@ fn extract_binary(archive_bytes: &[u8], dest: &Path) -> anyhow::Result<()> {
     let mut archive = Archive::new(decoder);
 
     let binary_name = if cfg!(target_os = "windows") {
-        "aether-proxy.exe"
+        "aether-tunnel.exe"
     } else {
-        "aether-proxy"
+        "aether-tunnel"
     };
 
     for entry in archive.entries()? {
@@ -310,7 +310,7 @@ async fn execute_upgrade(
     let exe_dir = current_exe
         .parent()
         .ok_or_else(|| anyhow::anyhow!("cannot determine binary directory"))?;
-    let temp_path = exe_dir.join(".aether-proxy.upgrade.tmp");
+    let temp_path = exe_dir.join(".aether-tunnel.upgrade.tmp");
 
     if require_root {
         if !super::service::is_root() {
@@ -318,14 +318,14 @@ async fn execute_upgrade(
         }
     } else if !super::service::is_root() {
         // Check write permission to binary directory for manual upgrade mode.
-        let test_path = exe_dir.join(".aether-proxy.write-test");
+        let test_path = exe_dir.join(".aether-tunnel.write-test");
         match std::fs::File::create(&test_path) {
             Ok(_) => {
                 let _ = std::fs::remove_file(&test_path);
             }
             Err(_) => {
                 anyhow::bail!(
-                    "no write access to {}. Use: sudo aether-proxy upgrade",
+                    "no write access to {}. Use: sudo aether-tunnel upgrade",
                     exe_dir.display()
                 );
             }
@@ -339,7 +339,10 @@ async fn execute_upgrade(
     let client = build_github_client()?;
     let release = fetch_release(&client, version).await?;
     let target_tag = &release.tag_name;
-    let target_semver = target_tag.strip_prefix("proxy-v").unwrap_or(target_tag);
+    let target_semver = target_tag
+        .strip_prefix("tunnel-v")
+        .or_else(|| target_tag.strip_prefix("proxy-v"))
+        .unwrap_or(target_tag);
 
     eprintln!("  Target version: {} ({})", target_tag, release.name);
 
@@ -378,12 +381,12 @@ async fn execute_upgrade(
                         Ok(()) => eprintln!("  Service restarted."),
                         Err(e) => {
                             eprintln!("  WARNING: failed to restart service: {}", e);
-                            eprintln!("  Run manually: sudo aether-proxy restart");
+                            eprintln!("  Run manually: sudo aether-tunnel restart");
                         }
                     }
                 } else {
                     eprintln!("  Managed service is active, but restart requires root.");
-                    eprintln!("  Run: sudo aether-proxy restart");
+                    eprintln!("  Run: sudo aether-tunnel restart");
                     eprintln!("  Skipping restart.");
                 }
             } else {
@@ -409,7 +412,7 @@ async fn execute_upgrade(
     Ok(())
 }
 
-/// `aether-proxy upgrade [version]` -- self-upgrade from GitHub releases.
+/// `aether-tunnel upgrade [version]` -- self-upgrade from GitHub releases.
 pub async fn cmd_upgrade(version: Option<String>) -> anyhow::Result<()> {
     execute_upgrade(version.as_deref(), false, RestartMode::BestEffort).await
 }

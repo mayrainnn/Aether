@@ -1,4 +1,4 @@
-//! Service installation and management for `aether-proxy`.
+//! Service installation and management for `aether-tunnel`.
 //!
 //! Supports the host-native service manager we currently target:
 //! `systemd` on most Linux distributions and `OpenRC` on Alpine.
@@ -8,15 +8,15 @@ use std::io::ErrorKind;
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 
-const SERVICE_NAME: &str = "aether-proxy";
+const SERVICE_NAME: &str = "aether-tunnel";
 
-const SYSTEMD_UNIT_PATH: &str = "/etc/systemd/system/aether-proxy.service";
+const SYSTEMD_UNIT_PATH: &str = "/etc/systemd/system/aether-tunnel.service";
 
-const OPENRC_INIT_PATH: &str = "/etc/init.d/aether-proxy";
-const OPENRC_PID_PATH: &str = "/run/aether-proxy.pid";
-const OPENRC_LOG_DIR: &str = "/var/log/aether-proxy";
-const OPENRC_STDOUT_LOG: &str = "/var/log/aether-proxy/current.log";
-const OPENRC_STDERR_LOG: &str = "/var/log/aether-proxy/error.log";
+const OPENRC_INIT_PATH: &str = "/etc/init.d/aether-tunnel";
+const OPENRC_PID_PATH: &str = "/run/aether-tunnel.pid";
+const OPENRC_LOG_DIR: &str = "/var/log/aether-tunnel";
+const OPENRC_STDOUT_LOG: &str = "/var/log/aether-tunnel/current.log";
+const OPENRC_STDERR_LOG: &str = "/var/log/aether-tunnel/error.log";
 
 const OPENRC_RUN_BINS: &[&str] = &["/sbin/openrc-run", "/usr/sbin/openrc-run", "openrc-run"];
 const OPENRC_SERVICE_BINS: &[&str] = &["/sbin/rc-service", "/usr/sbin/rc-service", "rc-service"];
@@ -69,7 +69,7 @@ pub fn unavailable_hint() -> String {
     match detect_service_manager() {
         Some(manager) if !is_root() => {
             format!(
-                "requires root with {}, use: sudo aether-proxy setup",
+                "requires root with {}, use: sudo aether-tunnel setup",
                 manager.display_name()
             )
         }
@@ -86,7 +86,7 @@ pub fn install_service(config_path: &Path) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("no supported service manager detected (systemd/OpenRC)"))?;
 
     if !is_root() {
-        anyhow::bail!("root required, use: sudo ./aether-proxy setup");
+        anyhow::bail!("root required, use: sudo ./aether-tunnel setup");
     }
 
     match manager {
@@ -221,13 +221,13 @@ fn ensure_openrc_logs_readable() -> anyhow::Result<()> {
             Ok(_) => {}
             Err(err) if err.kind() == ErrorKind::PermissionDenied => {
                 anyhow::bail!(
-                    "OpenRC logs are stored under {} and usually require root access. Try `sudo ./aether-proxy logs`.",
+                    "OpenRC logs are stored under {} and usually require root access. Try `sudo ./aether-tunnel logs`.",
                     OPENRC_LOG_DIR
                 );
             }
             Err(err) if err.kind() == ErrorKind::NotFound => {
                 anyhow::bail!(
-                    "OpenRC log file not found at {}. Start the service first or check `./aether-proxy status`.",
+                    "OpenRC log file not found at {}. Start the service first or check `./aether-tunnel status`.",
                     path
                 );
             }
@@ -252,14 +252,14 @@ fn active_service_manager() -> Option<ServiceManager> {
 
 fn ensure_service_installed() -> anyhow::Result<ServiceManager> {
     installed_manager().ok_or_else(|| {
-        anyhow::anyhow!("service not installed, run `sudo ./aether-proxy setup` first")
+        anyhow::anyhow!("service not installed, run `sudo ./aether-tunnel setup` first")
     })
 }
 
 fn ensure_root_and_service() -> anyhow::Result<ServiceManager> {
     let manager = ensure_service_installed()?;
     if !is_root() {
-        anyhow::bail!("root required, use: sudo ./aether-proxy <command>");
+        anyhow::bail!("root required, use: sudo ./aether-tunnel <command>");
     }
     Ok(manager)
 }
@@ -295,22 +295,22 @@ fn install_systemd_service(config_path: &Path) -> anyhow::Result<()> {
 
     let unit_content = format!(
         "[Unit]\n\
-         Description=Aether Proxy\n\
+         Description=Aether Tunnel\n\
          After=network.target\n\
          \n\
          [Service]\n\
          Type=simple\n\
          WorkingDirectory={working_dir}\n\
-         Environment=AETHER_PROXY_CONFIG={config_str}\n\
-         Environment=AETHER_PROXY_SERVICE_MANAGER=systemd\n\
-         Environment=AETHER_PROXY_LOG_DESTINATION=both\n\
-         Environment=AETHER_PROXY_LOG_DIR=/var/log/aether-proxy\n\
+         Environment=AETHER_TUNNEL_CONFIG={config_str}\n\
+         Environment=AETHER_TUNNEL_SERVICE_MANAGER=systemd\n\
+         Environment=AETHER_TUNNEL_LOG_DESTINATION=both\n\
+         Environment=AETHER_TUNNEL_LOG_DIR=/var/log/aether-tunnel\n\
          ExecStart={exe_str}\n\
          Restart=on-failure\n\
          RestartSec=5\n\
          LimitNOFILE=65535\n\
          UMask=0077\n\
-         LogsDirectory=aether-proxy\n\
+         LogsDirectory=aether-tunnel\n\
          LogsDirectoryMode=0750\n\
          \n\
          [Install]\n\
@@ -326,7 +326,7 @@ fn install_systemd_service(config_path: &Path) -> anyhow::Result<()> {
     if manager_is_active(ServiceManager::Systemd) {
         eprintln!("  Service started successfully!");
     } else {
-        eprintln!("  Service state is not active yet. Check `sudo ./aether-proxy logs`.");
+        eprintln!("  Service state is not active yet. Check `sudo ./aether-tunnel logs`.");
     }
 
     print_post_install_commands();
@@ -426,7 +426,7 @@ stop() {{
 "#,
         openrc_run_bin(),
         shell_quote(SERVICE_NAME),
-        shell_quote("Aether Proxy"),
+        shell_quote("Aether Tunnel"),
         shell_quote(exe_str),
         shell_quote(working_dir),
         shell_quote(OPENRC_PID_PATH),
@@ -434,10 +434,10 @@ stop() {{
         shell_quote(OPENRC_STDOUT_LOG),
         shell_quote(OPENRC_STDERR_LOG),
         shell_quote(supervise_daemon_bin()),
-        shell_quote(&format!("AETHER_PROXY_CONFIG={config_str}")),
-        shell_quote("AETHER_PROXY_SERVICE_MANAGER=openrc"),
-        shell_quote("AETHER_PROXY_LOG_DESTINATION=both"),
-        shell_quote(&format!("AETHER_PROXY_LOG_DIR={OPENRC_LOG_DIR}")),
+        shell_quote(&format!("AETHER_TUNNEL_CONFIG={config_str}")),
+        shell_quote("AETHER_TUNNEL_SERVICE_MANAGER=openrc"),
+        shell_quote("AETHER_TUNNEL_LOG_DESTINATION=both"),
+        shell_quote(&format!("AETHER_TUNNEL_LOG_DIR={OPENRC_LOG_DIR}")),
     );
     std::fs::write(OPENRC_INIT_PATH, &init_content)?;
     set_mode(OPENRC_INIT_PATH, 0o755)?;
@@ -450,7 +450,7 @@ stop() {{
     if manager_is_active(ServiceManager::OpenRc) {
         eprintln!("  Service started successfully!");
     } else {
-        eprintln!("  Service state is not active yet. Check `sudo ./aether-proxy logs`.");
+        eprintln!("  Service state is not active yet. Check `sudo ./aether-tunnel logs`.");
     }
 
     print_post_install_commands();
@@ -552,11 +552,11 @@ fn manager_is_active(manager: ServiceManager) -> bool {
 fn print_post_install_commands() {
     eprintln!();
     eprintln!("  Commands:");
-    eprintln!("    ./aether-proxy status          # service status");
-    eprintln!("    sudo ./aether-proxy logs       # tail logs");
-    eprintln!("    sudo ./aether-proxy restart    # restart");
-    eprintln!("    sudo ./aether-proxy stop       # stop");
-    eprintln!("    sudo ./aether-proxy uninstall  # remove service");
+    eprintln!("    ./aether-tunnel status          # service status");
+    eprintln!("    sudo ./aether-tunnel logs       # tail logs");
+    eprintln!("    sudo ./aether-tunnel restart    # restart");
+    eprintln!("    sudo ./aether-tunnel stop       # stop");
+    eprintln!("    sudo ./aether-tunnel uninstall  # remove service");
     eprintln!();
 }
 

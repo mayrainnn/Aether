@@ -811,20 +811,10 @@ fn build_openai_image_provider_body_from_openai_responses_body(
 ) -> Option<(Value, Value)> {
     let object = body_json.as_object()?;
     let input = object.get("input")?.clone();
-    let mut tool = openai_responses_image_generation_tool(object).unwrap_or_else(|| {
-        serde_json::Map::from_iter([("type".to_string(), json!("image_generation"))])
-    });
-    tool.entry("type".to_string())
-        .or_insert_with(|| json!("image_generation"));
-    tool.entry("action".to_string())
-        .or_insert_with(|| json!("generate"));
+    let tool = openai_responses_image_generation_tool(object);
 
     let mut body = serde_json::Map::new();
     body.insert("input".to_string(), input);
-    body.insert(
-        "tools".to_string(),
-        Value::Array(vec![Value::Object(tool.clone())]),
-    );
     if let Some(model) = object
         .get("model")
         .and_then(Value::as_str)
@@ -857,12 +847,14 @@ fn build_openai_image_provider_body_from_openai_responses_body(
     let mut summary = serde_json::Map::new();
     summary.insert(
         "operation".to_string(),
-        tool.get("action")
+        tool.as_ref()
+            .and_then(|tool| tool.get("action"))
             .cloned()
             .unwrap_or_else(|| json!("generate")),
     );
     for key in ["output_format", "partial_images", "size", "quality"] {
-        if let Some(value) = tool.get(key).or_else(|| object.get(key)) {
+        let tool_value = tool.as_ref().and_then(|tool| tool.get(key));
+        if let Some(value) = tool_value.or_else(|| object.get(key)) {
             summary.insert(key.to_string(), value.clone());
         }
     }
@@ -1227,4 +1219,41 @@ async fn build_kiro_openai_responses_payload_parts(
         transport_profile: None,
         image_request_summary: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn openai_responses_image_bridge_body_does_not_inject_tools() {
+        let body_json = json!({
+            "model": "gpt-image-2",
+            "input": "Draw a glass city",
+            "tools": [
+                {
+                    "type": "image_generation",
+                    "size": "1024x1024",
+                    "output_format": "png"
+                }
+            ],
+            "tool_choice": {
+                "type": "image_generation"
+            }
+        });
+
+        let (provider_body, summary) = build_openai_image_provider_body_from_openai_responses_body(
+            &body_json,
+            "gpt-image-2",
+            true,
+        )
+        .expect("responses image body should convert");
+
+        assert!(provider_body.get("tools").is_none());
+        assert_eq!(provider_body["model"], "gpt-image-2");
+        assert_eq!(provider_body["input"], "Draw a glass city");
+        assert_eq!(provider_body["stream"], true);
+        assert_eq!(summary["operation"], "generate");
+        assert_eq!(summary["output_format"], "png");
+    }
 }

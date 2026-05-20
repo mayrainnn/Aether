@@ -115,6 +115,14 @@ pub(crate) fn normalize_auth_type(value: Option<&str>) -> Result<String, String>
     }
 }
 
+pub(crate) fn normalize_max_probe_interval_minutes(value: i32) -> Result<i32, String> {
+    if (0..=32).contains(&value) {
+        Ok(value)
+    } else {
+        Err("max_probe_interval_minutes 必须在 0 到 32 之间".to_string())
+    }
+}
+
 pub(crate) fn normalize_pool_advanced_config(
     value: Option<serde_json::Value>,
 ) -> Result<Option<serde_json::Value>, String> {

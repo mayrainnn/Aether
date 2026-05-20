@@ -44,7 +44,7 @@ struct UnregisterRequest {
     node_id: String,
 }
 
-/// Aether API client for proxy node lifecycle management.
+/// Aether API client for tunnel node lifecycle management.
 pub struct AetherClient {
     http: Client,
     base_url: String,
@@ -66,8 +66,10 @@ impl AetherClient {
             },
             tcp_nodelay: config.aether_tcp_nodelay,
             http2_adaptive_window: config.aether_http2,
-            user_agent: Some(format!("aether-proxy/{}", env!("CARGO_PKG_VERSION"))),
-            proxy_url: config.effective_aether_proxy_url().map(str::to_string),
+            user_agent: Some(format!("aether-tunnel/{}", env!("CARGO_PKG_VERSION"))),
+            proxy_url: config
+                .effective_aether_outbound_proxy_url()
+                .map(str::to_string),
             ..HttpClientConfig::default()
         })
         .expect("failed to create HTTP client");

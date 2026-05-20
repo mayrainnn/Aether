@@ -1,14 +1,14 @@
 #!/bin/sh
 set -eu
 
-REPO="${AETHER_PROXY_RELEASE_REPO:-fawney19/Aether}"
-TAG="${AETHER_PROXY_RELEASE_TAG:-}"
-INSTALL_DIR="${AETHER_PROXY_INSTALL_DIR:-}"
-CONFIG_PATH="${AETHER_PROXY_CONFIG:-}"
+REPO="${AETHER_TUNNEL_RELEASE_REPO:-fawney19/Aether}"
+TAG="${AETHER_TUNNEL_RELEASE_TAG:-}"
+INSTALL_DIR="${AETHER_TUNNEL_INSTALL_DIR:-}"
+CONFIG_PATH="${AETHER_TUNNEL_CONFIG:-}"
 TMP_DIR=""
 
-say() { printf '%s\n' "[Aether Proxy] $1"; }
-fail() { printf '%s\n' "[Aether Proxy] $1" >&2; exit 1; }
+say() { printf '%s\n' "[Aether Tunnel] $1"; }
+fail() { printf '%s\n' "[Aether Tunnel] $1" >&2; exit 1; }
 
 cleanup() {
   if [ -n "$TMP_DIR" ] && [ -d "$TMP_DIR" ]; then
@@ -61,7 +61,7 @@ toml_quote() {
   fi
 }
 
-resolve_latest_proxy_tag() {
+resolve_latest_tunnel_tag() {
   [ -n "$TAG" ] && { printf '%s\n' "$TAG"; return; }
   api_url="https://api.github.com/repos/${REPO}/releases?per_page=100"
   releases="$TMP_DIR/releases.json"
@@ -70,13 +70,13 @@ resolve_latest_proxy_tag() {
     python3 - "$releases" <<'PY'
 import json, sys
 releases = json.load(open(sys.argv[1], encoding='utf-8'))
-proxy = [r for r in releases if not r.get('draft') and str(r.get('tag_name', '')).startswith('proxy-v')]
-proxy.sort(key=lambda r: r.get('published_at') or r.get('created_at') or '', reverse=True)
-if proxy:
-    print(proxy[0]['tag_name'])
+tunnel = [r for r in releases if not r.get('draft') and str(r.get('tag_name', '')).startswith('tunnel-v')]
+tunnel.sort(key=lambda r: r.get('published_at') or r.get('created_at') or '', reverse=True)
+if tunnel:
+    print(tunnel[0]['tag_name'])
 PY
   else
-    grep -o '"tag_name"[[:space:]]*:[[:space:]]*"proxy-v[^"]*"' "$releases" | head -n 1 | sed 's/.*"\(proxy-v[^"]*\)".*/\1/'
+    grep -o '"tag_name"[[:space:]]*:[[:space:]]*"tunnel-v[^"]*"' "$releases" | head -n 1 | sed 's/.*"\(tunnel-v[^"]*\)".*/\1/'
   fi
 }
 
@@ -98,9 +98,9 @@ detect_asset() {
   esac
 
   if [ "$platform" = "linux" ] && command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl; then
-    printf 'aether-proxy-linux-musl-%s.tar.gz\n' "$cpu"
+    printf 'aether-tunnel-linux-musl-%s.tar.gz\n' "$cpu"
   else
-    printf 'aether-proxy-%s-%s.tar.gz\n' "$platform" "$cpu"
+    printf 'aether-tunnel-%s-%s.tar.gz\n' "$platform" "$cpu"
   fi
 }
 
@@ -114,9 +114,9 @@ choose_paths() {
   fi
   if [ -z "$CONFIG_PATH" ]; then
     if [ "$(id -u 2>/dev/null || printf 1)" = "0" ]; then
-      CONFIG_PATH="/etc/aether-proxy/aether-proxy.toml"
+      CONFIG_PATH="/etc/aether-tunnel/aether-tunnel.toml"
     else
-      CONFIG_PATH="$HOME/.aether-proxy/aether-proxy.toml"
+      CONFIG_PATH="$HOME/.aether-tunnel/aether-tunnel.toml"
     fi
   fi
 }
@@ -150,11 +150,11 @@ install_binary() {
   verify_checksum "$archive" "$TMP_DIR/SHA256SUMS.txt" "$asset"
 
   tar -xzf "$archive" -C "$TMP_DIR"
-  [ -f "$TMP_DIR/aether-proxy" ] || fail "制品中未找到 aether-proxy"
+  [ -f "$TMP_DIR/aether-tunnel" ] || fail "制品中未找到 aether-tunnel"
   mkdir -p "$INSTALL_DIR"
-  cp "$TMP_DIR/aether-proxy" "$INSTALL_DIR/aether-proxy"
-  chmod +x "$INSTALL_DIR/aether-proxy"
-  say "已安装二进制：$INSTALL_DIR/aether-proxy"
+  cp "$TMP_DIR/aether-tunnel" "$INSTALL_DIR/aether-tunnel"
+  chmod +x "$INSTALL_DIR/aether-tunnel"
+  say "已安装二进制：$INSTALL_DIR/aether-tunnel"
 }
 
 has_legacy_single_server_keys() {
@@ -193,7 +193,7 @@ append_server_config() {
   quoted_name=$(toml_quote "$node_name")
 
   if has_legacy_single_server_keys; then
-    fail "现有配置仍使用旧的顶层 aether_url/management_token，请先运行 aether-proxy setup 迁移为 [[servers]] 后重试：$CONFIG_PATH"
+    fail "现有配置仍使用旧的顶层 aether_url/management_token，请先运行 aether-tunnel setup 迁移为 [[servers]] 后重试：$CONFIG_PATH"
   fi
 
   if server_exists "$quoted_url" "$quoted_name"; then
@@ -209,7 +209,7 @@ append_server_config() {
     if [ -f "$CONFIG_PATH" ] && [ -s "$CONFIG_PATH" ]; then
       printf '\n'
     fi
-    printf '# Added by Aether Proxy one-click installer. Existing config is preserved.\n'
+    printf '# Added by Aether Tunnel one-click installer. Existing config is preserved.\n'
     printf '[[servers]]\n'
     printf 'aether_url = %s\n' "$quoted_url"
     printf 'management_token = %s\n' "$quoted_token"
@@ -220,22 +220,22 @@ append_server_config() {
 }
 
 main() {
-  TMP_DIR=$(mktemp -d 2>/dev/null || mktemp -d -t aether-proxy)
+  TMP_DIR=$(mktemp -d 2>/dev/null || mktemp -d -t aether-tunnel)
   need_cmd tar
   choose_paths
 
-  aether_url=$(prompt_if_empty AETHER_PROXY_AETHER_URL "${AETHER_PROXY_AETHER_URL:-}" "Aether URL: ")
-  management_token=$(prompt_if_empty AETHER_PROXY_MANAGEMENT_TOKEN "${AETHER_PROXY_MANAGEMENT_TOKEN:-}" "Management token (ae_xxx): ")
-  node_name=$(prompt_if_empty AETHER_PROXY_NODE_NAME "${AETHER_PROXY_NODE_NAME:-}" "Node name: ")
+  aether_url=$(prompt_if_empty AETHER_TUNNEL_AETHER_URL "${AETHER_TUNNEL_AETHER_URL:-}" "Aether URL: ")
+  management_token=$(prompt_if_empty AETHER_TUNNEL_MANAGEMENT_TOKEN "${AETHER_TUNNEL_MANAGEMENT_TOKEN:-}" "Management token (ae_xxx): ")
+  node_name=$(prompt_if_empty AETHER_TUNNEL_NODE_NAME "${AETHER_TUNNEL_NODE_NAME:-}" "Node name: ")
 
-  tag=$(resolve_latest_proxy_tag)
-  [ -n "$tag" ] || fail "没有找到可用的 proxy-v* release"
+  tag=$(resolve_latest_tunnel_tag)
+  [ -n "$tag" ] || fail "没有找到可用的 tunnel-v* release"
   asset=$(detect_asset)
   install_binary "$tag" "$asset"
   append_server_config "$aether_url" "$management_token" "$node_name"
 
   say "完成。运行以下命令启动/配置服务："
-  say "  $INSTALL_DIR/aether-proxy setup $CONFIG_PATH"
+  say "  $INSTALL_DIR/aether-tunnel setup $CONFIG_PATH"
 }
 
 main "$@"

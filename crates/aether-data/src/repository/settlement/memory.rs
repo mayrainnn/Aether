@@ -161,15 +161,9 @@ impl SettlementWriteRepository for InMemorySettlementRepository {
                             before_gift,
                             input.total_cost_usd,
                         );
-                        if debit_plan.covered_usd() + SETTLEMENT_EPSILON_USD < input.total_cost_usd
-                        {
-                            final_billing_status = "insufficient_quota".to_string();
-                            settlement.billing_status = final_billing_status.clone();
-                        } else {
-                            wallet.balance = before_recharge - debit_plan.recharge_deduction;
-                            wallet.gift_balance = before_gift - debit_plan.gift_deduction;
-                            wallet.total_consumed += input.total_cost_usd;
-                        }
+                        (wallet.balance, wallet.gift_balance) =
+                            debit_plan.after_balances(before_recharge, before_gift);
+                        wallet.total_consumed += input.total_cost_usd;
                     }
                 }
 
@@ -359,7 +353,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finite_wallet_insufficient_balance_does_not_overdraw() {
+    async fn finite_wallet_insufficient_balance_overdraws_and_settles() {
         let repository = InMemorySettlementRepository::seed(vec![sample_wallet()]);
         let settlement = repository
             .settle_usage(UsageSettlementInput {
@@ -378,12 +372,12 @@ mod tests {
             .expect("settlement should succeed")
             .expect("settlement should exist");
 
-        assert_eq!(settlement.billing_status, "insufficient_quota");
+        assert_eq!(settlement.billing_status, "settled");
         assert_eq!(settlement.wallet_balance_before, Some(12.0));
-        assert_eq!(settlement.wallet_balance_after, Some(12.0));
-        assert_eq!(settlement.wallet_recharge_balance_after, Some(10.0));
-        assert_eq!(settlement.wallet_gift_balance_after, Some(2.0));
-        assert_eq!(settlement.provider_monthly_used_usd, None);
+        assert_eq!(settlement.wallet_balance_after, Some(-3.0));
+        assert_eq!(settlement.wallet_recharge_balance_after, Some(-3.0));
+        assert_eq!(settlement.wallet_gift_balance_after, Some(0.0));
+        assert_eq!(settlement.provider_monthly_used_usd, Some(7.5));
     }
 
     #[tokio::test]

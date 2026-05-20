@@ -6,7 +6,10 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use aether_runtime::{AdmissionPermit, ConcurrencyError, ConcurrencyGate, ConcurrencySnapshot};
+use aether_runtime::{
+    service_up_sample, AdmissionPermit, ConcurrencyError, ConcurrencyGate, ConcurrencySnapshot,
+    MetricKind, MetricLabel, MetricSample,
+};
 use aether_runtime_state::{RuntimeSemaphore, RuntimeSemaphoreError, RuntimeSemaphoreSnapshot};
 
 use crate::config::Config;
@@ -54,13 +57,30 @@ pub struct ServerContext {
     /// Per-server active connection count.
     pub active_connections: Arc<AtomicU64>,
     /// Per-server request/latency metrics.
-    pub metrics: Arc<ProxyMetrics>,
+    pub metrics: Arc<TunnelRequestMetrics>,
     /// Per-server tunnel stability/traffic metrics.
     pub tunnel_metrics: Arc<TunnelMetrics>,
 }
 
+impl ServerContext {
+    pub fn metric_samples(&self) -> Vec<MetricSample> {
+        let mut samples = self.metrics.to_metric_samples(&self.server_label);
+        samples.extend(self.tunnel_metrics.to_metric_samples(&self.server_label));
+        samples.push(
+            MetricSample::new(
+                "tunnel_active_connections",
+                "Current number of active tunneled streams handled by this tunnel server context.",
+                MetricKind::Gauge,
+                self.active_connections.load(Ordering::Acquire),
+            )
+            .with_labels(vec![MetricLabel::new("server", self.server_label.clone())]),
+        );
+        samples
+    }
+}
+
 /// Aggregate metrics for reporting to Aether.
-pub struct ProxyMetrics {
+pub struct TunnelRequestMetrics {
     pub total_requests: AtomicU64,
     /// Cumulative connection-establishment latency in nanoseconds
     /// (DNS + TCP/TLS + TTFB, excludes response body streaming).
@@ -68,9 +88,46 @@ pub struct ProxyMetrics {
     pub failed_requests: AtomicU64,
     pub dns_failures: AtomicU64,
     pub stream_errors: AtomicU64,
+    pub slow_requests: AtomicU64,
 }
 
-impl ProxyMetrics {
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+pub struct TunnelRequestMetricsSnapshot {
+    pub total_requests: u64,
+    pub total_latency_ns: u64,
+    pub failed_requests: u64,
+    pub dns_failures: u64,
+    pub stream_errors: u64,
+    pub slow_requests: u64,
+}
+
+impl TunnelRequestMetricsSnapshot {
+    pub fn average_latency_ns(self) -> Option<u64> {
+        self.total_latency_ns.checked_div(self.total_requests)
+    }
+
+    pub fn average_latency_ms(self) -> Option<f64> {
+        self.average_latency_ns()
+            .map(|value| value as f64 / 1_000_000.0)
+    }
+
+    pub fn delta_since(self, baseline: Self) -> Self {
+        Self {
+            total_requests: self.total_requests.saturating_sub(baseline.total_requests),
+            total_latency_ns: self
+                .total_latency_ns
+                .saturating_sub(baseline.total_latency_ns),
+            failed_requests: self
+                .failed_requests
+                .saturating_sub(baseline.failed_requests),
+            dns_failures: self.dns_failures.saturating_sub(baseline.dns_failures),
+            stream_errors: self.stream_errors.saturating_sub(baseline.stream_errors),
+            slow_requests: self.slow_requests.saturating_sub(baseline.slow_requests),
+        }
+    }
+}
+
+impl TunnelRequestMetrics {
     pub fn new() -> Self {
         Self {
             total_requests: AtomicU64::new(0),
@@ -78,6 +135,7 @@ impl ProxyMetrics {
             failed_requests: AtomicU64::new(0),
             dns_failures: AtomicU64::new(0),
             stream_errors: AtomicU64::new(0),
+            slow_requests: AtomicU64::new(0),
         }
     }
 
@@ -87,6 +145,77 @@ impl ProxyMetrics {
         let nanos = u64::try_from(connect_elapsed.as_nanos()).unwrap_or(u64::MAX);
         self.total_requests.fetch_add(1, Ordering::Release);
         self.total_latency_ns.fetch_add(nanos, Ordering::Release);
+    }
+
+    pub fn record_slow_request(&self) {
+        self.slow_requests.fetch_add(1, Ordering::Release);
+    }
+
+    pub fn snapshot(&self) -> TunnelRequestMetricsSnapshot {
+        TunnelRequestMetricsSnapshot {
+            total_requests: self.total_requests.load(Ordering::Acquire),
+            total_latency_ns: self.total_latency_ns.load(Ordering::Acquire),
+            failed_requests: self.failed_requests.load(Ordering::Acquire),
+            dns_failures: self.dns_failures.load(Ordering::Acquire),
+            stream_errors: self.stream_errors.load(Ordering::Acquire),
+            slow_requests: self.slow_requests.load(Ordering::Acquire),
+        }
+    }
+
+    pub fn to_metric_samples(&self, server_label: &str) -> Vec<MetricSample> {
+        let snapshot = self.snapshot();
+        let labels = vec![MetricLabel::new("server", server_label)];
+        vec![
+            MetricSample::new(
+                "tunnel_requests_total",
+                "Total number of tunneled upstream requests completed by the tunnel.",
+                MetricKind::Counter,
+                snapshot.total_requests,
+            )
+            .with_labels(labels.clone()),
+            MetricSample::new(
+                "tunnel_request_latency_total_ns",
+                "Cumulative tunnel request latency in nanoseconds through upstream response headers.",
+                MetricKind::Counter,
+                snapshot.total_latency_ns,
+            )
+            .with_labels(labels.clone()),
+            MetricSample::new(
+                "tunnel_request_latency_avg_ns",
+                "Average tunnel request latency in nanoseconds through upstream response headers.",
+                MetricKind::Gauge,
+                snapshot.average_latency_ns().unwrap_or(0),
+            )
+            .with_labels(labels.clone()),
+            MetricSample::new(
+                "tunnel_failed_requests_total",
+                "Total number of tunneled upstream requests that failed before response headers.",
+                MetricKind::Counter,
+                snapshot.failed_requests,
+            )
+            .with_labels(labels.clone()),
+            MetricSample::new(
+                "tunnel_dns_failures_total",
+                "Total number of tunneled upstream requests rejected or failed during target validation or DNS.",
+                MetricKind::Counter,
+                snapshot.dns_failures,
+            )
+            .with_labels(labels.clone()),
+            MetricSample::new(
+                "tunnel_stream_errors_total",
+                "Total number of tunneled response body stream errors.",
+                MetricKind::Counter,
+                snapshot.stream_errors,
+            )
+            .with_labels(labels.clone()),
+            MetricSample::new(
+                "tunnel_slow_requests_total",
+                "Total number of tunneled requests crossing the tunnel slow-request threshold.",
+                MetricKind::Counter,
+                snapshot.slow_requests,
+            )
+            .with_labels(labels),
+        ]
     }
 }
 
@@ -106,7 +235,7 @@ pub struct TunnelErrorEvent {
     pub operator_action: String,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
 pub struct TunnelMetricsSnapshot {
     pub connect_attempts: u64,
     pub connect_successes: u64,
@@ -298,6 +427,104 @@ impl TunnelMetrics {
             error_events_total: self.error_events_total.load(Ordering::Acquire),
         }
     }
+
+    pub fn to_metric_samples(&self, server_label: &str) -> Vec<MetricSample> {
+        let snapshot = self.snapshot();
+        let labels = vec![MetricLabel::new("server", server_label)];
+        vec![
+            MetricSample::new(
+                "tunnel_connect_attempts_total",
+                "Total number of WebSocket tunnel connection attempts.",
+                MetricKind::Counter,
+                snapshot.connect_attempts,
+            )
+            .with_labels(labels.clone()),
+            MetricSample::new(
+                "tunnel_connect_successes_total",
+                "Total number of successful WebSocket tunnel connections.",
+                MetricKind::Counter,
+                snapshot.connect_successes,
+            )
+            .with_labels(labels.clone()),
+            MetricSample::new(
+                "tunnel_connect_errors_total",
+                "Total number of WebSocket tunnel connection errors.",
+                MetricKind::Counter,
+                snapshot.connect_errors,
+            )
+            .with_labels(labels.clone()),
+            MetricSample::new(
+                "tunnel_disconnects_total",
+                "Total number of WebSocket tunnel disconnects.",
+                MetricKind::Counter,
+                snapshot.disconnects,
+            )
+            .with_labels(labels.clone()),
+            MetricSample::new(
+                "tunnel_heartbeat_sent_total",
+                "Total number of tunnel heartbeats sent.",
+                MetricKind::Counter,
+                snapshot.heartbeat_sent,
+            )
+            .with_labels(labels.clone()),
+            MetricSample::new(
+                "tunnel_heartbeat_ack_total",
+                "Total number of tunnel heartbeat acknowledgements received.",
+                MetricKind::Counter,
+                snapshot.heartbeat_ack,
+            )
+            .with_labels(labels.clone()),
+            MetricSample::new(
+                "tunnel_heartbeat_rtt_last_ms",
+                "Last observed tunnel heartbeat round-trip time in milliseconds.",
+                MetricKind::Gauge,
+                snapshot.heartbeat_rtt_last_ms,
+            )
+            .with_labels(labels.clone()),
+            MetricSample::new(
+                "tunnel_heartbeat_rtt_avg_ms",
+                "Average observed tunnel heartbeat round-trip time in milliseconds.",
+                MetricKind::Gauge,
+                snapshot.heartbeat_rtt_avg_ms().unwrap_or(0.0) as u64,
+            )
+            .with_labels(labels.clone()),
+            MetricSample::new(
+                "tunnel_ws_in_frames_total",
+                "Total number of WebSocket frames received by the tunnel.",
+                MetricKind::Counter,
+                snapshot.ws_in_frames,
+            )
+            .with_labels(labels.clone()),
+            MetricSample::new(
+                "tunnel_ws_in_bytes_total",
+                "Total number of WebSocket bytes received by the tunnel.",
+                MetricKind::Counter,
+                snapshot.ws_in_bytes,
+            )
+            .with_labels(labels.clone()),
+            MetricSample::new(
+                "tunnel_ws_out_frames_total",
+                "Total number of WebSocket frames sent by the tunnel.",
+                MetricKind::Counter,
+                snapshot.ws_out_frames,
+            )
+            .with_labels(labels.clone()),
+            MetricSample::new(
+                "tunnel_ws_out_bytes_total",
+                "Total number of WebSocket bytes sent by the tunnel.",
+                MetricKind::Counter,
+                snapshot.ws_out_bytes,
+            )
+            .with_labels(labels.clone()),
+            MetricSample::new(
+                "tunnel_error_events_total",
+                "Total number of classified tunnel error events recorded by the tunnel.",
+                MetricKind::Counter,
+                snapshot.error_events_total,
+            )
+            .with_labels(labels),
+        ]
+    }
 }
 
 fn now_unix_secs() -> u64 {
@@ -337,14 +564,14 @@ fn classify_tunnel_error(category: &str, _message: &str) -> TunnelErrorDiagnosti
             component: "tunnel_read",
             summary: "No inbound tunnel frames before stale timeout",
             operator_action:
-                "Check gateway or reverse-proxy idle timeouts, packet loss, and WebSocket ping/pong reachability. Increase AETHER_PROXY_TUNNEL_STALE_TIMEOUT_MS if the network is high-latency.",
+                "Check gateway or reverse-proxy idle timeouts, packet loss, and WebSocket ping/pong reachability. Increase AETHER_TUNNEL_STALE_TIMEOUT_MS if the network is high-latency.",
         },
         "ws_write_error" => TunnelErrorDiagnostic {
             severity: "error",
             component: "tunnel_write",
             summary: "WebSocket write failed because the peer closed or reset the connection",
             operator_action:
-                "Check gateway restarts, load balancer resets, NAT/firewall connection tracking, and whether the proxy is reconnecting successfully.",
+                "Check gateway restarts, load balancer resets, NAT/firewall connection tracking, and whether the tunnel is reconnecting successfully.",
         },
         "ws_ping_error" => TunnelErrorDiagnostic {
             severity: "error",
@@ -365,35 +592,35 @@ fn classify_tunnel_error(category: &str, _message: &str) -> TunnelErrorDiagnosti
             component: "tunnel_connect",
             summary: "Tunnel connection attempt failed",
             operator_action:
-                "Check Aether URL reachability, DNS, TLS, management token validity, and any configured AETHER_PROXY_AETHER_PROXY_URL.",
+                "Check Aether URL reachability, DNS, TLS, management token validity, and any configured AETHER_TUNNEL_AETHER_OUTBOUND_PROXY_URL.",
         },
         "frame_decode_error" => TunnelErrorDiagnostic {
             severity: "error",
             component: "tunnel_protocol",
             summary: "Received tunnel frame could not be decoded",
             operator_action:
-                "Check proxy and gateway version compatibility and whether traffic is being modified by an intermediary.",
+                "Check tunnel and gateway version compatibility and whether traffic is being modified by an intermediary.",
         },
         "stream_dispatch_timeout" => TunnelErrorDiagnostic {
             severity: "warning",
             component: "stream_dispatch",
             summary: "Request body frame could not be delivered to its stream handler in time",
             operator_action:
-                "Check proxy CPU, memory, stream concurrency saturation, and slow upstream provider requests.",
+                "Check tunnel CPU, memory, stream concurrency saturation, and slow upstream provider requests.",
         },
         "heartbeat_ack_empty" | "heartbeat_ack_parse" => TunnelErrorDiagnostic {
             severity: "warning",
             component: "heartbeat",
             summary: "Heartbeat ACK from gateway was missing or invalid",
             operator_action:
-                "Check gateway heartbeat handler logs and proxy/gateway version compatibility.",
+                "Check gateway heartbeat handler logs and tunnel/gateway version compatibility.",
         },
         "writer_task_panic" | "writer_task_cancelled" => TunnelErrorDiagnostic {
             severity: "error",
             component: "tunnel_writer",
             summary: "Tunnel writer task exited unexpectedly",
             operator_action:
-                "Check proxy logs for the preceding write or ping error and confirm the tunnel reconnect loop is active.",
+                "Check tunnel logs for the preceding write or ping error and confirm the tunnel reconnect loop is active.",
         },
         "dispatcher_error" => TunnelErrorDiagnostic {
             severity: "error",
@@ -407,16 +634,16 @@ fn classify_tunnel_error(category: &str, _message: &str) -> TunnelErrorDiagnosti
             component: "tunnel",
             summary: "Tunnel reported an unclassified error",
             operator_action:
-                "Inspect the raw message and compare it with proxy, gateway, and network logs at the same time.",
+                "Inspect the raw message and compare it with tunnel, gateway, and network logs at the same time.",
         },
     }
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum ProxyAdmissionError {
-    #[error("proxy stream admission saturated at {limit} for gate {gate}")]
+pub enum TunnelAdmissionError {
+    #[error("tunnel stream admission saturated at {limit} for gate {gate}")]
     Saturated { gate: &'static str, limit: usize },
-    #[error("proxy stream admission unavailable for gate {gate}: {message}")]
+    #[error("tunnel stream admission unavailable for gate {gate}: {message}")]
     Unavailable {
         gate: &'static str,
         limit: usize,
@@ -425,6 +652,30 @@ pub enum ProxyAdmissionError {
 }
 
 impl AppState {
+    pub async fn metric_samples(&self) -> Vec<MetricSample> {
+        let mut samples = vec![service_up_sample("aether-tunnel")];
+        if let Some(snapshot) = self.stream_concurrency_snapshot() {
+            samples.extend(snapshot.to_metric_samples("tunnel_streams"));
+        }
+        if let Some(gate) = self.distributed_stream_gate.as_ref() {
+            match gate.snapshot().await {
+                Ok(snapshot) => {
+                    samples.extend(snapshot.to_metric_samples("tunnel_streams_distributed"));
+                }
+                Err(_) => samples.push(
+                    MetricSample::new(
+                        "concurrency_unavailable",
+                        "Whether the distributed concurrency gate is currently unavailable.",
+                        MetricKind::Gauge,
+                        1,
+                    )
+                    .with_labels(vec![MetricLabel::new("gate", "tunnel_streams_distributed")]),
+                ),
+            }
+        }
+        samples
+    }
+
     pub fn with_stream_concurrency_gate(mut self, gate: Arc<ConcurrencyGate>) -> Self {
         self.stream_gate = Some(gate);
         self
@@ -450,14 +701,14 @@ impl AppState {
 
     pub async fn try_acquire_stream_permit(
         &self,
-    ) -> Result<Option<AdmissionPermit>, ProxyAdmissionError> {
+    ) -> Result<Option<AdmissionPermit>, TunnelAdmissionError> {
         let local = match &self.stream_gate {
             Some(gate) => Some(gate.try_acquire().map_err(|err| {
                 match err {
                     ConcurrencyError::Saturated { gate, limit } => {
-                        ProxyAdmissionError::Saturated { gate, limit }
+                        TunnelAdmissionError::Saturated { gate, limit }
                     }
-                    ConcurrencyError::Closed { gate } => ProxyAdmissionError::Unavailable {
+                    ConcurrencyError::Closed { gate } => TunnelAdmissionError::Unavailable {
                         gate,
                         limit: self
                             .stream_gate
@@ -475,20 +726,20 @@ impl AppState {
             Some(gate) => Some(gate.try_acquire().await.map_err(|err| {
                 match err {
                     RuntimeSemaphoreError::Saturated { gate, limit } => {
-                        ProxyAdmissionError::Saturated { gate, limit }
+                        TunnelAdmissionError::Saturated { gate, limit }
                     }
                     RuntimeSemaphoreError::Unavailable {
                         gate,
                         limit,
                         message,
-                    } => ProxyAdmissionError::Unavailable {
+                    } => TunnelAdmissionError::Unavailable {
                         gate,
                         limit,
                         message,
                     },
                     RuntimeSemaphoreError::InvalidConfiguration(message) => {
-                        ProxyAdmissionError::Unavailable {
-                            gate: "proxy_streams_distributed",
+                        TunnelAdmissionError::Unavailable {
+                            gate: "tunnel_streams_distributed",
                             limit: self
                                 .distributed_stream_gate
                                 .as_ref()

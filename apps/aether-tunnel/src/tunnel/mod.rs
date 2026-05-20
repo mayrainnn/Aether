@@ -242,7 +242,9 @@ mod tests {
     use crate::config::Config;
     use crate::registration::client::AetherClient;
     use crate::runtime::DynamicConfig;
-    use crate::state::{AppState as ProxyAppState, ProxyMetrics, ServerContext, TunnelMetrics};
+    use crate::state::{
+        AppState as TunnelAppState, ServerContext, TunnelMetrics, TunnelRequestMetrics,
+    };
     use crate::target_filter::DnsCache;
     use crate::tunnel::protocol;
     use crate::upstream_client;
@@ -292,7 +294,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn proxy_reconnects_after_gateway_restart() {
+    async fn tunnel_reconnects_after_gateway_restart() {
         ensure_rustls_provider();
 
         let gateway_port = reserve_local_port().expect("gateway port should reserve");
@@ -304,7 +306,7 @@ mod tests {
         let state = sample_state(sample_config(&gateway_base_url));
         let server = sample_server(&state, "node-recovery");
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let proxy_task = tokio::spawn({
+        let tunnel_task = tokio::spawn({
             let state = Arc::clone(&state);
             let server = Arc::clone(&server);
             let (_drain_tx, drain_rx) = watch::channel(false);
@@ -338,10 +340,10 @@ mod tests {
         .await;
 
         let _ = shutdown_tx.send(true);
-        tokio::time::timeout(Duration::from_secs(5), proxy_task)
+        tokio::time::timeout(Duration::from_secs(5), tunnel_task)
             .await
-            .expect("proxy task should stop")
-            .expect("proxy task should join");
+            .expect("tunnel task should stop")
+            .expect("tunnel task should join");
         gateway_handle.abort();
     }
 
@@ -452,12 +454,12 @@ mod tests {
         Ok(port)
     }
 
-    fn sample_state(config: Config) -> Arc<ProxyAppState> {
+    fn sample_state(config: Config) -> Arc<TunnelAppState> {
         let config = Arc::new(config);
         let dns_cache = Arc::new(DnsCache::new(Duration::from_secs(60), 128));
         let upstream_client_pool =
             upstream_client::UpstreamClientPool::new(Arc::clone(&config), Arc::clone(&dns_cache));
-        Arc::new(ProxyAppState {
+        Arc::new(TunnelAppState {
             config,
             dns_cache,
             upstream_client_pool,
@@ -468,7 +470,7 @@ mod tests {
         })
     }
 
-    fn sample_server(state: &Arc<ProxyAppState>, node_id: &str) -> Arc<ServerContext> {
+    fn sample_server(state: &Arc<TunnelAppState>, node_id: &str) -> Arc<ServerContext> {
         let config = Arc::clone(&state.config);
         Arc::new(ServerContext {
             server_label: "gateway-owned-tunnel".to_string(),
@@ -483,7 +485,7 @@ mod tests {
             )),
             dynamic: Arc::new(ArcSwap::from_pointee(DynamicConfig::from_config(&config))),
             active_connections: Arc::new(AtomicU64::new(0)),
-            metrics: Arc::new(ProxyMetrics::new()),
+            metrics: Arc::new(TunnelRequestMetrics::new()),
             tunnel_metrics: Arc::new(TunnelMetrics::new()),
         })
     }
@@ -493,7 +495,7 @@ mod tests {
             aether_url: aether_url.to_string(),
             management_token: "token".to_string(),
             public_ip: None,
-            node_name: "proxy-test".to_string(),
+            node_name: "tunnel-test".to_string(),
             node_region: None,
             heartbeat_interval: 1,
             allowed_ports: vec![80, 443],
@@ -505,10 +507,11 @@ mod tests {
             aether_tcp_keepalive_secs: 60,
             aether_tcp_nodelay: true,
             aether_http2: true,
-            aether_proxy_url: None,
+            aether_outbound_proxy_url: None,
             aether_retry_max_attempts: 1,
             aether_retry_base_delay_ms: 50,
             aether_retry_max_delay_ms: 100,
+            diagnostics_bind: None,
             max_concurrent_connections: None,
             max_in_flight_streams: None,
             distributed_stream_limit: None,
@@ -526,10 +529,11 @@ mod tests {
             upstream_tcp_nodelay: true,
             upstream_proxy_url: None,
             redirect_replay_budget_bytes: crate::config::DEFAULT_REDIRECT_REPLAY_BUDGET_BYTES,
+            emit_proxy_timing_header: true,
             log_level: "info".to_string(),
-            log_destination: crate::config::ProxyLogDestinationArg::Stdout,
+            log_destination: crate::config::TunnelLogDestinationArg::Stdout,
             log_dir: None,
-            log_rotation: crate::config::ProxyLogRotationArg::Daily,
+            log_rotation: crate::config::TunnelLogRotationArg::Daily,
             log_retention_days: 7,
             log_max_files: 30,
             tunnel_reconnect_base_ms: 50,

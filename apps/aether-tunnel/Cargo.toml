@@ -1,14 +1,15 @@
 [package]
-name = "aether-proxy"
-version = "0.3.11"
+name = "aether-tunnel"
+version = "0.3.12"
 edition = "2021"
-description = "Tunnel proxy for Aether"
+description = "Tunnel agent for Aether"
 
 [dependencies]
 aether-contracts.workspace = true
 aether-http.workspace = true
 aether-runtime.workspace = true
 aether-runtime-state.workspace = true
+axum.workspace = true
 tokio = { version = "1", features = ["full"] }
 reqwest.workspace = true
 hyper = { version = "1", features = ["client", "http1", "http2"] }
@@ -43,4 +44,3 @@ webpki-roots = "0.26"
 
 [dev-dependencies]
 aether-gateway.workspace = true
-axum.workspace = true

@@ -253,6 +253,7 @@ dependencies = [
  "webpki-roots 0.26.11",
  "wreq",
  "wreq-util",
+ "zstd",
 ]
 
 [[package]]
@@ -348,49 +349,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-proxy"
-version = "0.3.11"
-dependencies = [
- "aether-contracts",
- "aether-gateway",
- "aether-http",
- "aether-runtime",
- "aether-runtime-state",
- "anyhow",
- "arc-swap",
- "axum",
- "base64 0.22.1",
- "bytes",
- "clap",
- "crossterm 0.28.1",
- "flate2",
- "futures-util",
- "hex",
- "http-body-util",
- "hyper",
- "hyper-util",
- "libc",
- "ratatui",
- "reqwest",
- "rustls 0.23.37",
- "serde",
- "serde_json",
- "sha2",
- "socket2 0.5.10",
- "sysinfo",
- "tar",
- "thiserror 2.0.18",
- "tokio",
- "tokio-rustls 0.26.4",
- "tokio-tungstenite 0.24.0",
- "toml",
- "tower-service",
- "tracing",
- "url",
- "webpki-roots 0.26.11",
-]
-
-[[package]]
 name = "aether-routing-core"
 version = "0.1.0"
 dependencies = [
@@ -477,12 +435,57 @@ dependencies = [
  "bytes",
  "futures-util",
  "http",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",
  "sqlx",
+ "sysinfo",
  "tokio",
  "tokio-tungstenite 0.28.0",
+]
+
+[[package]]
+name = "aether-tunnel"
+version = "0.3.12"
+dependencies = [
+ "aether-contracts",
+ "aether-gateway",
+ "aether-http",
+ "aether-runtime",
+ "aether-runtime-state",
+ "anyhow",
+ "arc-swap",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "clap",
+ "crossterm 0.28.1",
+ "flate2",
+ "futures-util",
+ "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "libc",
+ "ratatui",
+ "reqwest",
+ "rustls 0.23.37",
+ "serde",
+ "serde_json",
+ "sha2",
+ "socket2 0.5.10",
+ "sysinfo",
+ "tar",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-rustls 0.26.4",
+ "tokio-tungstenite 0.24.0",
+ "toml",
+ "tower-service",
+ "tracing",
+ "url",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]

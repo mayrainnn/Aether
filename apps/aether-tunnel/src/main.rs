@@ -20,12 +20,14 @@ use clap::{CommandFactory, FromArgMatches, Parser};
 use config::Config;
 
 /// Default config file name.
-const DEFAULT_CONFIG: &str = "aether-proxy.toml";
+const DEFAULT_CONFIG: &str = "aether-tunnel.toml";
+const OUTBOUND_PROXY_ENV: &str = "AETHER_TUNNEL_AETHER_OUTBOUND_PROXY_URL";
+const LEGACY_OUTBOUND_PROXY_ENV: &str = concat!("AETHER_TUNNEL_AETHER_", "PROXY_URL");
 
 /// Build the full clap command: Config args + discoverable subcommands.
 ///
 /// `subcommand_negates_reqs` lets subcommands bypass the required Config
-/// flags so that e.g. `aether-proxy setup` doesn't demand `--aether-url`.
+/// flags so that e.g. `aether-tunnel setup` doesn't demand `--aether-url`.
 fn build_command() -> clap::Command {
     Config::command()
         .subcommand(
@@ -57,9 +59,11 @@ async fn main() -> anyhow::Result<()> {
         .install_default()
         .map_err(|_| anyhow::anyhow!("Failed to install rustls CryptoProvider"))?;
 
+    promote_legacy_env_overrides();
+
     // Load config file as env-var defaults (before clap parsing)
     let config_file_path =
-        std::env::var("AETHER_PROXY_CONFIG").unwrap_or_else(|_| DEFAULT_CONFIG.to_string());
+        std::env::var("AETHER_TUNNEL_CONFIG").unwrap_or_else(|_| DEFAULT_CONFIG.to_string());
     let config_path = std::path::Path::new(&config_file_path);
     if config_path.exists() {
         match config::ConfigFile::load(config_path) {
@@ -96,9 +100,9 @@ async fn main() -> anyhow::Result<()> {
             }
             Some(_) => unreachable!(),
             None => {
-                // No subcommand — run the proxy with parsed config.
+                // No subcommand: run the tunnel with parsed config.
                 let config = Config::from_arg_matches(&matches)?;
-                run_proxy(config).await
+                run_tunnel(config).await
             }
         },
         Err(e) => {
@@ -108,6 +112,14 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 e.exit();
             }
+        }
+    }
+}
+
+fn promote_legacy_env_overrides() {
+    if std::env::var_os(OUTBOUND_PROXY_ENV).is_none() {
+        if let Some(value) = std::env::var_os(LEGACY_OUTBOUND_PROXY_ENV) {
+            std::env::set_var(OUTBOUND_PROXY_ENV, value);
         }
     }
 }
@@ -124,10 +136,10 @@ async fn handle_setup_result(outcome: setup::SetupOutcome) -> anyhow::Result<()>
                 Err(e) => anyhow::bail!("failed to reload config after setup: {}", e),
             }
             // Parse from env-only (argv may still contain "setup" etc.)
-            let config = Config::try_parse_from(["aether-proxy"])
+            let config = Config::try_parse_from(["aether-tunnel"])
                 .map_err(|e| anyhow::anyhow!("config invalid after setup: {}", e))?;
-            eprintln!("  Starting proxy...\n");
-            run_proxy(config).await
+            eprintln!("  Starting tunnel...\n");
+            run_tunnel(config).await
         }
         setup::SetupOutcome::Cancelled => {
             eprintln!("  Setup cancelled.");
@@ -136,10 +148,10 @@ async fn handle_setup_result(outcome: setup::SetupOutcome) -> anyhow::Result<()>
     }
 }
 
-/// Start the proxy server, checking for managed-service conflicts first.
-async fn run_proxy(config: Config) -> anyhow::Result<()> {
+/// Start the tunnel agent, checking for managed-service conflicts first.
+async fn run_tunnel(config: Config) -> anyhow::Result<()> {
     // Warn if a managed service is already running (would cause conflicts).
-    if std::env::var_os("AETHER_PROXY_SERVICE_MANAGER").is_none()
+    if std::env::var_os("AETHER_TUNNEL_SERVICE_MANAGER").is_none()
         && std::env::var_os("INVOCATION_ID").is_none()
         && setup::service::is_service_active()
     {
@@ -147,15 +159,15 @@ async fn run_proxy(config: Config) -> anyhow::Result<()> {
             "Warning: {} service is already running.",
             setup::service::preferred_manager_name()
         );
-        eprintln!("Use `./aether-proxy stop` to stop it first, or manage via subcommands:");
-        eprintln!("  ./aether-proxy status / logs / restart / stop");
+        eprintln!("Use `./aether-tunnel stop` to stop it first, or manage via subcommands:");
+        eprintln!("  ./aether-tunnel status / logs / restart / stop");
         std::process::exit(1);
     }
 
     // Resolve server list: if a config file exists, it must use [[servers]].
     // Otherwise fall back to CLI/env single-server mode.
     let config_path =
-        std::env::var("AETHER_PROXY_CONFIG").unwrap_or_else(|_| DEFAULT_CONFIG.to_string());
+        std::env::var("AETHER_TUNNEL_CONFIG").unwrap_or_else(|_| DEFAULT_CONFIG.to_string());
     let servers = if std::path::Path::new(&config_path).exists() {
         let file_cfg = config::ConfigFile::load(std::path::Path::new(&config_path))?;
         if file_cfg.servers.is_empty() {

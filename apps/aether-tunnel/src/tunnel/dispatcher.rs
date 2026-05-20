@@ -243,7 +243,7 @@ where
                             try_send_stream_error(
                                 &frame_tx,
                                 sid,
-                                "proxy request body dispatch stalled",
+                                "tunnel request body dispatch stalled",
                             );
                         }
                         if draining && streams.is_empty() {
@@ -343,7 +343,7 @@ fn stream_frame_dispatch_timeout() -> Duration {
 
     #[cfg(not(test))]
     {
-        Duration::from_secs(5)
+        Duration::from_millis(500)
     }
 }
 
@@ -424,7 +424,7 @@ mod tests {
         let (high_tx, mut high_rx) = bounded_queue::<Frame>(4);
         let (normal_tx, _normal_rx) = bounded_queue::<Frame>(4);
         let frame_tx = FrameSender::from_test_queues(high_tx, normal_tx);
-        try_send_stream_error(&frame_tx, 9, "proxy request body dispatch stalled");
+        try_send_stream_error(&frame_tx, 9, "tunnel request body dispatch stalled");
 
         let frame = high_rx
             .recv()
@@ -434,7 +434,7 @@ mod tests {
         assert_eq!(frame.msg_type, MsgType::StreamError);
         assert_eq!(
             frame.payload,
-            Bytes::from_static(b"proxy request body dispatch stalled")
+            Bytes::from_static(b"tunnel request body dispatch stalled")
         );
     }
 }

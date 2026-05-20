@@ -425,8 +425,9 @@
                           v-if="key.circuit_breaker_open"
                           variant="destructive"
                           class="text-[10px] px-1.5 py-0 shrink-0"
+                          :title="getKeyCircuitBreakerTitle(key)"
                         >
-                          熔断
+                          熔断{{ getKeyCircuitProbeCountdown(key) }}
                         </Badge>
                         <!-- 健康度 -->
                         <div
@@ -448,11 +449,11 @@
                           </span>
                         </div>
                         <Button
-                          v-if="key.circuit_breaker_open || (key.health_score !== undefined && key.health_score < 0.5)"
+                          v-if="isKeyRecoverable(key)"
                           variant="ghost"
                           size="icon"
                           class="h-7 w-7 text-green-600"
-                          title="刷新健康状态"
+                          :title="getRecoverKeyTitle(key)"
                           @click="handleRecoverKey(key)"
                         >
                           <RefreshCw class="w-3.5 h-3.5" />
@@ -3505,6 +3506,65 @@ function getHealthScoreBarColor(score: number): string {
   return 'bg-red-500 dark:bg-red-400'
 }
 
+function isKeyRecoverable(key: EndpointAPIKey): boolean {
+  return Boolean(
+    key.circuit_breaker_open
+    || (key.health_score !== undefined && key.health_score < 0.5)
+  )
+}
+
+function getOpenCircuitEntries(key: EndpointAPIKey): Array<[string, NonNullable<EndpointAPIKey['circuit_breaker_by_format']>[string]]> {
+  return Object.entries(key.circuit_breaker_by_format || {})
+    .filter(([, value]) => value?.open === true)
+}
+
+function getKeyCircuitProbeCountdown(key: EndpointAPIKey): string {
+  void countdownTick.value
+  const nextProbe = getOpenCircuitEntries(key)
+    .map(([, value]) => {
+      if (typeof value.next_probe_at_unix_secs === 'number' && Number.isFinite(value.next_probe_at_unix_secs)) {
+        return value.next_probe_at_unix_secs * 1000
+      }
+      if (value.next_probe_at) {
+        const ms = new Date(value.next_probe_at).getTime()
+        return Number.isFinite(ms) ? ms : null
+      }
+      return null
+    })
+    .filter((value): value is number => value !== null)
+    .sort((a, b) => a - b)[0]
+  if (!nextProbe) {
+    return ''
+  }
+  const diffMs = nextProbe - Date.now()
+  return diffMs > 0 ? ` ${formatCountdown(diffMs)}` : ' 探测中'
+}
+
+function getKeyCircuitBreakerTitle(key: EndpointAPIKey): string {
+  const entries = getOpenCircuitEntries(key)
+  if (entries.length === 0) return '熔断器已打开'
+  const parts = entries.map(([format, value]) => {
+    const label = formatApiFormatShort(format)
+    const reason = value.reason ? `原因: ${value.reason}` : '原因: 连续失败'
+    const interval = typeof value.probe_interval_minutes === 'number'
+      ? `探测间隔: ${value.probe_interval_minutes} 分钟`
+      : ''
+    const countdown = getFormatProbeCountdown(key, format).trim()
+    return [label, reason, interval, countdown ? `状态: ${countdown}` : '']
+      .filter(Boolean)
+      .join(' / ')
+  })
+  parts.push('点击恢复按钮可重置熔断器')
+  return parts.join('\n')
+}
+
+function getRecoverKeyTitle(key: EndpointAPIKey): string {
+  if (key.circuit_breaker_open) {
+    return '重置熔断器并恢复健康状态'
+  }
+  return '刷新健康状态'
+}
+
 // 获取自动获取模型状态的 title 提示
 function getAutoFetchStatusTitle(key: EndpointAPIKey): string {
   const parts: string[] = ['自动获取模型已启用']
@@ -3546,10 +3606,11 @@ function getFormatProbeCountdown(key: EndpointAPIKey, format: string): string {
     }
   }
   // 等待探测
-  if (formatData.next_probe_at) {
-    const nextProbe = new Date(formatData.next_probe_at)
-    const now = new Date()
-    const diffMs = nextProbe.getTime() - now.getTime()
+  if (formatData.next_probe_at_unix_secs || formatData.next_probe_at) {
+    const nextProbeMs = typeof formatData.next_probe_at_unix_secs === 'number'
+      ? formatData.next_probe_at_unix_secs * 1000
+      : new Date(formatData.next_probe_at || '').getTime()
+    const diffMs = nextProbeMs - Date.now()
     if (diffMs > 0) {
       return ` ${formatCountdown(diffMs)}`
     } else {

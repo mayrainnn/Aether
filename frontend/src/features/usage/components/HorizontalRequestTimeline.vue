@@ -341,36 +341,6 @@
                       </span>
                     </span>
                   </div>
-                  <div
-                    v-if="activeCapabilities.length > 0"
-                    class="info-item"
-                  >
-                    <span class="info-label">请求能力</span>
-                    <span class="info-value">
-                      <span class="capability-tags">
-                        <span
-                          v-for="cap in activeCapabilities"
-                          :key="`required-${cap}`"
-                          class="capability-tag active"
-                        >{{ formatCapabilityLabel(cap) }}</span>
-                      </span>
-                    </span>
-                  </div>
-                  <div
-                    v-if="keyCapabilities.length > 0"
-                    class="info-item"
-                  >
-                    <span class="info-label">Key 能力</span>
-                    <span class="info-value">
-                      <span class="capability-tags">
-                        <span
-                          v-for="cap in keyCapabilities"
-                          :key="`key-${cap}`"
-                          class="capability-tag"
-                        >{{ formatCapabilityLabel(cap) }}</span>
-                      </span>
-                    </span>
-                  </div>
                 </div>
 
                 <div
@@ -547,38 +517,6 @@
       </Card>
     </div>
 
-    <!-- Local Scheduling Failure State -->
-    <Card
-      v-else-if="schedulingFailureNotice"
-      class="border-red-200 dark:border-red-800"
-    >
-      <div class="p-4 space-y-2">
-        <div class="flex flex-wrap items-center gap-2">
-          <Badge variant="destructive">
-            调度失败
-          </Badge>
-          <h4 class="text-sm font-semibold text-red-950 dark:text-red-100">
-            {{ schedulingFailureNotice.title }}
-          </h4>
-        </div>
-        <p class="text-sm leading-6 text-red-900 dark:text-red-100">
-          {{ schedulingFailureNotice.message }}
-        </p>
-        <div
-          v-if="schedulingFailureNotice.meta.length > 0"
-          class="flex flex-wrap gap-1.5"
-        >
-          <span
-            v-for="item in schedulingFailureNotice.meta"
-            :key="item"
-            class="rounded-full border border-red-200 bg-white/70 px-2 py-0.5 text-[11px] font-mono text-red-700 dark:border-red-900 dark:bg-red-950/50 dark:text-red-200"
-          >
-            {{ item }}
-          </span>
-        </div>
-      </div>
-    </Card>
-
     <!-- Empty State -->
     <Card
       v-else
@@ -607,7 +545,6 @@ import { parseApiError } from '@/utils/errorParser'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
 import { useDarkMode } from '@/composables/useDarkMode'
 import { resolveTimelineFinalStatus } from '../utils/status'
-import type { RequestSchedulingFailure } from '@/api/dashboard'
 import {
   buildPoolGroupVisibleAttempts,
   buildPoolParticipatedCandidates,
@@ -670,8 +607,6 @@ const props = defineProps<{
   usageData?: UsageData | null
   /** 请求元数据（用于号池调度组装） */
   requestMetadata?: Record<string, unknown> | null
-  /** 本地调度失败摘要；用于没有 trace candidate 时替代空态 */
-  schedulingFailure?: RequestSchedulingFailure | null
   /** 已获取的追踪数据；传入时不再内部拉取 */
   traceData?: RequestTrace | null
 }>()
@@ -845,62 +780,6 @@ const computedFinalStatus = computed(() => {
     requestStatus: props.requestStatus ?? usageData.value?.status,
     traceFinalStatus: trace.value?.final_status,
   })
-})
-
-const nonEmptyNoticeString = (value: string | null | undefined): string | null => {
-  const trimmed = value?.trim()
-  return trimmed ? trimmed : null
-}
-
-const uniqueNoticeMeta = (values: Array<string | null | undefined>): string[] => {
-  return Array.from(new Set(values.map(value => value?.trim()).filter((value): value is string => Boolean(value))))
-}
-
-const isUnknownProviderHint = (value: string | null): boolean => {
-  const normalized = value?.trim().toLowerCase()
-  return !normalized || ['unknown', 'unknow', 'pending'].includes(normalized)
-}
-
-const schedulingFailureProviderHint = (failure: RequestSchedulingFailure): string | null => {
-  const name = nonEmptyNoticeString(failure.provider_hint?.name)
-  if (name && !isUnknownProviderHint(name)) return name
-
-  const id = nonEmptyNoticeString(failure.provider_hint?.id)
-  if (id && !isUnknownProviderHint(id)) return id
-
-  return null
-}
-
-const schedulingFailureEndpointHint = (failure: RequestSchedulingFailure): string | null => {
-  return nonEmptyNoticeString(failure.endpoint_hint?.api_format)
-    ?? nonEmptyNoticeString(failure.endpoint_hint?.id)
-}
-
-const schedulingFailureNotice = computed(() => {
-  const failure = props.schedulingFailure
-  if (!failure) return null
-
-  const title = nonEmptyNoticeString(failure.title) ?? '本地调度失败'
-  const message = nonEmptyNoticeString(failure.message)
-    ?? nonEmptyNoticeString(failure.reason_summary)
-    ?? nonEmptyNoticeString(failure.reason_label)
-    ?? nonEmptyNoticeString(failure.reason)
-    ?? '本地调度阶段没有选出可用上游提供商'
-
-  return {
-    title,
-    message,
-    meta: uniqueNoticeMeta([
-      schedulingFailureProviderHint(failure),
-      schedulingFailureEndpointHint(failure),
-      nonEmptyNoticeString(failure.requested_model),
-      nonEmptyNoticeString(failure.reason_summary),
-      nonEmptyNoticeString(failure.reason_label),
-      nonEmptyNoticeString(failure.reason),
-      typeof failure.status_code === 'number' ? `HTTP ${failure.status_code}` : null,
-      failure.no_upstream_attempt ? '未进入上游执行' : null,
-    ]),
-  }
 })
 
 const compareBySchedulingOrder = (a: CandidateRecord, b: CandidateRecord): number => {
@@ -1580,26 +1459,6 @@ const currentAttemptExtraDataDisplay = computed<Record<string, unknown> | null>(
   return Object.keys(display).length > 0 ? display : null
 })
 
-// 计算当前尝试启用的能力标签（请求需要的能力）
-const activeCapabilities = computed(() => {
-  if (!currentAttempt.value?.required_capabilities) return []
-  const caps = currentAttempt.value.required_capabilities
-  // 只返回值为 true 的能力
-  return Object.entries(caps)
-    .filter(([_, enabled]) => enabled)
-    .map(([key]) => key)
-})
-
-// 计算当前 Key 支持的能力标签
-const keyCapabilities = computed(() => {
-  if (!currentAttempt.value?.key_capabilities) return []
-  const caps = currentAttempt.value.key_capabilities
-  // 只返回值为 true 的能力
-  return Object.entries(caps)
-    .filter(([_, enabled]) => enabled)
-    .map(([key]) => key)
-})
-
 const hasActiveImageProgress = computed(() => {
   return rawTimeline.value.some((candidate) => {
     const progress = normalizeImageProgress(candidate.image_progress)
@@ -1631,20 +1490,6 @@ const formatAuthTypeWithPlan = (authType: string, planType?: string): string => 
     return `${typeName} ${planType}`
   }
   return typeName
-}
-
-// 格式化能力标签显示
-const formatCapabilityLabel = (cap: string): string => {
-  const labels: Record<string, string> = {
-    'cache_1h': '1h缓存',
-    'cache_5min': '5min缓存',
-    'context_1m': '1M上下文',
-    'context_200k': '200K上下文',
-    'extended_thinking': '深度思考',
-    'vision': '视觉',
-    'function_calling': '函数调用',
-  }
-  return labels[cap] || cap
 }
 
 const poolSelectionLabel = (reason: string): string => {
@@ -2591,35 +2436,6 @@ function getDisplayStatus(attempt: CandidateRecord | null | undefined): string {
 .pool-skip-type {
   font-weight: 500;
   color: hsl(var(--muted-foreground));
-}
-
-/* 能力标签 */
-.capability-tags {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 0.375rem;
-}
-
-.capability-tag {
-  display: inline-flex;
-  align-items: center;
-  padding: 0.15rem 0.5rem;
-  font-size: 0.7rem;
-  font-weight: 500;
-  color: hsl(var(--muted-foreground));
-  white-space: nowrap;
-  border-radius: 4px;
-  background: transparent;
-  border: 1px dashed hsl(var(--border));
-  transition: all 0.15s ease;
-}
-
-/* 被请求使用的能力（高亮边框） */
-.capability-tag.active {
-  color: hsl(var(--primary));
-  border-color: hsl(var(--primary) / 0.5);
-  background: hsl(var(--primary) / 0.08);
 }
 
 .image-progress-block {

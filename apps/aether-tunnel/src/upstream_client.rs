@@ -799,7 +799,7 @@ mod tests {
         let client = proxied_client(&proxy_url);
         let request = hyper::Request::builder()
             .method(hyper::Method::GET)
-            .uri("http://example.com/proxy-test")
+            .uri("http://example.com/tunnel-test")
             .body(full_request_body(Bytes::new()))
             .expect("request should build");
 
@@ -816,7 +816,7 @@ mod tests {
         assert_eq!(status, hyper::StatusCode::OK);
         assert_eq!(&body[..], b"ok");
         assert!(
-            raw_request.starts_with("GET http://example.com/proxy-test HTTP/1.1\r\n"),
+            raw_request.starts_with("GET http://example.com/tunnel-test HTTP/1.1\r\n"),
             "unexpected proxy request: {raw_request:?}"
         );
     }
@@ -855,13 +855,13 @@ mod tests {
     fn proxied_client(proxy_url: &str) -> UpstreamClient {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let config = Config::try_parse_from([
-            "aether-proxy",
+            "aether-tunnel",
             "--aether-url",
             "https://aether.example.com",
             "--management-token",
             "ae_test",
             "--node-name",
-            "proxy-test",
+            "tunnel-test",
             "--upstream-proxy-url",
             proxy_url,
             "--upstream-connect-timeout-secs",

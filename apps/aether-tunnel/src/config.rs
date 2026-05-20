@@ -1,4 +1,5 @@
 use std::fmt;
+use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Duration;
 
@@ -70,9 +71,9 @@ const AUTO_TUNNEL_CONNECTIONS_BASE_CAP: u64 = 4;
 const AUTO_TUNNEL_CONNECTIONS_PER_CPU_CAP: u64 = 4;
 const AUTO_TUNNEL_CONNECTIONS_MAX_CAP: u64 = 32;
 
-const TUNNEL_PING_INTERVAL_MS_ENV: &str = "AETHER_PROXY_TUNNEL_PING_INTERVAL_MS";
-const TUNNEL_CONNECT_TIMEOUT_MS_ENV: &str = "AETHER_PROXY_TUNNEL_CONNECT_TIMEOUT_MS";
-const TUNNEL_STALE_TIMEOUT_MS_ENV: &str = "AETHER_PROXY_TUNNEL_STALE_TIMEOUT_MS";
+const TUNNEL_PING_INTERVAL_MS_ENV: &str = "AETHER_TUNNEL_PING_INTERVAL_MS";
+const TUNNEL_CONNECT_TIMEOUT_MS_ENV: &str = "AETHER_TUNNEL_CONNECT_TIMEOUT_MS";
+const TUNNEL_STALE_TIMEOUT_MS_ENV: &str = "AETHER_TUNNEL_STALE_TIMEOUT_MS";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TunnelPoolSizing {
@@ -214,39 +215,39 @@ pub fn format_byte_size_human(bytes: usize) -> String {
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum ProxyLogDestinationArg {
+pub enum TunnelLogDestinationArg {
     Stdout,
     File,
     Both,
 }
 
-impl From<ProxyLogDestinationArg> for LogDestination {
-    fn from(value: ProxyLogDestinationArg) -> Self {
+impl From<TunnelLogDestinationArg> for LogDestination {
+    fn from(value: TunnelLogDestinationArg) -> Self {
         match value {
-            ProxyLogDestinationArg::Stdout => LogDestination::Stdout,
-            ProxyLogDestinationArg::File => LogDestination::File,
-            ProxyLogDestinationArg::Both => LogDestination::Both,
+            TunnelLogDestinationArg::Stdout => LogDestination::Stdout,
+            TunnelLogDestinationArg::File => LogDestination::File,
+            TunnelLogDestinationArg::Both => LogDestination::Both,
         }
     }
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum ProxyLogRotationArg {
+pub enum TunnelLogRotationArg {
     Hourly,
     Daily,
 }
 
-impl From<ProxyLogRotationArg> for LogRotation {
-    fn from(value: ProxyLogRotationArg) -> Self {
+impl From<TunnelLogRotationArg> for LogRotation {
+    fn from(value: TunnelLogRotationArg) -> Self {
         match value {
-            ProxyLogRotationArg::Hourly => LogRotation::Hourly,
-            ProxyLogRotationArg::Daily => LogRotation::Daily,
+            TunnelLogRotationArg::Hourly => LogRotation::Hourly,
+            TunnelLogRotationArg::Daily => LogRotation::Daily,
         }
     }
 }
 
-/// Aether tunnel proxy.
+/// Aether tunnel agent.
 ///
 /// Deployed on overseas VPS to relay API traffic for Aether instances
 /// behind the GFW. Connects to Aether via WebSocket tunnel, registers
@@ -255,29 +256,29 @@ impl From<ProxyLogRotationArg> for LogRotation {
 #[command(version, about)]
 pub struct Config {
     /// Aether server URL (e.g. https://aether.example.com)
-    #[arg(long, env = "AETHER_PROXY_AETHER_URL")]
+    #[arg(long, env = "AETHER_TUNNEL_AETHER_URL")]
     pub aether_url: String,
 
     /// Management Token for Aether admin API (ae_xxx)
-    #[arg(long, env = "AETHER_PROXY_MANAGEMENT_TOKEN")]
+    #[arg(long, env = "AETHER_TUNNEL_MANAGEMENT_TOKEN")]
     pub management_token: String,
 
     /// Public IP address of this node (auto-detected if omitted)
-    #[arg(long, env = "AETHER_PROXY_PUBLIC_IP")]
+    #[arg(long, env = "AETHER_TUNNEL_PUBLIC_IP")]
     pub public_ip: Option<String>,
 
     /// Human-readable node name
-    #[arg(long, env = "AETHER_PROXY_NODE_NAME")]
+    #[arg(long, env = "AETHER_TUNNEL_NODE_NAME")]
     pub node_name: String,
 
     /// Region label (e.g. ap-northeast-1)
-    #[arg(long, env = "AETHER_PROXY_NODE_REGION")]
+    #[arg(long, env = "AETHER_TUNNEL_NODE_REGION")]
     pub node_region: Option<String>,
 
     /// Heartbeat interval in seconds
     #[arg(
         long,
-        env = "AETHER_PROXY_HEARTBEAT_INTERVAL",
+        env = "AETHER_TUNNEL_HEARTBEAT_INTERVAL",
         default_value_t = DEFAULT_HEARTBEAT_INTERVAL_SECS
     )]
     pub heartbeat_interval: u64,
@@ -285,7 +286,7 @@ pub struct Config {
     /// Allowed destination ports (default: 80,443,8080,8443)
     #[arg(
         long,
-        env = "AETHER_PROXY_ALLOWED_PORTS",
+        env = "AETHER_TUNNEL_ALLOWED_PORTS",
         value_delimiter = ',',
         default_values_t = vec![80, 443, 8080, 8443]
     )]
@@ -294,7 +295,7 @@ pub struct Config {
     /// Allow private/reserved upstream IP targets. Enabled by default.
     #[arg(
         long,
-        env = "AETHER_PROXY_ALLOW_PRIVATE_TARGETS",
+        env = "AETHER_TUNNEL_ALLOW_PRIVATE_TARGETS",
         default_value_t = true
     )]
     pub allow_private_targets: bool,
@@ -302,7 +303,7 @@ pub struct Config {
     /// Aether API request timeout in seconds
     #[arg(
         long,
-        env = "AETHER_PROXY_AETHER_REQUEST_TIMEOUT",
+        env = "AETHER_TUNNEL_AETHER_REQUEST_TIMEOUT",
         default_value_t = 10
     )]
     pub aether_request_timeout_secs: u64,
@@ -310,7 +311,7 @@ pub struct Config {
     /// Aether API connect timeout in seconds
     #[arg(
         long,
-        env = "AETHER_PROXY_AETHER_CONNECT_TIMEOUT",
+        env = "AETHER_TUNNEL_AETHER_CONNECT_TIMEOUT",
         default_value_t = 10
     )]
     pub aether_connect_timeout_secs: u64,
@@ -318,7 +319,7 @@ pub struct Config {
     /// Aether API max idle connections per host
     #[arg(
         long,
-        env = "AETHER_PROXY_AETHER_POOL_MAX_IDLE_PER_HOST",
+        env = "AETHER_TUNNEL_AETHER_POOL_MAX_IDLE_PER_HOST",
         default_value_t = 8
     )]
     pub aether_pool_max_idle_per_host: usize,
@@ -326,32 +327,32 @@ pub struct Config {
     /// Aether API idle timeout in seconds
     #[arg(
         long,
-        env = "AETHER_PROXY_AETHER_POOL_IDLE_TIMEOUT",
+        env = "AETHER_TUNNEL_AETHER_POOL_IDLE_TIMEOUT",
         default_value_t = 90
     )]
     pub aether_pool_idle_timeout_secs: u64,
 
     /// Aether API TCP keepalive in seconds (0 disables)
-    #[arg(long, env = "AETHER_PROXY_AETHER_TCP_KEEPALIVE", default_value_t = 60)]
+    #[arg(long, env = "AETHER_TUNNEL_AETHER_TCP_KEEPALIVE", default_value_t = 60)]
     pub aether_tcp_keepalive_secs: u64,
 
     /// Aether API TCP_NODELAY
-    #[arg(long, env = "AETHER_PROXY_AETHER_TCP_NODELAY", default_value_t = true)]
+    #[arg(long, env = "AETHER_TUNNEL_AETHER_TCP_NODELAY", default_value_t = true)]
     pub aether_tcp_nodelay: bool,
 
     /// Enable HTTP/2 when talking to Aether API
-    #[arg(long, env = "AETHER_PROXY_AETHER_HTTP2", default_value_t = true)]
+    #[arg(long, env = "AETHER_TUNNEL_AETHER_HTTP2", default_value_t = true)]
     pub aether_http2: bool,
 
     /// Optional egress proxy used for Aether API registration and WebSocket tunnel reconnects.
     /// Supported schemes: http, socks5, socks5h.
-    #[arg(long, env = "AETHER_PROXY_AETHER_PROXY_URL")]
-    pub aether_proxy_url: Option<String>,
+    #[arg(long, env = "AETHER_TUNNEL_AETHER_OUTBOUND_PROXY_URL")]
+    pub aether_outbound_proxy_url: Option<String>,
 
     /// Aether API retry attempts (including initial)
     #[arg(
         long,
-        env = "AETHER_PROXY_AETHER_RETRY_MAX_ATTEMPTS",
+        env = "AETHER_TUNNEL_AETHER_RETRY_MAX_ATTEMPTS",
         default_value_t = 3
     )]
     pub aether_retry_max_attempts: u32,
@@ -359,7 +360,7 @@ pub struct Config {
     /// Aether API retry base delay in milliseconds
     #[arg(
         long,
-        env = "AETHER_PROXY_AETHER_RETRY_BASE_DELAY_MS",
+        env = "AETHER_TUNNEL_AETHER_RETRY_BASE_DELAY_MS",
         default_value_t = 200
     )]
     pub aether_retry_base_delay_ms: u64,
@@ -367,35 +368,40 @@ pub struct Config {
     /// Aether API retry max delay in milliseconds
     #[arg(
         long,
-        env = "AETHER_PROXY_AETHER_RETRY_MAX_DELAY_MS",
+        env = "AETHER_TUNNEL_AETHER_RETRY_MAX_DELAY_MS",
         default_value_t = 2000
     )]
     pub aether_retry_max_delay_ms: u64,
 
+    /// Optional local diagnostics listener for /health, /metrics, and /stats.
+    /// Bind only to loopback addresses, for example 127.0.0.1:9311.
+    #[arg(long, env = "AETHER_TUNNEL_DIAGNOSTICS_BIND")]
+    pub diagnostics_bind: Option<SocketAddr>,
+
     /// Maximum concurrent TCP connections (defaults to hardware estimate)
-    #[arg(long, env = "AETHER_PROXY_MAX_CONCURRENT_CONNECTIONS")]
+    #[arg(long, env = "AETHER_TUNNEL_MAX_CONCURRENT_CONNECTIONS")]
     pub max_concurrent_connections: Option<u64>,
 
-    /// Maximum in-flight tunneled streams accepted by this proxy instance.
-    #[arg(long, env = "AETHER_PROXY_MAX_IN_FLIGHT_STREAMS")]
+    /// Maximum in-flight tunneled streams accepted by this tunnel instance.
+    #[arg(long, env = "AETHER_TUNNEL_MAX_IN_FLIGHT_STREAMS")]
     pub max_in_flight_streams: Option<usize>,
 
-    /// Maximum in-flight tunneled streams admitted across all proxy instances.
-    #[arg(long, env = "AETHER_PROXY_DISTRIBUTED_STREAM_LIMIT")]
+    /// Maximum in-flight tunneled streams admitted across all tunnel instances.
+    #[arg(long, env = "AETHER_TUNNEL_DISTRIBUTED_STREAM_LIMIT")]
     pub distributed_stream_limit: Option<usize>,
 
     /// Redis URL used for cross-instance stream admission.
-    #[arg(long, env = "AETHER_PROXY_DISTRIBUTED_STREAM_REDIS_URL")]
+    #[arg(long, env = "AETHER_TUNNEL_DISTRIBUTED_STREAM_REDIS_URL")]
     pub distributed_stream_redis_url: Option<String>,
 
     /// Optional key prefix for cross-instance stream admission state.
-    #[arg(long, env = "AETHER_PROXY_DISTRIBUTED_STREAM_REDIS_KEY_PREFIX")]
+    #[arg(long, env = "AETHER_TUNNEL_DISTRIBUTED_STREAM_REDIS_KEY_PREFIX")]
     pub distributed_stream_redis_key_prefix: Option<String>,
 
     /// Lease TTL in milliseconds for distributed stream admission permits.
     #[arg(
         long,
-        env = "AETHER_PROXY_DISTRIBUTED_STREAM_LEASE_TTL_MS",
+        env = "AETHER_TUNNEL_DISTRIBUTED_STREAM_LEASE_TTL_MS",
         default_value_t = 30_000
     )]
     pub distributed_stream_lease_ttl_ms: u64,
@@ -403,7 +409,7 @@ pub struct Config {
     /// Renew interval in milliseconds for distributed stream admission permits.
     #[arg(
         long,
-        env = "AETHER_PROXY_DISTRIBUTED_STREAM_RENEW_INTERVAL_MS",
+        env = "AETHER_TUNNEL_DISTRIBUTED_STREAM_RENEW_INTERVAL_MS",
         default_value_t = 10_000
     )]
     pub distributed_stream_renew_interval_ms: u64,
@@ -411,23 +417,23 @@ pub struct Config {
     /// Command timeout in milliseconds for distributed stream admission Redis calls.
     #[arg(
         long,
-        env = "AETHER_PROXY_DISTRIBUTED_STREAM_COMMAND_TIMEOUT_MS",
+        env = "AETHER_TUNNEL_DISTRIBUTED_STREAM_COMMAND_TIMEOUT_MS",
         default_value_t = 1_000
     )]
     pub distributed_stream_command_timeout_ms: u64,
 
     /// DNS cache TTL in seconds
-    #[arg(long, env = "AETHER_PROXY_DNS_CACHE_TTL", default_value_t = 60)]
+    #[arg(long, env = "AETHER_TUNNEL_DNS_CACHE_TTL", default_value_t = 60)]
     pub dns_cache_ttl_secs: u64,
 
     /// DNS cache capacity (entries)
-    #[arg(long, env = "AETHER_PROXY_DNS_CACHE_CAPACITY", default_value_t = 1024)]
+    #[arg(long, env = "AETHER_TUNNEL_DNS_CACHE_CAPACITY", default_value_t = 1024)]
     pub dns_cache_capacity: usize,
 
     /// Upstream HTTP client connect timeout in seconds
     #[arg(
         long,
-        env = "AETHER_PROXY_UPSTREAM_CONNECT_TIMEOUT",
+        env = "AETHER_TUNNEL_UPSTREAM_CONNECT_TIMEOUT",
         default_value_t = 30
     )]
     pub upstream_connect_timeout_secs: u64,
@@ -435,7 +441,7 @@ pub struct Config {
     /// Upstream HTTP client max idle connections per host
     #[arg(
         long,
-        env = "AETHER_PROXY_UPSTREAM_POOL_MAX_IDLE_PER_HOST",
+        env = "AETHER_TUNNEL_UPSTREAM_POOL_MAX_IDLE_PER_HOST",
         default_value_t = 64
     )]
     pub upstream_pool_max_idle_per_host: usize,
@@ -443,7 +449,7 @@ pub struct Config {
     /// Upstream HTTP client idle timeout in seconds
     #[arg(
         long,
-        env = "AETHER_PROXY_UPSTREAM_POOL_IDLE_TIMEOUT",
+        env = "AETHER_TUNNEL_UPSTREAM_POOL_IDLE_TIMEOUT",
         default_value_t = 300
     )]
     pub upstream_pool_idle_timeout_secs: u64,
@@ -451,7 +457,7 @@ pub struct Config {
     /// Upstream TCP keepalive in seconds (0 disables)
     #[arg(
         long,
-        env = "AETHER_PROXY_UPSTREAM_TCP_KEEPALIVE",
+        env = "AETHER_TUNNEL_UPSTREAM_TCP_KEEPALIVE",
         default_value_t = 60
     )]
     pub upstream_tcp_keepalive_secs: u64,
@@ -459,56 +465,64 @@ pub struct Config {
     /// Upstream TCP_NODELAY
     #[arg(
         long,
-        env = "AETHER_PROXY_UPSTREAM_TCP_NODELAY",
+        env = "AETHER_TUNNEL_UPSTREAM_TCP_NODELAY",
         default_value_t = true
     )]
     pub upstream_tcp_nodelay: bool,
 
     /// Optional egress proxy used only for provider upstream requests.
     /// Supported schemes: http, socks5, socks5h.
-    #[arg(long, env = "AETHER_PROXY_UPSTREAM_PROXY_URL")]
+    #[arg(long, env = "AETHER_TUNNEL_UPSTREAM_PROXY_URL")]
     pub upstream_proxy_url: Option<String>,
 
     /// Maximum request body bytes buffered to support 307/308 redirect replay.
     /// Accepts values like 5M / 512K / 1G. Set to 0 to disable request-body replay buffering.
     #[arg(
         long,
-        env = "AETHER_PROXY_REDIRECT_REPLAY_BUDGET_BYTES",
+        env = "AETHER_TUNNEL_REDIRECT_REPLAY_BUDGET_BYTES",
         value_parser = parse_byte_size,
         default_value = DEFAULT_REDIRECT_REPLAY_BUDGET_HUMAN
     )]
     pub redirect_replay_budget_bytes: usize,
 
+    /// Emit detailed x-proxy-timing headers on tunneled upstream responses.
+    #[arg(
+        long,
+        env = "AETHER_TUNNEL_EMIT_PROXY_TIMING_HEADER",
+        default_value_t = true
+    )]
+    pub emit_proxy_timing_header: bool,
+
     /// Log level (trace, debug, info, warn, error)
-    #[arg(long, env = "AETHER_PROXY_LOG_LEVEL", default_value = "info")]
+    #[arg(long, env = "AETHER_TUNNEL_LOG_LEVEL", default_value = "info")]
     pub log_level: String,
 
     /// Log destination (stdout, file, both)
     #[arg(
         long,
-        env = "AETHER_PROXY_LOG_DESTINATION",
+        env = "AETHER_TUNNEL_LOG_DESTINATION",
         value_enum,
         default_value = "both"
     )]
-    pub log_destination: ProxyLogDestinationArg,
+    pub log_destination: TunnelLogDestinationArg,
 
     /// Log directory when file logging is enabled
-    #[arg(long, env = "AETHER_PROXY_LOG_DIR", default_value = DEFAULT_LOG_DIR)]
+    #[arg(long, env = "AETHER_TUNNEL_LOG_DIR", default_value = DEFAULT_LOG_DIR)]
     pub log_dir: Option<String>,
 
     /// Log rotation schedule for file logging
     #[arg(
         long,
-        env = "AETHER_PROXY_LOG_ROTATION",
+        env = "AETHER_TUNNEL_LOG_ROTATION",
         value_enum,
         default_value = "daily"
     )]
-    pub log_rotation: ProxyLogRotationArg,
+    pub log_rotation: TunnelLogRotationArg,
 
     /// Log file retention days for file logging
     #[arg(
         long,
-        env = "AETHER_PROXY_LOG_RETENTION_DAYS",
+        env = "AETHER_TUNNEL_LOG_RETENTION_DAYS",
         default_value_t = DEFAULT_LOG_RETENTION_DAYS
     )]
     pub log_retention_days: u64,
@@ -516,7 +530,7 @@ pub struct Config {
     /// Maximum number of retained rolled log files
     #[arg(
         long,
-        env = "AETHER_PROXY_LOG_MAX_FILES",
+        env = "AETHER_TUNNEL_LOG_MAX_FILES",
         default_value_t = DEFAULT_LOG_MAX_FILES
     )]
     pub log_max_files: usize,
@@ -524,7 +538,7 @@ pub struct Config {
     /// Tunnel reconnect base delay in milliseconds (used by exponential backoff)
     #[arg(
         long,
-        env = "AETHER_PROXY_TUNNEL_RECONNECT_BASE_MS",
+        env = "AETHER_TUNNEL_RECONNECT_BASE_MS",
         default_value_t = DEFAULT_TUNNEL_RECONNECT_BASE_MS
     )]
     pub tunnel_reconnect_base_ms: u64,
@@ -532,7 +546,7 @@ pub struct Config {
     /// Tunnel reconnect max delay in milliseconds (cap for exponential backoff)
     #[arg(
         long,
-        env = "AETHER_PROXY_TUNNEL_RECONNECT_MAX_MS",
+        env = "AETHER_TUNNEL_RECONNECT_MAX_MS",
         default_value_t = DEFAULT_TUNNEL_RECONNECT_MAX_MS
     )]
     pub tunnel_reconnect_max_ms: u64,
@@ -546,7 +560,7 @@ pub struct Config {
     pub tunnel_ping_interval_ms: u64,
 
     /// Maximum concurrent streams over tunnel (auto-detected from hardware if omitted)
-    #[arg(long, env = "AETHER_PROXY_TUNNEL_MAX_STREAMS")]
+    #[arg(long, env = "AETHER_TUNNEL_MAX_STREAMS")]
     pub tunnel_max_streams: Option<u32>,
 
     /// WebSocket tunnel TCP connect timeout in milliseconds
@@ -558,11 +572,11 @@ pub struct Config {
     pub tunnel_connect_timeout_ms: u64,
 
     /// WebSocket tunnel TCP keepalive in seconds (0 disables)
-    #[arg(long, env = "AETHER_PROXY_TUNNEL_TCP_KEEPALIVE", default_value_t = 30)]
+    #[arg(long, env = "AETHER_TUNNEL_TCP_KEEPALIVE", default_value_t = 30)]
     pub tunnel_tcp_keepalive_secs: u64,
 
     /// WebSocket tunnel TCP_NODELAY
-    #[arg(long, env = "AETHER_PROXY_TUNNEL_TCP_NODELAY", default_value_t = true)]
+    #[arg(long, env = "AETHER_TUNNEL_TCP_NODELAY", default_value_t = true)]
     pub tunnel_tcp_nodelay: bool,
 
     /// Tunnel connection staleness timeout in milliseconds
@@ -575,18 +589,18 @@ pub struct Config {
 
     /// Minimum number of parallel WebSocket tunnel connections per server.
     /// If omitted, a device-aware redundant value is auto-detected at startup.
-    #[arg(long, env = "AETHER_PROXY_TUNNEL_CONNECTIONS")]
+    #[arg(long, env = "AETHER_TUNNEL_CONNECTIONS")]
     pub tunnel_connections: Option<u32>,
 
     /// Maximum number of WebSocket tunnel connections per server.
-    /// When larger than `tunnel_connections`, the proxy may autoscale up to this limit.
-    #[arg(long, env = "AETHER_PROXY_TUNNEL_CONNECTIONS_MAX")]
+    /// When larger than `tunnel_connections`, the tunnel may autoscale up to this limit.
+    #[arg(long, env = "AETHER_TUNNEL_CONNECTIONS_MAX")]
     pub tunnel_connections_max: Option<u32>,
 
     /// Autoscale evaluation interval for the tunnel pool.
     #[arg(
         long,
-        env = "AETHER_PROXY_TUNNEL_SCALE_CHECK_INTERVAL_MS",
+        env = "AETHER_TUNNEL_SCALE_CHECK_INTERVAL_MS",
         default_value_t = DEFAULT_TUNNEL_SCALE_CHECK_INTERVAL_MS
     )]
     pub tunnel_scale_check_interval_ms: u64,
@@ -594,7 +608,7 @@ pub struct Config {
     /// Per-tunnel occupancy percentage that triggers scale-up.
     #[arg(
         long,
-        env = "AETHER_PROXY_TUNNEL_SCALE_UP_THRESHOLD_PERCENT",
+        env = "AETHER_TUNNEL_SCALE_UP_THRESHOLD_PERCENT",
         default_value_t = DEFAULT_TUNNEL_SCALE_UP_THRESHOLD_PERCENT
     )]
     pub tunnel_scale_up_threshold_percent: u32,
@@ -602,7 +616,7 @@ pub struct Config {
     /// Per-tunnel occupancy percentage that allows scale-down after the grace window.
     #[arg(
         long,
-        env = "AETHER_PROXY_TUNNEL_SCALE_DOWN_THRESHOLD_PERCENT",
+        env = "AETHER_TUNNEL_SCALE_DOWN_THRESHOLD_PERCENT",
         default_value_t = DEFAULT_TUNNEL_SCALE_DOWN_THRESHOLD_PERCENT
     )]
     pub tunnel_scale_down_threshold_percent: u32,
@@ -610,7 +624,7 @@ pub struct Config {
     /// Low-load grace window before a secondary tunnel is drained.
     #[arg(
         long,
-        env = "AETHER_PROXY_TUNNEL_SCALE_DOWN_GRACE_SECS",
+        env = "AETHER_TUNNEL_SCALE_DOWN_GRACE_SECS",
         default_value_t = DEFAULT_TUNNEL_SCALE_DOWN_GRACE_SECS
     )]
     pub tunnel_scale_down_grace_secs: u64,
@@ -686,12 +700,17 @@ impl Config {
         if self.aether_retry_max_attempts == 0 {
             anyhow::bail!("aether_retry_max_attempts must be >= 1");
         }
+        if let Some(addr) = self.diagnostics_bind {
+            if !addr.ip().is_loopback() {
+                anyhow::bail!("diagnostics_bind must use a loopback address");
+            }
+        }
         if self.upstream_connect_timeout_secs == 0 {
             anyhow::bail!("upstream_connect_timeout_secs must be > 0");
         }
-        if let Some(proxy_url) = normalized_proxy_url(&self.aether_proxy_url) {
+        if let Some(proxy_url) = normalized_proxy_url(&self.aether_outbound_proxy_url) {
             crate::egress_proxy::UpstreamProxyConfig::parse(proxy_url)
-                .map_err(|err| anyhow::anyhow!("aether_proxy_url invalid: {err}"))?;
+                .map_err(|err| anyhow::anyhow!("aether_outbound_proxy_url invalid: {err}"))?;
         }
         if let Some(proxy_url) = normalized_proxy_url(&self.upstream_proxy_url) {
             crate::egress_proxy::UpstreamProxyConfig::parse(proxy_url)
@@ -724,14 +743,14 @@ impl Config {
         }
         if matches!(
             self.log_destination,
-            ProxyLogDestinationArg::File | ProxyLogDestinationArg::Both
+            TunnelLogDestinationArg::File | TunnelLogDestinationArg::Both
         ) && self
             .log_dir
             .as_deref()
             .map(str::trim)
             .is_none_or(|value| value.is_empty())
         {
-            anyhow::bail!("log_dir must be set when AETHER_PROXY_LOG_DESTINATION is file or both");
+            anyhow::bail!("log_dir must be set when AETHER_TUNNEL_LOG_DESTINATION is file or both");
         }
         Ok(())
     }
@@ -748,8 +767,8 @@ impl Config {
         Ok(Duration::from_millis(self.tunnel_stale_timeout_ms))
     }
 
-    pub fn effective_aether_proxy_url(&self) -> Option<&str> {
-        normalized_proxy_url(&self.aether_proxy_url)
+    pub fn effective_aether_outbound_proxy_url(&self) -> Option<&str> {
+        normalized_proxy_url(&self.aether_outbound_proxy_url)
     }
 
     pub fn resolve_tunnel_pool_sizing(
@@ -806,14 +825,14 @@ impl Config {
     }
 
     pub fn service_runtime_config(&self) -> anyhow::Result<ServiceRuntimeConfig> {
-        let mut config = ServiceRuntimeConfig::new("aether-proxy", "aether_proxy=info")
+        let mut config = ServiceRuntimeConfig::new("aether-tunnel", "aether_tunnel=info")
             .with_log_format(aether_runtime::LogFormat::Pretty)
             .with_log_destination(self.log_destination.into())
             .with_node_role("proxy")
             .with_instance_id(self.node_name.trim().to_string());
         if matches!(
             self.log_destination,
-            ProxyLogDestinationArg::File | ProxyLogDestinationArg::Both
+            TunnelLogDestinationArg::File | TunnelLogDestinationArg::Both
         ) {
             let log_dir = self
                 .log_dir
@@ -877,14 +896,20 @@ pub struct ConfigFile {
     pub aether_tcp_nodelay: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub aether_http2: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub aether_proxy_url: Option<String>,
+    #[serde(
+        alias = "aether_proxy_url",
+        alias = "aether_tunnel_url",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub aether_outbound_proxy_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub aether_retry_max_attempts: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub aether_retry_base_delay_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub aether_retry_max_delay_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostics_bind: Option<SocketAddr>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_concurrent_connections: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -910,13 +935,15 @@ pub struct ConfigFile {
     )]
     pub redirect_replay_budget_bytes: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub emit_proxy_timing_header: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub log_level: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub log_destination: Option<ProxyLogDestinationArg>,
+    pub log_destination: Option<TunnelLogDestinationArg>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log_dir: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub log_rotation: Option<ProxyLogRotationArg>,
+    pub log_rotation: Option<TunnelLogRotationArg>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log_retention_days: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1003,152 +1030,157 @@ impl ConfigFile {
             .as_deref()
             .or(first_server.and_then(|s| s.node_name.as_deref()));
 
-        set!("AETHER_PROXY_AETHER_URL", aether_url);
-        set!("AETHER_PROXY_MANAGEMENT_TOKEN", management_token);
-        set!("AETHER_PROXY_PUBLIC_IP", self.public_ip);
-        set!("AETHER_PROXY_NODE_NAME", node_name);
-        set!("AETHER_PROXY_NODE_REGION", self.node_region);
-        set!("AETHER_PROXY_HEARTBEAT_INTERVAL", self.heartbeat_interval);
+        set!("AETHER_TUNNEL_AETHER_URL", aether_url);
+        set!("AETHER_TUNNEL_MANAGEMENT_TOKEN", management_token);
+        set!("AETHER_TUNNEL_PUBLIC_IP", self.public_ip);
+        set!("AETHER_TUNNEL_NODE_NAME", node_name);
+        set!("AETHER_TUNNEL_NODE_REGION", self.node_region);
+        set!("AETHER_TUNNEL_HEARTBEAT_INTERVAL", self.heartbeat_interval);
         set!(
-            "AETHER_PROXY_ALLOW_PRIVATE_TARGETS",
+            "AETHER_TUNNEL_ALLOW_PRIVATE_TARGETS",
             self.allow_private_targets
         );
         set!(
-            "AETHER_PROXY_AETHER_REQUEST_TIMEOUT",
+            "AETHER_TUNNEL_AETHER_REQUEST_TIMEOUT",
             self.aether_request_timeout_secs
         );
         set!(
-            "AETHER_PROXY_AETHER_CONNECT_TIMEOUT",
+            "AETHER_TUNNEL_AETHER_CONNECT_TIMEOUT",
             self.aether_connect_timeout_secs
         );
         set!(
-            "AETHER_PROXY_AETHER_POOL_MAX_IDLE_PER_HOST",
+            "AETHER_TUNNEL_AETHER_POOL_MAX_IDLE_PER_HOST",
             self.aether_pool_max_idle_per_host
         );
         set!(
-            "AETHER_PROXY_AETHER_POOL_IDLE_TIMEOUT",
+            "AETHER_TUNNEL_AETHER_POOL_IDLE_TIMEOUT",
             self.aether_pool_idle_timeout_secs
         );
         set!(
-            "AETHER_PROXY_AETHER_TCP_KEEPALIVE",
+            "AETHER_TUNNEL_AETHER_TCP_KEEPALIVE",
             self.aether_tcp_keepalive_secs
         );
-        set!("AETHER_PROXY_AETHER_TCP_NODELAY", self.aether_tcp_nodelay);
-        set!("AETHER_PROXY_AETHER_HTTP2", self.aether_http2);
-        set!("AETHER_PROXY_AETHER_PROXY_URL", self.aether_proxy_url);
+        set!("AETHER_TUNNEL_AETHER_TCP_NODELAY", self.aether_tcp_nodelay);
+        set!("AETHER_TUNNEL_AETHER_HTTP2", self.aether_http2);
         set!(
-            "AETHER_PROXY_AETHER_RETRY_MAX_ATTEMPTS",
+            "AETHER_TUNNEL_AETHER_OUTBOUND_PROXY_URL",
+            self.aether_outbound_proxy_url
+        );
+        set!(
+            "AETHER_TUNNEL_AETHER_RETRY_MAX_ATTEMPTS",
             self.aether_retry_max_attempts
         );
         set!(
-            "AETHER_PROXY_AETHER_RETRY_BASE_DELAY_MS",
+            "AETHER_TUNNEL_AETHER_RETRY_BASE_DELAY_MS",
             self.aether_retry_base_delay_ms
         );
         set!(
-            "AETHER_PROXY_AETHER_RETRY_MAX_DELAY_MS",
+            "AETHER_TUNNEL_AETHER_RETRY_MAX_DELAY_MS",
             self.aether_retry_max_delay_ms
         );
+        set!("AETHER_TUNNEL_DIAGNOSTICS_BIND", self.diagnostics_bind);
         set!(
-            "AETHER_PROXY_MAX_CONCURRENT_CONNECTIONS",
+            "AETHER_TUNNEL_MAX_CONCURRENT_CONNECTIONS",
             self.max_concurrent_connections
         );
-        set!("AETHER_PROXY_DNS_CACHE_TTL", self.dns_cache_ttl_secs);
-        set!("AETHER_PROXY_DNS_CACHE_CAPACITY", self.dns_cache_capacity);
+        set!("AETHER_TUNNEL_DNS_CACHE_TTL", self.dns_cache_ttl_secs);
+        set!("AETHER_TUNNEL_DNS_CACHE_CAPACITY", self.dns_cache_capacity);
         set!(
-            "AETHER_PROXY_UPSTREAM_CONNECT_TIMEOUT",
+            "AETHER_TUNNEL_UPSTREAM_CONNECT_TIMEOUT",
             self.upstream_connect_timeout_secs
         );
         set!(
-            "AETHER_PROXY_UPSTREAM_POOL_MAX_IDLE_PER_HOST",
+            "AETHER_TUNNEL_UPSTREAM_POOL_MAX_IDLE_PER_HOST",
             self.upstream_pool_max_idle_per_host
         );
         set!(
-            "AETHER_PROXY_UPSTREAM_POOL_IDLE_TIMEOUT",
+            "AETHER_TUNNEL_UPSTREAM_POOL_IDLE_TIMEOUT",
             self.upstream_pool_idle_timeout_secs
         );
         set!(
-            "AETHER_PROXY_UPSTREAM_TCP_KEEPALIVE",
+            "AETHER_TUNNEL_UPSTREAM_TCP_KEEPALIVE",
             self.upstream_tcp_keepalive_secs
         );
         set!(
-            "AETHER_PROXY_UPSTREAM_TCP_NODELAY",
+            "AETHER_TUNNEL_UPSTREAM_TCP_NODELAY",
             self.upstream_tcp_nodelay
         );
-        set!("AETHER_PROXY_UPSTREAM_PROXY_URL", self.upstream_proxy_url);
+        set!("AETHER_TUNNEL_UPSTREAM_PROXY_URL", self.upstream_proxy_url);
         set!(
-            "AETHER_PROXY_REDIRECT_REPLAY_BUDGET_BYTES",
+            "AETHER_TUNNEL_REDIRECT_REPLAY_BUDGET_BYTES",
             self.redirect_replay_budget_bytes
         );
-        set!("AETHER_PROXY_LOG_LEVEL", self.log_level);
         set!(
-            "AETHER_PROXY_LOG_DESTINATION",
+            "AETHER_TUNNEL_EMIT_PROXY_TIMING_HEADER",
+            self.emit_proxy_timing_header
+        );
+        set!("AETHER_TUNNEL_LOG_LEVEL", self.log_level);
+        set!(
+            "AETHER_TUNNEL_LOG_DESTINATION",
             self.log_destination.map(|v| match v {
-                ProxyLogDestinationArg::Stdout => "stdout",
-                ProxyLogDestinationArg::File => "file",
-                ProxyLogDestinationArg::Both => "both",
+                TunnelLogDestinationArg::Stdout => "stdout",
+                TunnelLogDestinationArg::File => "file",
+                TunnelLogDestinationArg::Both => "both",
             })
         );
-        set!("AETHER_PROXY_LOG_DIR", self.log_dir.as_deref());
+        set!("AETHER_TUNNEL_LOG_DIR", self.log_dir.as_deref());
         set!(
-            "AETHER_PROXY_LOG_ROTATION",
+            "AETHER_TUNNEL_LOG_ROTATION",
             self.log_rotation.map(|v| match v {
-                ProxyLogRotationArg::Hourly => "hourly",
-                ProxyLogRotationArg::Daily => "daily",
+                TunnelLogRotationArg::Hourly => "hourly",
+                TunnelLogRotationArg::Daily => "daily",
             })
         );
-        set!("AETHER_PROXY_LOG_RETENTION_DAYS", self.log_retention_days);
-        set!("AETHER_PROXY_LOG_MAX_FILES", self.log_max_files);
+        set!("AETHER_TUNNEL_LOG_RETENTION_DAYS", self.log_retention_days);
+        set!("AETHER_TUNNEL_LOG_MAX_FILES", self.log_max_files);
         set!(
-            "AETHER_PROXY_TUNNEL_RECONNECT_BASE_MS",
+            "AETHER_TUNNEL_RECONNECT_BASE_MS",
             self.tunnel_reconnect_base_ms
         );
         set!(
-            "AETHER_PROXY_TUNNEL_RECONNECT_MAX_MS",
+            "AETHER_TUNNEL_RECONNECT_MAX_MS",
             self.tunnel_reconnect_max_ms
         );
         set!(TUNNEL_PING_INTERVAL_MS_ENV, self.tunnel_ping_interval_ms);
-        set!("AETHER_PROXY_TUNNEL_MAX_STREAMS", self.tunnel_max_streams);
+        set!("AETHER_TUNNEL_MAX_STREAMS", self.tunnel_max_streams);
         set!(
             TUNNEL_CONNECT_TIMEOUT_MS_ENV,
             self.tunnel_connect_timeout_ms
         );
         set!(
-            "AETHER_PROXY_TUNNEL_TCP_KEEPALIVE",
+            "AETHER_TUNNEL_TCP_KEEPALIVE",
             self.tunnel_tcp_keepalive_secs
         );
-        set!("AETHER_PROXY_TUNNEL_TCP_NODELAY", self.tunnel_tcp_nodelay);
+        set!("AETHER_TUNNEL_TCP_NODELAY", self.tunnel_tcp_nodelay);
         set!(TUNNEL_STALE_TIMEOUT_MS_ENV, self.tunnel_stale_timeout_ms);
-        set!("AETHER_PROXY_TUNNEL_CONNECTIONS", self.tunnel_connections);
+        set!("AETHER_TUNNEL_CONNECTIONS", self.tunnel_connections);
+        set!("AETHER_TUNNEL_CONNECTIONS_MAX", self.tunnel_connections_max);
         set!(
-            "AETHER_PROXY_TUNNEL_CONNECTIONS_MAX",
-            self.tunnel_connections_max
-        );
-        set!(
-            "AETHER_PROXY_TUNNEL_SCALE_CHECK_INTERVAL_MS",
+            "AETHER_TUNNEL_SCALE_CHECK_INTERVAL_MS",
             self.tunnel_scale_check_interval_ms
         );
         set!(
-            "AETHER_PROXY_TUNNEL_SCALE_UP_THRESHOLD_PERCENT",
+            "AETHER_TUNNEL_SCALE_UP_THRESHOLD_PERCENT",
             self.tunnel_scale_up_threshold_percent
         );
         set!(
-            "AETHER_PROXY_TUNNEL_SCALE_DOWN_THRESHOLD_PERCENT",
+            "AETHER_TUNNEL_SCALE_DOWN_THRESHOLD_PERCENT",
             self.tunnel_scale_down_threshold_percent
         );
         set!(
-            "AETHER_PROXY_TUNNEL_SCALE_DOWN_GRACE_SECS",
+            "AETHER_TUNNEL_SCALE_DOWN_GRACE_SECS",
             self.tunnel_scale_down_grace_secs
         );
 
         // allowed_ports needs special handling (comma-separated)
         if let Some(ref ports) = self.allowed_ports {
-            if force || std::env::var("AETHER_PROXY_ALLOWED_PORTS").is_err() {
+            if force || std::env::var("AETHER_TUNNEL_ALLOWED_PORTS").is_err() {
                 let s: String = ports
                     .iter()
                     .map(|p| p.to_string())
                     .collect::<Vec<_>>()
                     .join(",");
-                std::env::set_var("AETHER_PROXY_ALLOWED_PORTS", s);
+                std::env::set_var("AETHER_TUNNEL_ALLOWED_PORTS", s);
             }
         }
     }
@@ -1317,64 +1349,75 @@ mod tests {
     }
 
     #[test]
-    fn config_file_deserializes_aether_proxy_url() {
-        let cfg: ConfigFile = toml::from_str("aether_proxy_url = \"socks5h://127.0.0.1:1080\"")
-            .expect("proxy URL toml");
+    fn config_file_deserializes_aether_outbound_proxy_url() {
+        let cfg: ConfigFile =
+            toml::from_str("aether_outbound_proxy_url = \"socks5h://127.0.0.1:1080\"")
+                .expect("proxy URL toml");
         assert_eq!(
-            cfg.aether_proxy_url.as_deref(),
+            cfg.aether_outbound_proxy_url.as_deref(),
             Some("socks5h://127.0.0.1:1080")
         );
     }
 
     #[test]
-    fn aether_proxy_url_requires_explicit_opt_in() {
+    fn config_file_deserializes_legacy_aether_proxy_url_alias() {
+        let cfg: ConfigFile = toml::from_str("aether_proxy_url = \"socks5h://127.0.0.1:1080\"")
+            .expect("legacy proxy URL toml");
+        assert_eq!(
+            cfg.aether_outbound_proxy_url.as_deref(),
+            Some("socks5h://127.0.0.1:1080")
+        );
+    }
+
+    #[test]
+    fn aether_outbound_proxy_url_requires_explicit_opt_in() {
         let default_direct = Config::parse_from([
-            "aether-proxy",
+            "aether-tunnel",
             "--aether-url",
             "https://example.com",
             "--management-token",
             "ae_test",
             "--node-name",
-            "proxy-test",
+            "tunnel-test",
             "--upstream-proxy-url",
             "socks5h://127.0.0.1:1080",
         ]);
-        assert_eq!(default_direct.effective_aether_proxy_url(), None);
+        assert_eq!(default_direct.effective_aether_outbound_proxy_url(), None);
 
         let explicit = Config::parse_from([
-            "aether-proxy",
+            "aether-tunnel",
             "--aether-url",
             "https://example.com",
             "--management-token",
             "ae_test",
             "--node-name",
-            "proxy-test",
+            "tunnel-test",
             "--upstream-proxy-url",
             "socks5h://127.0.0.1:1080",
-            "--aether-proxy-url",
+            "--aether-outbound-proxy-url",
             "http://127.0.0.1:8080",
         ]);
         assert_eq!(
-            explicit.effective_aether_proxy_url(),
+            explicit.effective_aether_outbound_proxy_url(),
             Some("http://127.0.0.1:8080")
         );
     }
 
     #[test]
-    fn proxy_logs_default_to_rotating_file_and_stdout() {
+    fn tunnel_logs_default_to_rotating_file_and_stdout() {
         let config = Config::parse_from([
-            "aether-proxy",
+            "aether-tunnel",
             "--aether-url",
             "https://example.com",
             "--management-token",
             "ae_test",
             "--node-name",
-            "proxy-test",
+            "tunnel-test",
         ]);
 
-        assert_eq!(config.log_destination, ProxyLogDestinationArg::Both);
+        assert_eq!(config.log_destination, TunnelLogDestinationArg::Both);
         assert_eq!(config.log_dir.as_deref(), Some(DEFAULT_LOG_DIR));
-        assert_eq!(config.log_rotation, ProxyLogRotationArg::Daily);
+        assert_eq!(config.log_rotation, TunnelLogRotationArg::Daily);
         assert_eq!(config.log_retention_days, DEFAULT_LOG_RETENTION_DAYS);
 
         let runtime = config
@@ -1398,7 +1441,7 @@ mod tests {
 aether_url = "https://aether.example.com"
 upstream_proxy_url = "socks5://127.0.0.1:1080"
 management_token = "ae_test"
-node_name = "proxy-test"
+node_name = "tunnel-test"
 "#,
         )
         .expect("server-scoped proxy URL should be promoted");
@@ -1421,7 +1464,7 @@ upstream_proxy_url = "socks5://127.0.0.1:1080"
 aether_url = "https://aether.example.com"
 upstream_proxy_url = "socks5://127.0.0.1:1081"
 management_token = "ae_test"
-node_name = "proxy-test"
+node_name = "tunnel-test"
 "#,
         )
         .expect_err("conflicting proxy URLs should be rejected");
@@ -1477,13 +1520,13 @@ node_name = "proxy-test"
     #[test]
     fn cli_defaults_private_targets_to_enabled() {
         let config = Config::parse_from([
-            "aether-proxy",
+            "aether-tunnel",
             "--aether-url",
             "https://example.com",
             "--management-token",
             "ae_test",
             "--node-name",
-            "proxy-test",
+            "tunnel-test",
         ]);
         assert!(config.allow_private_targets);
     }
@@ -1491,13 +1534,13 @@ node_name = "proxy-test"
     #[test]
     fn tunnel_fast_recovery_defaults_use_millisecond_values() {
         let config = Config::parse_from([
-            "aether-proxy",
+            "aether-tunnel",
             "--aether-url",
             "https://example.com",
             "--management-token",
             "ae_test",
             "--node-name",
-            "proxy-test",
+            "tunnel-test",
         ]);
         assert_eq!(
             config
@@ -1530,13 +1573,13 @@ node_name = "proxy-test"
     #[test]
     fn tunnel_millisecond_flags_take_effect_when_explicitly_set() {
         let config = Config::parse_from([
-            "aether-proxy",
+            "aether-tunnel",
             "--aether-url",
             "https://example.com",
             "--management-token",
             "ae_test",
             "--node-name",
-            "proxy-test",
+            "tunnel-test",
             "--tunnel-ping-interval-ms",
             "100",
             "--tunnel-connect-timeout-ms",
@@ -1567,13 +1610,13 @@ node_name = "proxy-test"
     #[test]
     fn auto_tunnel_pool_sizing_uses_hardware_capacity() {
         let config = Config::parse_from([
-            "aether-proxy",
+            "aether-tunnel",
             "--aether-url",
             "https://example.com",
             "--management-token",
             "ae_test",
             "--node-name",
-            "proxy-test",
+            "tunnel-test",
             "--tunnel-max-streams",
             "1024",
         ]);
@@ -1595,13 +1638,13 @@ node_name = "proxy-test"
     #[test]
     fn auto_tunnel_pool_sizing_prefers_redundant_floor_when_hardware_allows() {
         let config = Config::parse_from([
-            "aether-proxy",
+            "aether-tunnel",
             "--aether-url",
             "https://example.com",
             "--management-token",
             "ae_test",
             "--node-name",
-            "proxy-test",
+            "tunnel-test",
             "--tunnel-max-streams",
             "1024",
         ]);
@@ -1623,13 +1666,13 @@ node_name = "proxy-test"
     #[test]
     fn auto_tunnel_pool_sizing_keeps_single_core_nodes_redundant() {
         let config = Config::parse_from([
-            "aether-proxy",
+            "aether-tunnel",
             "--aether-url",
             "https://example.com",
             "--management-token",
             "ae_test",
             "--node-name",
-            "proxy-test",
+            "tunnel-test",
             "--tunnel-max-streams",
             "200",
         ]);
@@ -1651,13 +1694,13 @@ node_name = "proxy-test"
     #[test]
     fn auto_tunnel_pool_sizing_respects_stream_admission_limit() {
         let config = Config::parse_from([
-            "aether-proxy",
+            "aether-tunnel",
             "--aether-url",
             "https://example.com",
             "--management-token",
             "ae_test",
             "--node-name",
-            "proxy-test",
+            "tunnel-test",
             "--tunnel-max-streams",
             "45",
             "--max-in-flight-streams",
@@ -1681,13 +1724,13 @@ node_name = "proxy-test"
     #[test]
     fn explicit_tunnel_connections_keep_fixed_pool_without_max_override() {
         let config = Config::parse_from([
-            "aether-proxy",
+            "aether-tunnel",
             "--aether-url",
             "https://example.com",
             "--management-token",
             "ae_test",
             "--node-name",
-            "proxy-test",
+            "tunnel-test",
             "--tunnel-max-streams",
             "512",
             "--tunnel-connections",
