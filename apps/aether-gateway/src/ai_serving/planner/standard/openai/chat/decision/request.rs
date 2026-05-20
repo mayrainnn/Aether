@@ -30,9 +30,7 @@ use crate::ai_serving::transport::kiro::{
 use crate::ai_serving::transport::local_openai_chat_transport_unsupported_reason;
 use crate::ai_serving::transport::{
     build_grok_browser_headers, build_grok_upstream_url, build_kiro_cross_format_upstream_url,
-    build_openai_image_headers, build_openai_image_upstream_url,
-    build_standard_provider_request_headers, openai_image_transport_unsupported_reason,
-    resolve_openai_image_auth, GrokHeaderInput, ProviderOpenAiImageHeadersInput,
+    build_standard_provider_request_headers, GrokHeaderInput,
     StandardProviderRequestHeadersInput, GROK_CHAT_PATH,
 };
 use crate::ai_serving::{
@@ -792,6 +790,7 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
     }))
 }
 
+#[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 async fn resolve_openai_chat_to_openai_image_payload_parts(
     state: &AppState,
@@ -961,6 +960,7 @@ async fn resolve_openai_chat_to_openai_image_payload_parts(
     }))
 }
 
+#[allow(dead_code)]
 fn build_openai_image_provider_body_from_openai_chat_body(
     body_json: &Value,
     requested_model: &str,
@@ -1038,6 +1038,7 @@ fn build_openai_image_provider_body_from_openai_chat_body(
     Some((Value::Object(body), Value::Object(summary)))
 }
 
+#[allow(dead_code)]
 fn build_chatgpt_web_image_provider_body_from_openai_chat_body(
     body_json: &Value,
     requested_model: &str,
@@ -1099,6 +1100,7 @@ fn build_chatgpt_web_image_provider_body_from_openai_chat_body(
     Some((body, summary))
 }
 
+#[allow(dead_code)]
 fn copy_openai_chat_image_option(
     body_json: &Value,
     image_options: &mut serde_json::Map<String, Value>,
@@ -1109,6 +1111,7 @@ fn copy_openai_chat_image_option(
     }
 }
 
+#[allow(dead_code)]
 fn collect_openai_chat_image_prompt_and_images(body_json: &Value) -> Option<(String, Vec<Value>)> {
     let messages = body_json.get("messages").and_then(Value::as_array)?;
     let mut prompt_parts = Vec::new();
@@ -1136,6 +1139,7 @@ fn collect_openai_chat_image_prompt_and_images(body_json: &Value) -> Option<(Str
     (!prompt.is_empty()).then_some((prompt, images))
 }
 
+#[allow(dead_code)]
 fn collect_openai_chat_image_inputs(content: Option<&Value>, images: &mut Vec<Value>) {
     let Some(parts) = content.and_then(Value::as_array) else {
         return;
@@ -1176,6 +1180,7 @@ fn collect_openai_chat_image_inputs(content: Option<&Value>, images: &mut Vec<Va
     }
 }
 
+#[allow(dead_code)]
 fn openai_image_inputs_as_urls(images: &[Value]) -> Vec<Value> {
     images
         .iter()
@@ -1190,6 +1195,7 @@ fn openai_image_inputs_as_urls(images: &[Value]) -> Vec<Value> {
         .collect()
 }
 
+#[allow(dead_code)]
 fn chatgpt_web_ratio_for_size(size: &str) -> String {
     let Some((width, height)) = size.split_once('x') else {
         return "1:1".to_string();
@@ -1207,6 +1213,7 @@ fn chatgpt_web_ratio_for_size(size: &str) -> String {
     format!("{}:{}", width / divisor, height / divisor)
 }
 
+#[allow(dead_code)]
 fn gcd(mut left: u64, mut right: u64) -> u64 {
     while right != 0 {
         let next = left % right;
@@ -1216,6 +1223,7 @@ fn gcd(mut left: u64, mut right: u64) -> u64 {
     left.max(1)
 }
 
+#[allow(dead_code)]
 fn chatgpt_web_image_internal_url(base_url: &str) -> String {
     let base_url = base_url.trim().trim_end_matches('/');
     let base_url = if base_url.is_empty() {
