@@ -573,6 +573,10 @@ fn build_windsurf_stream_frame_stream(
                         .filter(|tool_call| !streamed_native_call_ids.contains(&tool_call.id))
                         .collect::<Vec<_>>();
                     tool_calls.extend(parsed_tool_calls.tool_calls);
+                    let finish_reason = windsurf_stream_finish_reason(
+                        !streamed_native_call_ids.is_empty(),
+                        !tool_calls.is_empty(),
+                    );
                     if !tool_calls.is_empty() {
                         for frame in sse_tool_call_frames_from_index(
                             &prepared.request_id,
@@ -595,9 +599,10 @@ fn build_windsurf_stream_frame_stream(
                                 &content,
                             )));
                         }
-                        let _ = tx.send(encode_stream_frame_ndjson(&sse_finish_frame(
+                        let _ = tx.send(encode_stream_frame_ndjson(&sse_finish_frame_with_reason(
                             &prepared.request_id,
                             &prepared.model,
+                            finish_reason,
                         )));
                     }
                     let _ = tx.send(encode_stream_frame_ndjson(&raw_sse_data_frame(b"data: [DONE]\n\n")));
@@ -616,7 +621,7 @@ fn build_windsurf_stream_frame_stream(
                         windsurf_terminal_summary(
                             poll_result.usage,
                             Some(prepared.model.as_str()),
-                            Some(if tool_calls.is_empty() { "stop" } else { "tool_calls" }),
+                            Some(finish_reason),
                         ),
                     )));
                 }
@@ -1092,8 +1097,7 @@ where
             step.response_text.as_str()
         };
         let previous = yielded_by_step.get(&index).copied().unwrap_or_default();
-        if live_text.len() > previous {
-            let delta = live_text[previous..].to_string();
+        if let Some(delta) = windsurf_text_delta_from_cursor(live_text, previous) {
             yielded_by_step.insert(index, live_text.len());
             grew = true;
             on_delta(delta)?;
@@ -1104,8 +1108,7 @@ where
             && step.modified_text.starts_with(live_text)
         {
             let cursor = yielded_by_step.get(&index).copied().unwrap_or_default();
-            if step.modified_text.len() > cursor {
-                let delta = step.modified_text[cursor..].to_string();
+            if let Some(delta) = windsurf_text_delta_from_cursor(&step.modified_text, cursor) {
                 yielded_by_step.insert(index, step.modified_text.len());
                 grew = true;
                 on_delta(delta)?;
@@ -1113,6 +1116,18 @@ where
         }
     }
     Ok(grew)
+}
+
+fn windsurf_text_delta_from_cursor(text: &str, cursor: usize) -> Option<String> {
+    if text.len() <= cursor {
+        return None;
+    }
+    let cursor = if text.is_char_boundary(cursor) {
+        cursor
+    } else {
+        0
+    };
+    Some(text[cursor..].to_string())
 }
 
 async fn ensure_windsurf_language_server(
@@ -3111,8 +3126,15 @@ fn sse_data_frame(request_id: &str, model: &str, delta: &str) -> StreamFrame {
     raw_sse_data_frame(&body)
 }
 
-fn sse_finish_frame(request_id: &str, model: &str) -> StreamFrame {
-    sse_finish_frame_with_reason(request_id, model, "stop")
+fn windsurf_stream_finish_reason(
+    streamed_native_tool_call: bool,
+    pending_tool_call: bool,
+) -> &'static str {
+    if streamed_native_tool_call || pending_tool_call {
+        "tool_calls"
+    } else {
+        "stop"
+    }
 }
 
 fn sse_finish_frame_with_reason(request_id: &str, model: &str, finish_reason: &str) -> StreamFrame {
@@ -4430,6 +4452,19 @@ mod tests {
     }
 
     #[test]
+    fn native_tool_stream_finish_reason_stays_tool_calls_after_live_delta() {
+        assert_eq!(
+            super::windsurf_stream_finish_reason(true, false),
+            "tool_calls"
+        );
+        assert_eq!(
+            super::windsurf_stream_finish_reason(false, true),
+            "tool_calls"
+        );
+        assert_eq!(super::windsurf_stream_finish_reason(false, false), "stop");
+    }
+
+    #[test]
     fn windsurf_rate_limit_errors_classify_as_upstream_429() {
         let err = ExecutionRuntimeTransportError::UpstreamRequest(
             "Reached message rate limit for this model. Please try again later. Resets in: 2h58m56s"
@@ -4891,6 +4926,18 @@ mod tests {
         assert!(grew);
         assert_eq!(deltas, vec![" world".to_string(), "!".to_string()]);
         assert_eq!(yielded_by_step.get(&0), Some(&12));
+    }
+
+    #[test]
+    fn text_delta_cursor_resets_on_non_char_boundary() {
+        assert_eq!(
+            super::windsurf_text_delta_from_cursor("aé", 2).as_deref(),
+            Some("aé")
+        );
+        assert_eq!(
+            super::windsurf_text_delta_from_cursor("hello", 2).as_deref(),
+            Some("llo")
+        );
     }
 
     #[test]
