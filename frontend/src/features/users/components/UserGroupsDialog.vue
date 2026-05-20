@@ -274,7 +274,6 @@ import type {
 
 const props = defineProps<{
   open: boolean
-  users: User[]
 }>()
 
 const emit = defineEmits<{
@@ -295,8 +294,11 @@ const {
 const loading = ref(false)
 const saving = ref(false)
 const groups = ref<UserGroup[]>([])
+const dialogUsers = ref<User[]>([])
 const editingGroupId = ref<string | null>(null)
 const memberUserIds = ref<string[]>([])
+const USER_OPTIONS_CACHE_TTL_MS = 30 * 1000
+let dialogUsersLoadedAt = 0
 
 const form = ref({
   name: '',
@@ -311,7 +313,7 @@ const form = ref({
 })
 
 const selectedGroup = computed(() => groups.value.find((group) => group.id === editingGroupId.value) ?? null)
-const userOptions = computed(() => props.users.map((user) => ({
+const userOptions = computed(() => dialogUsers.value.map((user) => ({
   label: `${user.username}${user.email ? ` (${user.email})` : ''}`,
   value: user.id,
 })))
@@ -334,8 +336,11 @@ function handleDialogUpdate(value: boolean): void {
 async function loadDialogData(): Promise<void> {
   loading.value = true
   try {
-    const response = await usersStore.listUserGroups()
-    groups.value = response.items
+    const [groupsResponse] = await Promise.all([
+      usersStore.listUserGroups(),
+      ensureDialogUsers(),
+    ])
+    groups.value = groupsResponse.items
     if (editingGroupId.value && !groups.value.some((group) => group.id === editingGroupId.value)) {
       editingGroupId.value = null
     }
@@ -352,6 +357,16 @@ async function loadDialogData(): Promise<void> {
   } finally {
     loading.value = false
   }
+}
+
+async function ensureDialogUsers(): Promise<void> {
+  const now = Date.now()
+  if (dialogUsersLoadedAt > 0 && now - dialogUsersLoadedAt < USER_OPTIONS_CACHE_TTL_MS) {
+    return
+  }
+
+  dialogUsers.value = await usersStore.listAllUsers({ cacheTtlMs: USER_OPTIONS_CACHE_TTL_MS })
+  dialogUsersLoadedAt = Date.now()
 }
 
 async function selectGroup(groupId: string): Promise<void> {

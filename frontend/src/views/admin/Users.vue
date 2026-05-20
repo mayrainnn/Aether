@@ -843,7 +843,6 @@
 
     <UserGroupsDialog
       :open="showUserGroupsDialog"
-      :users="usersStore.users"
       @close="showUserGroupsDialog = false"
       @changed="handleUserGroupsChanged"
     />
@@ -1947,7 +1946,6 @@ async function handleUserFormSubmit(data: UserFormData & { password?: string; un
         updateData.password = data.password
       }
       await usersStore.updateUser(data.id, updateData)
-      await loadUserWallets()
       success('用户信息已更新')
     } else {
       // 创建用户
@@ -1965,10 +1963,10 @@ async function handleUserFormSubmit(data: UserFormData & { password?: string; un
       if (data.is_active === false && newUser) {
         await usersStore.updateUser(newUser.id, { is_active: false })
       }
-      await loadUserWallets()
       success('用户创建成功')
     }
     closeUserFormDialog()
+    await refreshUsers()
   } catch (err: unknown) {
     const title = data.id ? '更新用户失败' : '创建用户失败'
     error(parseApiError(err, '未知错误'), title)
@@ -2272,6 +2270,10 @@ async function deleteUser(user: User) {
 
   try {
     await usersStore.deleteUser(user.id)
+    if (usersStore.users.length === 0 && currentPage.value > 1) {
+      currentPage.value -= 1
+    }
+    await refreshUsers()
     success('用户已删除')
   } catch (err: unknown) {
     error(parseApiError(err, '未知错误'), '删除用户失败')

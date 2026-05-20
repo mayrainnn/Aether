@@ -3,6 +3,7 @@ import { ref } from 'vue'
 import {
   usersApi,
   type User,
+  type GetAllUsersOptions,
   type CreateUserRequest,
   type UpdateUserRequest,
   type ApiKey,
@@ -31,6 +32,7 @@ export const useUsersStore = defineStore('users', () => {
   const hasMore = ref(false)
   const loading = ref(false)
   const error = ref<string | null>(null)
+  let fetchUsersRequestId = 0
 
   async function fetchUsers(options: {
     cacheTtlMs?: number
@@ -41,20 +43,44 @@ export const useUsersStore = defineStore('users', () => {
     skip?: number
     limit?: number
   } = {}) {
+    const requestId = ++fetchUsersRequestId
     loading.value = true
     error.value = null
 
     try {
       const response = await usersApi.getAllUsersPage(options)
+      if (requestId !== fetchUsersRequestId) return
       users.value = response.items
       total.value = response.total
       skip.value = response.skip
       limit.value = response.limit
       hasMore.value = response.has_more
     } catch (err: unknown) {
+      if (requestId !== fetchUsersRequestId) return
       error.value = parseApiError(err, '获取用户列表失败')
     } finally {
-      loading.value = false
+      if (requestId === fetchUsersRequestId) {
+        loading.value = false
+      }
+    }
+  }
+
+  async function listAllUsers(options: Omit<GetAllUsersOptions, 'skip' | 'limit'> = {}): Promise<User[]> {
+    const pageSize = 1000
+    const allUsers: User[] = []
+    let skip = 0
+
+    for (;;) {
+      const response = await usersApi.getAllUsersPage({
+        ...options,
+        skip,
+        limit: pageSize,
+      })
+      allUsers.push(...response.items)
+      if (!response.has_more || response.items.length === 0) {
+        return allUsers
+      }
+      skip += response.items.length
     }
   }
 
@@ -315,6 +341,7 @@ export const useUsersStore = defineStore('users', () => {
     loading,
     error,
     fetchUsers,
+    listAllUsers,
     createUser,
     updateUser,
     deleteUser,
