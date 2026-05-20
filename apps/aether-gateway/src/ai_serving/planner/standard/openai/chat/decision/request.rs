@@ -501,20 +501,6 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
     };
 
     let provider_api_format = provider_api_format.trim().to_ascii_lowercase();
-    if provider_api_format == "openai:image" {
-        return resolve_openai_chat_to_openai_image_payload_parts(
-            state,
-            parts,
-            trace_id,
-            body_json,
-            input,
-            eligible,
-            candidate_index,
-            candidate_id,
-            upstream_is_stream,
-        )
-        .await;
-    }
 
     let Some(conversion_kind) =
         request_conversion_kind("openai:chat", provider_api_format.as_str())
