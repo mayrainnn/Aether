@@ -712,6 +712,15 @@ fn stream_terminal_summary_missing_observed_finish(
     })
 }
 
+fn stream_terminal_summary_represents_failure(
+    summary: Option<&ExecutionStreamTerminalSummary>,
+) -> bool {
+    summary.is_some_and(|summary| {
+        summary.parser_error.is_some()
+            || stream_terminal_summary_missing_observed_finish(Some(summary))
+    })
+}
+
 async fn execute_in_process_stream(
     state: &AppState,
     plan: &ExecutionPlan,
@@ -1434,7 +1443,12 @@ fn stream_chunk_contains_sse_done(chunk: &[u8]) -> bool {
             let line = line.trim();
             if matches!(
                 line,
-                "data: [DONE]" | "event: message_stop" | "event: response.completed"
+                "data: [DONE]"
+                    | "event: message_stop"
+                    | "event: response.completed"
+                    | "event: response.failed"
+                    | "event: response.incomplete"
+                    | "event: error"
             ) {
                 return true;
             }
@@ -1447,7 +1461,14 @@ fn stream_chunk_contains_sse_done(chunk: &[u8]) -> bool {
                         .get("type")
                         .and_then(serde_json::Value::as_str)
                         .is_some_and(|event_type| {
-                            matches!(event_type, "message_stop" | "response.completed")
+                            matches!(
+                                event_type,
+                                "message_stop"
+                                    | "response.completed"
+                                    | "response.failed"
+                                    | "response.incomplete"
+                                    | "error"
+                            )
                         })
                 })
         })
@@ -3342,6 +3363,8 @@ async fn execute_stream_from_frame_stream(
             usage_stream_telemetry.as_ref(),
             provider_stream_bytes.load(Ordering::Relaxed),
         ));
+        let stream_failed =
+            stream_terminal_summary_represents_failure(stream_terminal_summary.as_ref());
         let usage_payload = build_stream_usage_payload(
             trace_id_owned.clone(),
             report_kind_owned.unwrap_or_default(),
@@ -3408,17 +3431,34 @@ async fn execute_stream_from_frame_stream(
             &plan_for_report,
             usage_payload.report_context.as_ref(),
             SchedulerRequestCandidateStatusUpdate {
-                status: if missing_observed_finish {
+                status: if stream_failed {
                     RequestCandidateStatus::Failed
                 } else {
                     RequestCandidateStatus::Success
                 },
                 status_code: Some(status_code),
-                error_type: missing_observed_finish
-                    .then(|| "stream_missing_terminal_event".to_string()),
-                error_message: missing_observed_finish.then(|| {
-                    "execution runtime stream ended before provider terminal event".to_string()
-                }),
+                error_type: if stream_failed {
+                    if missing_observed_finish {
+                        Some("stream_missing_terminal_event".to_string())
+                    } else {
+                        Some("stream_terminal_error".to_string())
+                    }
+                } else {
+                    None
+                },
+                error_message: if stream_failed {
+                    stream_terminal_summary
+                        .as_ref()
+                        .and_then(|summary| summary.parser_error.clone())
+                        .or_else(|| {
+                            missing_observed_finish.then(|| {
+                                "execution runtime stream ended before provider terminal event"
+                                    .to_string()
+                            })
+                        })
+                } else {
+                    None
+                },
                 latency_ms: usage_payload
                     .telemetry
                     .as_ref()
@@ -3545,6 +3585,9 @@ mod tests {
         ));
         assert!(stream_chunk_contains_sse_done(
             b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{}}\n\n"
+        ));
+        assert!(stream_chunk_contains_sse_done(
+            b"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\"}}\n\n"
         ));
         assert!(!stream_chunk_contains_sse_done(
             b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\"}\n\n"

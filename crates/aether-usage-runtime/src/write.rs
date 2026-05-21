@@ -159,6 +159,7 @@ pub struct StreamTerminalUsagePayloadSeed {
     pub client_response_body_state: Option<UsageBodyCaptureState>,
     pub standardized_usage: Option<StandardizedUsage>,
     pub observed_stream_finish: Option<bool>,
+    pub terminal_error_message: Option<String>,
     pub capture_metadata: Option<Value>,
 }
 
@@ -184,6 +185,7 @@ pub struct TerminalUsageSeed {
     pub has_format_conversion: bool,
     pub is_stream: bool,
     pub status_code: u16,
+    pub terminal_error_message: Option<String>,
     pub response_time_ms: Option<u64>,
     pub first_byte_time_ms: Option<u64>,
     pub request_headers: Option<Value>,
@@ -507,6 +509,7 @@ fn build_terminal_usage_event_from_seed_impl(
         has_format_conversion,
         is_stream,
         status_code,
+        terminal_error_message,
         response_time_ms,
         first_byte_time_ms,
         request_headers,
@@ -531,7 +534,8 @@ fn build_terminal_usage_event_from_seed_impl(
     };
     let routing = merge_routing_seed_with_metadata_owned(routing, request_metadata.as_ref());
     let body_refs = merge_body_refs_seed_with_metadata_owned(body_refs, request_metadata.as_ref());
-    let error_message = resolve_error_message(status_code, provider_response.as_ref(), None)
+    let error_message = terminal_error_message
+        .or_else(|| resolve_error_message(status_code, provider_response.as_ref(), None))
         .or_else(|| resolve_error_message(status_code, client_response.as_ref(), None));
     let api_family = infer_api_family(&client_contract).map(ToOwned::to_owned);
     let endpoint_kind = infer_endpoint_kind(&client_contract).map(ToOwned::to_owned);
@@ -784,6 +788,12 @@ pub fn build_stream_terminal_usage_payload_seed(
         .terminal_summary
         .as_ref()
         .map(|summary| summary.observed_finish);
+    let terminal_error_message = payload
+        .terminal_summary
+        .as_ref()
+        .and_then(|summary| summary.parser_error.clone())
+        .map(|message| message.trim().to_string())
+        .filter(|message| !message.is_empty());
     StreamTerminalUsagePayloadSeed {
         report_kind: payload.report_kind.clone(),
         status_code: payload.status_code,
@@ -803,6 +813,7 @@ pub fn build_stream_terminal_usage_payload_seed(
             .as_ref()
             .and_then(|summary| summary.standardized_usage.clone()),
         observed_stream_finish,
+        terminal_error_message,
         capture_metadata: build_payload_body_capture_metadata(
             payload.provider_body_base64.as_deref(),
             payload.client_body_base64.as_deref(),
@@ -859,6 +870,7 @@ pub fn build_sync_terminal_usage_seed(
         has_format_conversion: context_seed.has_format_conversion,
         is_stream: context_seed.is_stream,
         status_code,
+        terminal_error_message: None,
         response_time_ms,
         first_byte_time_ms,
         request_headers: context_seed.request_headers,
@@ -901,6 +913,7 @@ pub fn build_stream_terminal_usage_seed(
         client_response_body_state,
         standardized_usage,
         observed_stream_finish,
+        terminal_error_message,
         capture_metadata,
     } = payload_seed;
     let standardized_usage = standardized_usage.or_else(|| {
@@ -912,11 +925,23 @@ pub fn build_stream_terminal_usage_seed(
         && !standardized_usage
             .as_ref()
             .is_some_and(StandardizedUsage::has_token_signal);
+    let terminal_error_message = terminal_error_message
+        .or_else(|| {
+            provider_response_full
+                .as_ref()
+                .and_then(extract_explicit_error_message_from_json)
+        })
+        .or_else(|| {
+            client_response
+                .as_ref()
+                .and_then(extract_explicit_error_message_from_json)
+        });
     let terminal_state = infer_stream_terminal_state(
         report_kind.as_str(),
         status_code,
         cancelled,
         missing_observed_finish,
+        terminal_error_message.is_some(),
     );
 
     TerminalUsageSeed {
@@ -940,6 +965,7 @@ pub fn build_stream_terminal_usage_seed(
         has_format_conversion: context_seed.has_format_conversion,
         is_stream: context_seed.is_stream,
         status_code,
+        terminal_error_message,
         response_time_ms,
         first_byte_time_ms,
         request_headers: context_seed.request_headers,
@@ -987,10 +1013,11 @@ fn infer_stream_terminal_state(
     status_code: u16,
     cancelled: bool,
     missing_observed_finish: bool,
+    terminal_error: bool,
 ) -> UsageTerminalState {
     if cancelled || status_code == 499 || report_kind.contains("cancel") {
         UsageTerminalState::Cancelled
-    } else if !(200..300).contains(&status_code) || missing_observed_finish {
+    } else if !(200..300).contains(&status_code) || missing_observed_finish || terminal_error {
         UsageTerminalState::Failed
     } else {
         UsageTerminalState::Completed
@@ -2112,6 +2139,31 @@ fn extract_explicit_error_message_from_json(value: &Value) -> Option<String> {
         .and_then(|error| error.get("message"))
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
+        .or_else(|| {
+            value
+                .get("response")
+                .and_then(|response| response.get("error"))
+                .and_then(|error| error.get("message"))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            value
+                .get("response")
+                .and_then(|response| response.get("incomplete_details"))
+                .and_then(|details| details.get("reason"))
+                .and_then(Value::as_str)
+                .map(|reason| format!("Response incomplete: {reason}"))
+        })
+        .or_else(|| extract_stream_error_message_from_chunks(value))
+}
+
+fn extract_stream_error_message_from_chunks(value: &Value) -> Option<String> {
+    value
+        .get("chunks")
+        .and_then(Value::as_array)?
+        .iter()
+        .find_map(extract_explicit_error_message_from_json)
 }
 
 fn extract_generic_error_message_from_json(value: &Value) -> Option<String> {
@@ -5000,6 +5052,7 @@ mod tests {
                 ..UsageRoutingSeed::default()
             },
             status_code: 200,
+            terminal_error_message: None,
             response_time_ms: Some(123),
             first_byte_time_ms: Some(45),
             request_headers: Some(json!({

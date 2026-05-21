@@ -1180,6 +1180,23 @@ impl OpenAIResponsesProviderState {
                     }
                 }
             }
+            event_type if openai_stream_payload_is_terminal_error(&value) => {
+                self.finished = true;
+                let mut payload = value.clone();
+                if event_type != "response.failed"
+                    && event_type != "response.incomplete"
+                    && event_type != "error"
+                {
+                    payload = openai_stream_terminal_error_body(&value).unwrap_or(payload);
+                    if let Some(object) = payload.as_object_mut() {
+                        object.insert(
+                            "type".to_string(),
+                            Value::String("response.failed".to_string()),
+                        );
+                    }
+                }
+                out.push(self.unknown_frame(report_context, payload));
+            }
             "response.completed" => {
                 let Some(response) = value.get("response").and_then(Value::as_object) else {
                     return Ok(out);
@@ -1558,6 +1575,13 @@ impl OpenAIChatClientEmitter {
                     }),
                 )?);
                 Ok(out)
+            }
+            CanonicalStreamEvent::UnknownEvent(payload)
+                if openai_stream_terminal_error_body(&payload).is_some() =>
+            {
+                self.finished = true;
+                let error_body = openai_stream_terminal_error_body(&payload).unwrap_or(payload);
+                encode_json_sse(None, &error_body)
             }
             CanonicalStreamEvent::UnknownEvent(_) => Ok(Vec::new()),
             CanonicalStreamEvent::Finish {
@@ -2456,6 +2480,29 @@ impl OpenAIResponsesClientEmitter {
                 }
                 Ok(out)
             }
+            CanonicalStreamEvent::UnknownEvent(payload)
+                if openai_stream_terminal_error_body(&payload).is_some() =>
+            {
+                self.finished = true;
+                let raw_event = payload.get("type").and_then(Value::as_str);
+                let event = raw_event
+                    .filter(|event| {
+                        matches!(*event, "response.failed" | "response.incomplete" | "error")
+                    })
+                    .unwrap_or("response.failed")
+                    .to_string();
+                let mut payload = if raw_event == Some(event.as_str()) {
+                    payload
+                } else {
+                    openai_stream_terminal_error_body(&payload).unwrap_or(payload)
+                };
+                if payload.get("type").is_none() {
+                    if let Some(object) = payload.as_object_mut() {
+                        object.insert("type".to_string(), Value::String(event.clone()));
+                    }
+                }
+                self.encode_response_event(event.as_str(), payload)
+            }
             CanonicalStreamEvent::UnknownEvent(_) => Ok(Vec::new()),
             CanonicalStreamEvent::Finish { usage, .. } => {
                 if self.finished {
@@ -2683,6 +2730,40 @@ mod tests {
     }
 
     #[test]
+    fn openai_responses_provider_state_treats_failed_event_as_terminal() {
+        let mut state = OpenAIResponsesProviderState::default();
+        let report_context = json!({});
+        let frames = state
+            .push_line(
+                &report_context,
+                data_line(json!({
+                    "type": "response.failed",
+                    "response": {
+                        "id": "resp_failed_123",
+                        "model": "gpt-5.4",
+                        "status": "failed",
+                        "error": {
+                            "message": "policy failure",
+                            "type": "invalid_request_error",
+                            "code": "cyber_policy"
+                        }
+                    }
+                })),
+            )
+            .expect("failed response event should parse");
+
+        assert!(frames.iter().any(|frame| matches!(
+            frame.event,
+            CanonicalStreamEvent::UnknownEvent(ref payload)
+                if payload.get("type").and_then(Value::as_str) == Some("response.failed")
+        )));
+        assert!(state
+            .finish(&report_context)
+            .expect("terminal failure should not synthesize completion")
+            .is_empty());
+    }
+
+    #[test]
     fn openai_usage_derives_missing_input_tokens_from_total() {
         let usage = canonical_usage_from_openai_usage(Some(&json!({
             "output_tokens": 177,
@@ -2846,6 +2927,41 @@ mod tests {
         assert!(sse.contains("\"item_id\":\"resp_stream_123_msg\""));
         assert!(sse.contains("\"text\":\"Hello\""));
         assert_eq!(response_sequence_numbers(&sse), (1..=9).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn openai_responses_client_emitter_forwards_failed_unknown_event() {
+        let mut emitter = OpenAIResponsesClientEmitter::default();
+        let bytes = emitter
+            .emit(CanonicalStreamFrame {
+                id: "resp_failed_123".to_string(),
+                model: "gpt-5.4".to_string(),
+                event: CanonicalStreamEvent::UnknownEvent(json!({
+                    "type": "response.failed",
+                    "response": {
+                        "id": "resp_failed_123",
+                        "model": "gpt-5.4",
+                        "status": "failed",
+                        "error": {
+                            "message": "policy failure",
+                            "type": "invalid_request_error",
+                            "code": "cyber_policy"
+                        }
+                    }
+                })),
+            })
+            .expect("failed response event should encode");
+        let mut all = bytes;
+        all.extend(
+            emitter
+                .finish()
+                .expect("failed stream should not synthesize completion"),
+        );
+
+        let sse = String::from_utf8(all).expect("sse should be utf8");
+        assert!(sse.contains("event: response.failed\n"));
+        assert!(sse.contains("\"message\":\"policy failure\""));
+        assert!(!sse.contains("event: response.completed\n"));
     }
 
     #[test]
