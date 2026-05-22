@@ -263,9 +263,9 @@ pub fn parse_gemini_cli_retrieve_user_quota_response(
     let mut quota_by_model = serde_json::Map::new();
 
     for bucket in buckets {
-        let Some(bucket_object) = bucket.as_object() else {
+        if !bucket.is_object() {
             continue;
-        };
+        }
         let model_id = first_json_string_by_paths(
             bucket,
             &[
@@ -354,6 +354,54 @@ pub fn parse_gemini_cli_retrieve_user_quota_response(
             ],
         )
         .or_else(|| remaining_fraction.map(|value| value <= 1e-9));
+        let remaining_amount = first_json_f64_by_paths(
+            bucket,
+            &[
+                &["remainingAmount"],
+                &["remaining_amount"],
+                &["remaining"],
+                &["remaining_value"],
+                &["quotaInfo", "remainingAmount"],
+                &["quotaInfo", "remaining_amount"],
+                &["quotaInfo", "remaining"],
+                &["quotaInfo", "remaining_value"],
+                &["quota", "remainingAmount"],
+                &["quota", "remaining_amount"],
+                &["quota", "remaining"],
+                &["quota", "remaining_value"],
+            ],
+        );
+        let explicit_total = first_json_f64_by_paths(
+            bucket,
+            &[
+                &["limit"],
+                &["limitAmount"],
+                &["limit_amount"],
+                &["total"],
+                &["totalAmount"],
+                &["total_amount"],
+                &["quotaInfo", "limit"],
+                &["quotaInfo", "limitAmount"],
+                &["quotaInfo", "limit_amount"],
+                &["quotaInfo", "total"],
+                &["quotaInfo", "totalAmount"],
+                &["quotaInfo", "total_amount"],
+                &["quota", "limit"],
+                &["quota", "limitAmount"],
+                &["quota", "limit_amount"],
+                &["quota", "total"],
+                &["quota", "totalAmount"],
+                &["quota", "total_amount"],
+            ],
+        )
+        .filter(|value| *value > 0.0);
+        let total_amount = explicit_total.or_else(|| {
+            remaining_amount
+                .zip(remaining_fraction)
+                .and_then(|(remaining, fraction)| {
+                    (fraction > 0.0).then_some((remaining / fraction).round())
+                })
+        });
 
         let mut payload = serde_json::Map::new();
         payload.insert("display_name".to_string(), json!(display_name));
@@ -379,15 +427,11 @@ pub fn parse_gemini_cli_retrieve_user_quota_response(
         if let Some(is_exhausted) = is_exhausted {
             payload.insert("is_exhausted".to_string(), json!(is_exhausted));
         }
-        if bucket_object.contains_key("limit") {
-            if let Some(value) = bucket_object.get("limit").and_then(coerce_json_f64) {
-                payload.insert("total".to_string(), json!(value));
-            }
+        if let Some(value) = total_amount {
+            payload.insert("total".to_string(), json!(value));
         }
-        if bucket_object.contains_key("remaining") {
-            if let Some(value) = bucket_object.get("remaining").and_then(coerce_json_f64) {
-                payload.insert("remaining".to_string(), json!(value));
-            }
+        if let Some(value) = remaining_amount {
+            payload.insert("remaining".to_string(), json!(value));
         }
 
         quota_by_model.insert(quota_key, serde_json::Value::Object(payload));
@@ -1740,6 +1784,7 @@ mod tests {
                         "tokenType": "model",
                         "displayName": "Gemini 2.5 Pro",
                         "remainingFraction": 0.25,
+                        "remainingAmount": "25",
                         "resetTime": "2030-01-01T00:00:00Z",
                         "isExhausted": false
                     },
@@ -1763,6 +1808,14 @@ mod tests {
         assert_eq!(
             parsed["quota_by_model"]["gemini-2.5-pro"]["remaining_fraction"],
             json!(0.25)
+        );
+        assert_eq!(
+            parsed["quota_by_model"]["gemini-2.5-pro"]["remaining"],
+            json!(25.0)
+        );
+        assert_eq!(
+            parsed["quota_by_model"]["gemini-2.5-pro"]["total"],
+            json!(100.0)
         );
         assert_eq!(
             parsed["quota_by_model"]["gemini-2.5-pro"]["reset_at"],
