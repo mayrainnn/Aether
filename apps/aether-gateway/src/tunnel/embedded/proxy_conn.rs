@@ -338,7 +338,7 @@ fn encrypt_message(
         Message::Binary(data) => {
             let frame = Frame::decode(bytes::Bytes::from(data.to_vec()))
                 .map_err(|_| aether_contracts::tunnel_security::TunnelSecurityError::Encrypt)?;
-            Ok(Message::Binary(codec.encrypt_frame(frame)?.into()))
+            Ok(Message::Binary(codec.encrypt_frame(frame)?))
         }
         other => Ok(other),
     }
