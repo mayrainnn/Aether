@@ -187,6 +187,7 @@ pub struct TerminalUsageSeed {
     pub is_stream: bool,
     pub status_code: u16,
     pub terminal_error_message: Option<String>,
+    pub terminal_failure_category: Option<String>,
     pub response_time_ms: Option<u64>,
     pub first_byte_time_ms: Option<u64>,
     pub request_headers: Option<Value>,
@@ -511,6 +512,7 @@ fn build_terminal_usage_event_from_seed_impl(
         is_stream,
         status_code,
         terminal_error_message,
+        terminal_failure_category,
         response_time_ms,
         first_byte_time_ms,
         request_headers,
@@ -579,7 +581,12 @@ fn build_terminal_usage_event_from_seed_impl(
         is_stream: Some(is_stream),
         status_code: Some(status_code),
         error_message,
-        error_category: resolve_error_category(status_code, event_type),
+        error_category: resolve_error_category(
+            status_code,
+            event_type,
+            is_stream,
+            terminal_failure_category.as_deref(),
+        ),
         response_time_ms,
         first_byte_time_ms,
         request_headers,
@@ -868,6 +875,7 @@ pub fn build_sync_terminal_usage_seed(
         is_stream: context_seed.is_stream,
         status_code,
         terminal_error_message: None,
+        terminal_failure_category: None,
         response_time_ms,
         first_byte_time_ms,
         request_headers: context_seed.request_headers,
@@ -906,8 +914,8 @@ pub fn build_stream_terminal_usage_seed(
         client_response_headers,
         provider_response_full,
         provider_response_body_state,
-        client_response,
-        client_response_body_state,
+        mut client_response,
+        mut client_response_body_state,
         standardized_usage,
         observed_stream_finish,
         terminal_error_message,
@@ -933,6 +941,31 @@ pub fn build_stream_terminal_usage_seed(
                 .as_ref()
                 .and_then(extract_explicit_error_message_from_json)
         });
+    let terminal_failure_category = if terminal_error_message.is_some() {
+        Some("stream_terminal_error".to_string())
+    } else if missing_observed_finish {
+        Some("stream_missing_terminal_event".to_string())
+    } else {
+        None
+    };
+    let terminal_error_message = terminal_error_message.or_else(|| {
+        missing_observed_finish
+            .then(|| "execution runtime stream ended before provider terminal event".to_string())
+    });
+    if client_response.is_none() {
+        if let (Some(message), Some(category)) = (
+            terminal_error_message.as_deref(),
+            terminal_failure_category.as_deref(),
+        ) {
+            client_response = Some(build_stream_terminal_error_client_response(
+                category,
+                message,
+                status_code,
+                provider_response_full.as_ref(),
+            ));
+            client_response_body_state = Some(UsageBodyCaptureState::Inline);
+        }
+    }
     let terminal_state = infer_stream_terminal_state(
         report_kind.as_str(),
         status_code,
@@ -963,6 +996,7 @@ pub fn build_stream_terminal_usage_seed(
         is_stream: context_seed.is_stream,
         status_code,
         terminal_error_message,
+        terminal_failure_category,
         response_time_ms,
         first_byte_time_ms,
         request_headers: context_seed.request_headers,
@@ -2144,13 +2178,73 @@ fn is_sensitive_body_key(key: &str) -> bool {
         || normalized == "cookie"
 }
 
-fn resolve_error_category(status_code: u16, event_type: UsageEventType) -> Option<String> {
+fn resolve_error_category(
+    status_code: u16,
+    event_type: UsageEventType,
+    is_stream: bool,
+    terminal_failure_category: Option<&str>,
+) -> Option<String> {
     match event_type {
         UsageEventType::Cancelled => Some("cancelled".to_string()),
         UsageEventType::Failed if status_code >= 500 => Some("server_error".to_string()),
         UsageEventType::Failed if status_code >= 400 => Some("client_error".to_string()),
         UsageEventType::Failed if status_code >= 300 => Some("redirect".to_string()),
+        UsageEventType::Failed if (200..300).contains(&status_code) => terminal_failure_category
+            .map(ToOwned::to_owned)
+            .or_else(|| is_stream.then(|| "stream_terminal_error".to_string()))
+            .or_else(|| Some("non_success_status".to_string())),
         UsageEventType::Failed => Some("non_success_status".to_string()),
+        _ => None,
+    }
+}
+
+fn build_stream_terminal_error_client_response(
+    category: &str,
+    message: &str,
+    status_code: u16,
+    provider_response: Option<&Value>,
+) -> Value {
+    let mut error = provider_response
+        .and_then(extract_error_object_from_json)
+        .unwrap_or_default();
+    error
+        .entry("type".to_string())
+        .or_insert_with(|| Value::String(category.to_string()));
+    error
+        .entry("message".to_string())
+        .or_insert_with(|| Value::String(message.to_string()));
+    error
+        .entry("upstream_status".to_string())
+        .or_insert_with(|| Value::from(status_code));
+
+    json!({ "error": Value::Object(error) })
+}
+
+fn extract_error_object_from_json(value: &Value) -> Option<Map<String, Value>> {
+    value
+        .get("error")
+        .and_then(value_to_error_object)
+        .or_else(|| {
+            value
+                .get("response")
+                .and_then(|response| response.get("error"))
+                .and_then(value_to_error_object)
+        })
+        .or_else(|| {
+            value
+                .get("chunks")
+                .and_then(Value::as_array)
+                .and_then(|chunks| chunks.iter().find_map(extract_error_object_from_json))
+        })
+}
+
+fn value_to_error_object(value: &Value) -> Option<Map<String, Value>> {
+    match value {
+        Value::Object(object) => Some(object.clone()),
+        Value::String(message) if !message.trim().is_empty() => Some(Map::from_iter([(
+            "message".to_string(),
+            Value::String(message.trim().to_string()),
+        )])),
         _ => None,
     }
 }
@@ -3841,10 +3935,110 @@ mod tests {
         assert_eq!(event.data.status_code, Some(200));
         assert_eq!(
             event.data.error_category.as_deref(),
-            Some("non_success_status")
+            Some("stream_missing_terminal_event")
+        );
+        assert_eq!(
+            event.data.error_message.as_deref(),
+            Some("execution runtime stream ended before provider terminal event")
         );
         assert_eq!(event.data.input_tokens, None);
         assert_eq!(event.data.output_tokens, None);
+    }
+
+    #[test]
+    fn stream_terminal_usage_marks_http_200_response_failed_as_stream_terminal_error() {
+        let plan = ExecutionPlan {
+            request_id: "req-stream-response-failed-1".to_string(),
+            candidate_id: Some("cand-stream-response-failed-1".to_string()),
+            provider_name: Some("OpenAI".to_string()),
+            provider_id: "provider-1".to_string(),
+            endpoint_id: "endpoint-1".to_string(),
+            key_id: "key-1".to_string(),
+            method: "POST".to_string(),
+            url: "https://example.com/v1/responses".to_string(),
+            headers: BTreeMap::new(),
+            content_type: None,
+            content_encoding: None,
+            body: RequestBody {
+                json_body: None,
+                body_bytes_b64: None,
+                body_ref: None,
+            },
+            stream: true,
+            client_api_format: "openai:responses".to_string(),
+            provider_api_format: "openai:responses".to_string(),
+            model_name: Some("gpt-5.5".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        };
+        let message = "This content was flagged for possible cybersecurity risk";
+        let provider_sse = format!(
+            concat!(
+                "event: response.failed\n",
+                "data: {{\"type\":\"response.failed\",\"response\":{{\"status\":\"failed\",\"error\":{{\"message\":\"{}\",\"code\":\"cyber_policy\"}}}}}}\n\n"
+            ),
+            message
+        );
+        let payload = GatewayStreamReportRequest {
+            trace_id: "trace-stream-response-failed-1".to_string(),
+            report_kind: "openai_responses_stream_success".to_string(),
+            report_context: Some(json!({
+                "client_api_format": "openai:responses",
+                "provider_api_format": "openai:responses"
+            })),
+            status_code: 200,
+            headers: BTreeMap::from([(
+                "content-type".to_string(),
+                "text/event-stream".to_string(),
+            )]),
+            provider_body_base64: Some(
+                base64::engine::general_purpose::STANDARD.encode(provider_sse),
+            ),
+            provider_body_state: Some(UsageBodyCaptureState::Inline),
+            client_body_base64: None,
+            client_body_state: Some(UsageBodyCaptureState::None),
+            terminal_summary: Some(ExecutionStreamTerminalSummary {
+                response_id: Some("resp_failed".to_string()),
+                model: Some("gpt-5.5".to_string()),
+                observed_finish: true,
+                parser_error: Some(message.to_string()),
+                ..ExecutionStreamTerminalSummary::default()
+            }),
+            telemetry: None,
+        };
+
+        let event =
+            build_stream_terminal_usage_event(&plan, payload.report_context.as_ref(), &payload)
+                .expect("usage event should build");
+
+        assert_eq!(event.event_type, UsageEventType::Failed);
+        assert_eq!(event.data.status_code, Some(200));
+        assert_eq!(event.data.error_message.as_deref(), Some(message));
+        assert_eq!(
+            event.data.error_category.as_deref(),
+            Some("stream_terminal_error")
+        );
+        assert_eq!(
+            event
+                .data
+                .client_response_body
+                .as_ref()
+                .and_then(|body| body.get("error"))
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str),
+            Some("cyber_policy")
+        );
+        assert_eq!(
+            event
+                .data
+                .client_response_body
+                .as_ref()
+                .and_then(|body| body.get("error"))
+                .and_then(|error| error.get("type"))
+                .and_then(Value::as_str),
+            Some("stream_terminal_error")
+        );
     }
 
     #[test]
@@ -4957,6 +5151,7 @@ mod tests {
             },
             status_code: 200,
             terminal_error_message: None,
+            terminal_failure_category: None,
             response_time_ms: Some(123),
             first_byte_time_ms: Some(45),
             request_headers: Some(json!({
