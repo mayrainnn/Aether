@@ -1,8 +1,8 @@
 use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::shared::build_admin_usage_counter_health_payload;
 use crate::handlers::admin::system::shared::update_client::{
-    build_direct_update_http_client, build_update_http_client,
-    has_explicit_update_proxy_env, update_github_token_from_env,
+    build_direct_update_http_client, build_update_http_client, has_explicit_update_proxy_env,
+    update_github_token_from_env,
 };
 use crate::handlers::shared::{system_config_bool, system_config_string};
 use crate::GatewayError;
@@ -60,7 +60,8 @@ pub(crate) fn build_admin_system_releases_list_payload(
     releases: Vec<AdminSystemUpdateRelease>,
     error: Option<String>,
 ) -> serde_json::Value {
-    let mut payload = build_admin_system_releases_payload(current_aether_version(), releases, error);
+    let mut payload =
+        build_admin_system_releases_payload(current_aether_version(), releases, error);
     apply_source_build_releases_override(&mut payload, current_build_is_release());
     payload
 }
@@ -253,8 +254,7 @@ async fn fetch_admin_system_releases_inner() -> Result<Vec<AdminSystemUpdateRele
     let timeout = Duration::from_secs(8);
     let github_token = update_github_token_from_env();
     let client = build_update_http_client(timeout, "更新检查")?;
-    let releases = match fetch_github_releases_with_client(&client, github_token.as_deref()).await
-    {
+    let releases = match fetch_github_releases_with_client(&client, github_token.as_deref()).await {
         Ok(releases) => releases,
         Err(err) if err.rate_limited && !has_explicit_update_proxy_env() => {
             let direct_client = build_direct_update_http_client(timeout, "更新检查直连重试")?;
@@ -301,20 +301,26 @@ async fn fetch_github_releases_with_client(
         request = request.bearer_auth(token);
     }
 
-    let response = request.send().await.map_err(|err| GitHubReleaseFetchError {
-        message: format!("请求 GitHub Releases 失败: {err}"),
-        rate_limited: false,
-    })?;
+    let response = request
+        .send()
+        .await
+        .map_err(|err| GitHubReleaseFetchError {
+            message: format!("请求 GitHub Releases 失败: {err}"),
+            rate_limited: false,
+        })?;
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
         return Err(github_release_response_error(status, &body));
     }
 
-    response.json().await.map_err(|err| GitHubReleaseFetchError {
-        message: format!("解析 GitHub Releases 失败: {err}"),
-        rate_limited: false,
-    })
+    response
+        .json()
+        .await
+        .map_err(|err| GitHubReleaseFetchError {
+            message: format!("解析 GitHub Releases 失败: {err}"),
+            rate_limited: false,
+        })
 }
 
 fn github_release_response_error(
