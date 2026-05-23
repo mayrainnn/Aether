@@ -1697,6 +1697,8 @@ AETHER_LOG_RETENTION_DAYS=7
 AETHER_LOG_MAX_FILES=30
 
 APP_PORT=${APP_PORT:-8084}
+AETHER_BASE_DIR=${INSTALL_ROOT}
+AETHER_UPDATE_STRATEGY=self
 AETHER_GATEWAY_STATIC_DIR=${INSTALL_ROOT}/current/frontend
 AETHER_GATEWAY_VIDEO_TASK_TRUTH_SOURCE_MODE=rust-authoritative
 AETHER_GATEWAY_AUTO_PREPARE_DATABASE=true
@@ -1736,6 +1738,8 @@ AETHER_LOG_RETENTION_DAYS=7
 AETHER_LOG_MAX_FILES=30
 
 APP_PORT=${APP_PORT:-8084}
+AETHER_BASE_DIR=${INSTALL_ROOT}
+AETHER_UPDATE_STRATEGY=manual
 AETHER_GATEWAY_DEPLOYMENT_TOPOLOGY=multi-node
 AETHER_GATEWAY_NODE_ROLE=${role}
 AETHER_GATEWAY_STATIC_DIR=${INSTALL_ROOT}/current/frontend
@@ -1824,6 +1828,8 @@ generate_compose_env() {
     replace_or_append_env "${output}" "ADMIN_EMAIL" "${ADMIN_EMAIL:-admin@example.local}"
     replace_or_append_env "${output}" "ADMIN_USERNAME" "${ADMIN_USERNAME:-admin}"
     replace_or_append_env "${output}" "ADMIN_PASSWORD" "${ADMIN_PASSWORD}"
+    replace_or_append_env "${output}" "AETHER_UPDATE_STRATEGY" "docker"
+    replace_or_append_env "${output}" "AETHER_DOCKER_UPDATE_COMMAND" "./update.sh"
     append_compose_log_env_defaults "${output}"
     replace_or_append_env "${output}" "AETHER_GATEWAY_AUTO_PREPARE_DATABASE" "true"
 }
@@ -1843,6 +1849,8 @@ $(compose_log_env_block)
 
 APP_IMAGE=$(compose_image)
 APP_PORT=$(compose_app_port)
+AETHER_UPDATE_STRATEGY=docker
+AETHER_DOCKER_UPDATE_COMMAND=./update.sh
 AETHER_GATEWAY_STATIC_DIR=${COMPOSE_RELEASE_FRONTEND_DIR}
 AETHER_GATEWAY_VIDEO_TASK_TRUTH_SOURCE_MODE=rust-authoritative
 AETHER_GATEWAY_AUTO_PREPARE_DATABASE=true
@@ -2223,6 +2231,12 @@ install_compose_mode() {
     resolve_compose_dir
     info "preparing Docker Compose deployment in ${COMPOSE_DIR}"
     ensure_directory "${COMPOSE_DIR}"
+    ensure_directory "${COMPOSE_DIR}/logs"
+    ensure_directory "${COMPOSE_DIR}/datas"
+    ensure_directory "${COMPOSE_DIR}/datas/postgres"
+    ensure_directory "${COMPOSE_DIR}/datas/redis"
+    ensure_directory "${COMPOSE_DIR}/datas/mysql"
+    ensure_directory "${COMPOSE_DIR}/datas/sqlite"
     install_project_file "docker-compose.yml" "${COMPOSE_DIR}/docker-compose.yml" "0644"
     install_project_file ".env.example" "${COMPOSE_DIR}/.env.example" "0644"
     install_project_file "update.sh" "${COMPOSE_DIR}/update.sh" "0755"
@@ -2244,6 +2258,11 @@ Docker Compose files are ready:
   ${COMPOSE_DIR}/.env.example
   ${COMPOSE_DIR}/update.sh
   ${COMPOSE_DIR}/generate_keys.sh
+  ${COMPOSE_DIR}/logs
+  ${COMPOSE_DIR}/datas/postgres
+  ${COMPOSE_DIR}/datas/redis
+  ${COMPOSE_DIR}/datas/mysql
+  ${COMPOSE_DIR}/datas/sqlite
 EOF
 
     if [[ "${SKIP_START}" == "true" ]]; then
@@ -2260,7 +2279,9 @@ install_compose_single_node_mode() {
     resolve_compose_dir
     info "preparing Docker Compose single-node deployment in ${COMPOSE_DIR}"
     ensure_directory "${COMPOSE_DIR}"
-    ensure_directory "${COMPOSE_DIR}/data"
+    ensure_directory "${COMPOSE_DIR}/datas"
+    ensure_directory "${COMPOSE_DIR}/datas/sqlite"
+    ensure_directory "${COMPOSE_DIR}/logs"
 
     install_project_file "docker-compose.single-node.yml" "${COMPOSE_DIR}/docker-compose.yml" "0644"
     install_project_file ".env.example" "${COMPOSE_DIR}/.env.example" "0644"
@@ -2283,7 +2304,8 @@ Docker Compose single-node files are ready:
   ${COMPOSE_DIR}/.env.example
   ${COMPOSE_DIR}/update.sh
   ${COMPOSE_DIR}/generate_keys.sh
-  ${COMPOSE_DIR}/data
+  ${COMPOSE_DIR}/datas/sqlite
+  ${COMPOSE_DIR}/logs
 EOF
 
     if [[ "${SKIP_START}" == "true" ]]; then

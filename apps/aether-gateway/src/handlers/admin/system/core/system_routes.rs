@@ -19,9 +19,9 @@ use crate::handlers::admin::system::shared::settings::{
 };
 use crate::handlers::admin::system::shared::smtp::build_admin_smtp_test_payload;
 use crate::handlers::admin::system::shared::update::{
-    build_admin_system_update_capability_payload, prepare_admin_system_update_task,
-    read_update_history, read_update_task_status, start_admin_system_rollback_task,
-    start_admin_system_update_task,
+    build_admin_system_update_capability_payload, current_self_update_blocker,
+    prepare_admin_system_update_task, read_update_history, read_update_task_status,
+    self_update_supported, start_admin_system_rollback_task, start_admin_system_update_task,
 };
 use crate::important_notification::build_important_notification_test_payload;
 use crate::maintenance::{ManualUsageCleanupMode, ManualUsageCleanupOptions};
@@ -99,6 +99,16 @@ pub(super) async fn maybe_build_local_admin_core_system_response(
         && request_method == http::Method::POST
         && request_path == "/api/admin/system/prepare-update"
     {
+        if !self_update_supported() {
+            return Ok(Some(
+                (
+                    http::StatusCode::PRECONDITION_REQUIRED,
+                    Json(json!({ "detail": current_self_update_blocker() })),
+                )
+                    .into_response(),
+            ));
+        }
+
         let target_version = request_body
             .filter(|b| !b.is_empty())
             .and_then(|body| serde_json::from_slice::<serde_json::Value>(body).ok())

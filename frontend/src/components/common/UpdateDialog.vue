@@ -127,6 +127,17 @@
         >
           {{ updateBlockerText }}
         </p>
+        <div
+          v-if="isDockerUpdate && dockerUpdateCommand"
+          class="mt-3 w-full max-w-sm rounded-lg border border-border/60 bg-muted/30 px-3 py-2 text-left"
+        >
+          <p class="text-xs text-muted-foreground">
+            在 docker-compose.yml 所在目录执行
+          </p>
+          <code class="mt-1 block break-all rounded bg-background/70 px-2 py-1.5 font-mono text-xs text-foreground">
+            {{ dockerUpdateCommand }}
+          </code>
+        </div>
       </template>
     </div>
 
@@ -199,8 +210,10 @@ const props = defineProps<{
   updatePhase?: 'download' | 'restart' | 'reconnecting'
   updating?: boolean
   updateSupported?: boolean
+  updateStrategy?: string
   updatable?: boolean
   updateBlocker?: string | null
+  dockerUpdateCommand?: string | null
   reconnectMessage?: string
   rollbackAvailable?: boolean
   rollingBack?: boolean
@@ -220,6 +233,9 @@ const updatePhase = computed(() => props.updatePhase ?? 'download')
 const updateSupported = computed(() => props.updateSupported ?? true)
 const updatable = computed(() => props.updatable ?? true)
 const canApplyUpdate = computed(() => updateSupported.value && updatable.value)
+const updateStrategy = computed(() => props.updateStrategy ?? 'manual')
+const isDockerUpdate = computed(() => updateStrategy.value === 'docker' && !canApplyUpdate.value)
+const dockerUpdateCommand = computed(() => props.dockerUpdateCommand || '')
 const updateBlockerText = computed(() => {
   if (!updateSupported.value) return props.updateBlocker || SOURCE_BUILD_UPDATE_HINT
   return props.updateBlocker || '当前版本暂不支持在线更新'

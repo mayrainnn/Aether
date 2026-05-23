@@ -31,6 +31,7 @@ WORKDIR /opt/aether
 
 ENV RUST_LOG=aether_gateway=info \
     APP_PORT=8084 \
+    AETHER_UPDATE_STRATEGY=docker \
     AETHER_GATEWAY_STATIC_DIR=/opt/aether/current/frontend
 
 EXPOSE 8084

@@ -113,6 +113,74 @@ const MAX_SHA256SUMS_DOWNLOAD_BYTES: u64 = 1024 * 1024;
 const MAX_EXTRACTED_RELEASE_BYTES: u64 = 1024 * 1024 * 1024;
 const DEFAULT_UPDATE_DOWNLOAD_TIMEOUT_SECS: u64 = 600;
 const DEFAULT_UPDATE_DOWNLOAD_IDLE_TIMEOUT_SECS: u64 = 30;
+const SOURCE_BUILD_UPDATE_BLOCKER: &str = "当前为源码构建，请使用 git pull 后重新编译。";
+const DOCKER_UPDATE_BLOCKER: &str =
+    "Docker 部署请使用镜像更新：进入 docker-compose.yml 所在目录执行 ./update.sh。";
+const MANUAL_UPDATE_BLOCKER: &str =
+    "当前部署策略不支持在线自更新，请手动下载 Release 或使用安装脚本更新。";
+const MULTI_NODE_UPDATE_BLOCKER: &str =
+    "多节点部署不支持在管理后台更新单个节点，请使用镜像滚动更新或外部发布编排。";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UpdateStrategy {
+    SelfManaged,
+    Docker,
+    Manual,
+}
+
+impl UpdateStrategy {
+    fn from_env_value(value: Option<&str>, release_build: bool) -> Self {
+        let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+            return if release_build {
+                Self::SelfManaged
+            } else {
+                Self::Manual
+            };
+        };
+
+        match value.to_ascii_lowercase().as_str() {
+            "self" | "self-managed" | "binary" | "systemd" | "launchd" => Self::SelfManaged,
+            "docker" | "compose" | "docker-compose" | "container" => Self::Docker,
+            "manual" | "source" | "none" | "off" | "disabled" => Self::Manual,
+            _ => Self::Manual,
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::SelfManaged => "self",
+            Self::Docker => "docker",
+            Self::Manual => "manual",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeploymentTopology {
+    SingleNode,
+    MultiNode,
+}
+
+impl DeploymentTopology {
+    fn from_env_value(value: Option<&str>) -> Self {
+        match value
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("multi-node" | "multi" | "cluster") => Self::MultiNode,
+            _ => Self::SingleNode,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SingleNode => "single-node",
+            Self::MultiNode => "multi-node",
+        }
+    }
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct UpdateHistoryEntry {
@@ -249,12 +317,84 @@ fn is_release_build() -> bool {
     true
 }
 
+pub(crate) fn current_update_strategy() -> UpdateStrategy {
+    UpdateStrategy::from_env_value(
+        std::env::var("AETHER_UPDATE_STRATEGY").ok().as_deref(),
+        is_release_build(),
+    )
+}
+
+fn current_deployment_topology() -> DeploymentTopology {
+    DeploymentTopology::from_env_value(
+        std::env::var("AETHER_GATEWAY_DEPLOYMENT_TOPOLOGY")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn self_update_supported_for(
+    release_build: bool,
+    update_strategy: UpdateStrategy,
+    deployment_topology: DeploymentTopology,
+) -> bool {
+    release_build
+        && update_strategy == UpdateStrategy::SelfManaged
+        && deployment_topology == DeploymentTopology::SingleNode
+}
+
+pub(crate) fn self_update_supported() -> bool {
+    self_update_supported_for(
+        is_release_build(),
+        current_update_strategy(),
+        current_deployment_topology(),
+    )
+}
+
+pub(crate) fn current_self_update_blocker() -> &'static str {
+    if !is_release_build() {
+        return SOURCE_BUILD_UPDATE_BLOCKER;
+    }
+    if current_deployment_topology() == DeploymentTopology::MultiNode {
+        return MULTI_NODE_UPDATE_BLOCKER;
+    }
+
+    match current_update_strategy() {
+        UpdateStrategy::SelfManaged => "一键更新可用",
+        UpdateStrategy::Docker => DOCKER_UPDATE_BLOCKER,
+        UpdateStrategy::Manual => MANUAL_UPDATE_BLOCKER,
+    }
+}
+
+fn update_logs_dir() -> PathBuf {
+    std::env::var("AETHER_LOG_DIR")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| aether_base_dir().join("logs"))
+}
+
+fn docker_update_command() -> String {
+    std::env::var("AETHER_DOCKER_UPDATE_COMMAND")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "./update.sh".to_string())
+}
+
 pub(crate) fn build_admin_system_update_capability_payload() -> serde_json::Value {
-    let supported = is_release_build();
     let build_type = current_build_type();
-    let rollback_available = find_rollback_target().is_some();
+    let update_strategy = current_update_strategy();
+    let deployment_topology = current_deployment_topology();
+    let supported =
+        self_update_supported_for(is_release_build(), update_strategy, deployment_topology);
+    let rollback_available = supported && find_rollback_target().is_some();
     let task_status = read_update_task_status();
     let base_dir = aether_base_dir();
+    let docker_command = if update_strategy == UpdateStrategy::Docker {
+        Some(docker_update_command())
+    } else {
+        None
+    };
+    let data_dir = base_dir.join("data");
     json!({
         "supported": supported,
         "enabled": supported,
@@ -262,11 +402,19 @@ pub(crate) fn build_admin_system_update_capability_payload() -> serde_json::Valu
         "task_status": task_status.phase,
         "task_error": task_status.error,
         "build_type": build_type,
-        "install_root": base_dir,
+        "update_strategy": update_strategy.as_str(),
+        "strategy": update_strategy.as_str(),
+        "deployment_topology": deployment_topology.as_str(),
+        "topology": deployment_topology.as_str(),
+        "install_root": base_dir.clone(),
+        "base_dir": base_dir,
+        "data_dir": data_dir,
+        "logs_dir": update_logs_dir(),
+        "docker_update_command": docker_command,
         "message": if supported {
             "一键更新可用"
         } else {
-            "源码构建不支持在线更新"
+            current_self_update_blocker()
         },
     })
 }
@@ -291,8 +439,8 @@ pub(crate) async fn prepare_admin_system_update_task(
     tarball_url: String,
     sha256sums_url: Option<String>,
 ) -> Result<Result<serde_json::Value, (http::StatusCode, serde_json::Value)>, GatewayError> {
-    if !is_release_build() {
-        return Ok(Err(source_build_rejection_response()));
+    if !self_update_supported() {
+        return Ok(Err(self_update_rejection_response()));
     }
     let Some(sha256sums_url) = sha256sums_url.filter(|url| !url.trim().is_empty()) else {
         return Ok(Err((
@@ -692,8 +840,8 @@ fn remove_path_if_exists(path: &Path) -> std::io::Result<()> {
 pub(crate) async fn start_admin_system_update_task(
     version: Option<String>,
 ) -> Result<Result<serde_json::Value, (http::StatusCode, serde_json::Value)>, GatewayError> {
-    if !is_release_build() {
-        return Ok(Err(source_build_rejection_response()));
+    if !self_update_supported() {
+        return Ok(Err(self_update_rejection_response()));
     }
 
     let version = match version.or_else(get_prepared_version) {
@@ -800,8 +948,8 @@ fn switch_current_symlink(version: &str) -> Result<(), String> {
 
 pub(crate) async fn start_admin_system_rollback_task(
 ) -> Result<Result<serde_json::Value, (http::StatusCode, serde_json::Value)>, GatewayError> {
-    if !is_release_build() {
-        return Ok(Err(source_build_rejection_response()));
+    if !self_update_supported() {
+        return Ok(Err(self_update_rejection_response()));
     }
 
     let Some(previous) = find_rollback_target() else {
@@ -861,10 +1009,10 @@ fn update_already_running_response() -> (http::StatusCode, serde_json::Value) {
     )
 }
 
-fn source_build_rejection_response() -> (http::StatusCode, serde_json::Value) {
+fn self_update_rejection_response() -> (http::StatusCode, serde_json::Value) {
     (
         http::StatusCode::PRECONDITION_REQUIRED,
-        json!({ "detail": "\u{6e90}\u{7801}\u{6784}\u{5efa}\u{4e0d}\u{652f}\u{6301}\u{5728}\u{7ebf}\u{66f4}\u{65b0}\u{ff0c}\u{8bf7}\u{4f7f}\u{7528}\u{6b63}\u{5f0f}\u{53d1}\u{5e03}\u{7248}" }),
+        json!({ "detail": current_self_update_blocker() }),
     )
 }
 
@@ -891,6 +1039,60 @@ mod tests {
             .expect("binary should be written");
         std::fs::write(root.join("frontend/index.html"), b"<html></html>")
             .expect("frontend index should be written");
+    }
+
+    #[test]
+    fn update_strategy_defaults_to_self_only_for_release_builds() {
+        assert_eq!(
+            UpdateStrategy::from_env_value(None, true),
+            UpdateStrategy::SelfManaged
+        );
+        assert_eq!(
+            UpdateStrategy::from_env_value(None, false),
+            UpdateStrategy::Manual
+        );
+    }
+
+    #[test]
+    fn update_strategy_parses_docker_as_non_self_update() {
+        assert_eq!(
+            UpdateStrategy::from_env_value(Some("docker"), true),
+            UpdateStrategy::Docker
+        );
+        assert_eq!(
+            UpdateStrategy::from_env_value(Some("compose"), true),
+            UpdateStrategy::Docker
+        );
+        assert_eq!(
+            UpdateStrategy::from_env_value(Some("unknown"), true),
+            UpdateStrategy::Manual
+        );
+    }
+
+    #[test]
+    fn deployment_topology_defaults_to_single_node() {
+        assert_eq!(
+            DeploymentTopology::from_env_value(None),
+            DeploymentTopology::SingleNode
+        );
+        assert_eq!(
+            DeploymentTopology::from_env_value(Some("multi-node")),
+            DeploymentTopology::MultiNode
+        );
+    }
+
+    #[test]
+    fn multi_node_topology_disables_self_update() {
+        assert!(self_update_supported_for(
+            true,
+            UpdateStrategy::SelfManaged,
+            DeploymentTopology::SingleNode,
+        ));
+        assert!(!self_update_supported_for(
+            true,
+            UpdateStrategy::SelfManaged,
+            DeploymentTopology::MultiNode,
+        ));
     }
 
     #[test]

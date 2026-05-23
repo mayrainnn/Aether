@@ -413,6 +413,8 @@
       :update-supported="updateSupported"
       :updatable="updateInfo.updatable"
       :update-blocker="updateInfo.update_blocker"
+      :update-strategy="updateStrategy"
+      :docker-update-command="dockerUpdateCommand"
       :reconnect-message="reconnectMessage"
       :rollback-available="rollbackAvailable"
       :rolling-back="rollingBack"
@@ -434,7 +436,7 @@ import { useDarkMode } from '@/composables/useDarkMode'
 import { useSiteInfo } from '@/composables/useSiteInfo'
 import { useToast } from '@/composables/useToast'
 import { isDemoMode } from '@/config/demo'
-import { adminApi, type CheckUpdateResponse, type ReleaseEntry, type UpdateTaskStatusResponse } from '@/api/admin'
+import { adminApi, type CheckUpdateResponse, type ReleaseEntry, type SystemUpdateCapabilityResponse, type UpdateTaskStatusResponse } from '@/api/admin'
 import { announcementApi, type Announcement } from '@/api/announcements'
 import { parseApiError } from '@/utils/errorParser'
 import Button from '@/components/ui/button.vue'
@@ -518,6 +520,9 @@ const versionStatus = ref<CheckUpdateResponse | null>(null)
 const loadingVersionStatus = ref(false)
 const applyingSystemUpdate = ref(false)
 const updateSupported = ref(true)
+const updateStrategy = ref('manual')
+const updateCapabilityMessage = ref<string | null>(null)
+const dockerUpdateCommand = ref<string | null>(null)
 const reconnectMessage = ref('等待服务恢复...')
 const rollbackAvailable = ref(false)
 const rollingBack = ref(false)
@@ -529,6 +534,7 @@ const preparedUpdateVersion = ref<string | null>(
 )
 const SOURCE_BUILD_UPDATE_HINT = '当前为源码构建，请使用 git pull 后重新编译。'
 const SOURCE_BUILD_RELEASE_HINT = '当前为源码构建，请手动切换到对应标签后重新编译。'
+const MANUAL_UPDATE_HINT = '当前部署策略不支持在线自更新，请手动下载 Release 或使用安装脚本更新。'
 let versionStatusLoadPromise: Promise<CheckUpdateResponse | null> | null = null
 let updateStatusPollTimer: number | null = null
 const updateProgressPercent = computed(() => updateTaskStatus.value?.progress_percent ?? null)
@@ -700,14 +706,13 @@ async function loadVersionStatus(force = false) {
         adminApi.getSystemUpdateCapability().catch(() => null),
       ])
       if (capability) {
-        rollbackAvailable.value = capability.rollback_available
-        updateSupported.value = capability.supported
+        applyUpdateCapability(capability)
       }
-      versionStatus.value = capability?.supported === false && status.has_update
+      versionStatus.value = updateSupported.value === false && status.has_update
         ? {
             ...status,
             updatable: false,
-            update_blocker: SOURCE_BUILD_UPDATE_HINT,
+            update_blocker: updateUnsupportedMessage(SOURCE_BUILD_UPDATE_HINT),
           }
         : status
       syncSystemUpdatePhase(versionStatus.value)
@@ -722,6 +727,18 @@ async function loadVersionStatus(force = false) {
   })()
 
   return versionStatusLoadPromise
+}
+
+function applyUpdateCapability(capability: SystemUpdateCapabilityResponse) {
+  updateSupported.value = capability.supported
+  rollbackAvailable.value = capability.supported && capability.rollback_available
+  updateStrategy.value = capability.update_strategy || capability.strategy || 'manual'
+  updateCapabilityMessage.value = capability.message || null
+  dockerUpdateCommand.value = capability.docker_update_command || null
+}
+
+function updateUnsupportedMessage(fallback = MANUAL_UPDATE_HINT): string {
+  return updateCapabilityMessage.value || fallback
 }
 
 function syncSystemUpdatePhase(status: CheckUpdateResponse | null) {
@@ -754,16 +771,16 @@ function buildUpdateInfoFromRelease(release: ReleaseEntry): CheckUpdateResponse 
     updateInfo.value?.current_version ||
     __APP_VERSION__ ||
     ''
-  const sourceBuild = !updateSupported.value
+  const canSelfUpdate = updateSupported.value
   return {
     current_version: currentVersion,
     latest_version: release.version,
     has_update: !release.is_current,
-    updatable: !sourceBuild && !release.is_current && release.updatable,
+    updatable: canSelfUpdate && !release.is_current && release.updatable,
     update_blocker: release.is_current
       ? '当前已是这个版本'
-      : sourceBuild
-        ? SOURCE_BUILD_RELEASE_HINT
+      : !canSelfUpdate
+        ? updateUnsupportedMessage(SOURCE_BUILD_RELEASE_HINT)
       : release.update_blocker,
     release_url: release.release_url,
     release_notes: release.release_notes,
@@ -787,16 +804,14 @@ async function handleApplySystemUpdate() {
   applyingSystemUpdate.value = true
   try {
     const capability = await adminApi.getSystemUpdateCapability()
-    rollbackAvailable.value = capability.rollback_available
+    applyUpdateCapability(capability)
     if (!capability.supported) {
-      updateSupported.value = false
       showError(
-        SOURCE_BUILD_UPDATE_HINT,
+        updateUnsupportedMessage('不支持在线自更新'),
         '不支持在线更新'
       )
       return
     }
-    updateSupported.value = true
 
     if (systemUpdatePhase.value === 'download') {
       const targetStatus = updateInfo.value || versionStatus.value

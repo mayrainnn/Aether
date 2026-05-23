@@ -1,5 +1,8 @@
 use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::shared::build_admin_usage_counter_health_payload;
+use crate::handlers::admin::system::shared::update::{
+    current_self_update_blocker, self_update_supported,
+};
 use crate::handlers::admin::system::shared::update_client::{
     build_direct_update_http_client, build_update_http_client, has_explicit_update_proxy_env,
     update_github_token_from_env,
@@ -52,7 +55,7 @@ pub(crate) fn build_admin_system_check_update_payload_from_release(
         latest_release,
         error,
     );
-    apply_source_build_check_update_override(&mut payload, current_build_is_release());
+    apply_self_update_check_update_override(&mut payload, self_update_supported());
     payload
 }
 
@@ -62,7 +65,7 @@ pub(crate) fn build_admin_system_releases_list_payload(
 ) -> serde_json::Value {
     let mut payload =
         build_admin_system_releases_payload(current_aether_version(), releases, error);
-    apply_source_build_releases_override(&mut payload, current_build_is_release());
+    apply_self_update_releases_override(&mut payload, self_update_supported());
     payload
 }
 
@@ -70,8 +73,20 @@ fn current_build_is_release() -> bool {
     option_env!("AETHER_BUILD_TYPE").unwrap_or("source") == "release"
 }
 
-fn apply_source_build_check_update_override(payload: &mut Value, release_build: bool) {
-    if release_build {
+fn apply_self_update_check_update_override(payload: &mut Value, supported: bool) {
+    apply_self_update_check_update_override_with_blocker(
+        payload,
+        supported,
+        current_self_update_blocker(),
+    );
+}
+
+fn apply_self_update_check_update_override_with_blocker(
+    payload: &mut Value,
+    supported: bool,
+    blocker: &str,
+) {
+    if supported {
         return;
     }
     if payload.get("has_update").and_then(Value::as_bool) != Some(true) {
@@ -79,11 +94,23 @@ fn apply_source_build_check_update_override(payload: &mut Value, release_build: 
     }
 
     payload["updatable"] = json!(false);
-    payload["update_blocker"] = json!(SOURCE_BUILD_UPDATE_BLOCKER);
+    payload["update_blocker"] = json!(blocker);
 }
 
-fn apply_source_build_releases_override(payload: &mut Value, release_build: bool) {
-    if release_build {
+fn apply_self_update_releases_override(payload: &mut Value, supported: bool) {
+    apply_self_update_releases_override_with_blocker(
+        payload,
+        supported,
+        current_self_update_release_blocker(),
+    );
+}
+
+fn apply_self_update_releases_override_with_blocker(
+    payload: &mut Value,
+    supported: bool,
+    blocker: &str,
+) {
+    if supported {
         return;
     }
     let Some(releases) = payload.get_mut("releases").and_then(Value::as_array_mut) else {
@@ -96,8 +123,20 @@ fn apply_source_build_releases_override(payload: &mut Value, release_build: bool
         }
         release["updatable"] = json!(false);
         if release.get("update_blocker").is_none() || release["update_blocker"].is_null() {
-            release["update_blocker"] = json!(SOURCE_BUILD_RELEASE_BLOCKER);
+            release["update_blocker"] = json!(blocker);
         }
+    }
+}
+
+fn current_self_update_release_blocker() -> &'static str {
+    if !current_build_is_release() {
+        return SOURCE_BUILD_RELEASE_BLOCKER;
+    }
+
+    if self_update_supported() {
+        ""
+    } else {
+        current_self_update_blocker()
     }
 }
 
@@ -719,21 +758,25 @@ mod tests {
     }
 
     #[test]
-    fn source_build_check_update_override_marks_latest_release_non_updatable() {
+    fn self_update_check_update_override_marks_latest_release_non_updatable() {
         let mut payload = json!({
             "has_update": true,
             "updatable": true,
             "update_blocker": serde_json::Value::Null
         });
 
-        apply_source_build_check_update_override(&mut payload, false);
+        apply_self_update_check_update_override_with_blocker(
+            &mut payload,
+            false,
+            SOURCE_BUILD_UPDATE_BLOCKER,
+        );
 
         assert_eq!(payload["updatable"], false);
         assert_eq!(payload["update_blocker"], SOURCE_BUILD_UPDATE_BLOCKER);
     }
 
     #[test]
-    fn source_build_releases_override_marks_non_current_entries_non_updatable() {
+    fn self_update_releases_override_marks_non_current_entries_non_updatable() {
         let mut payload = json!({
             "releases": [
                 {
@@ -751,7 +794,11 @@ mod tests {
             ]
         });
 
-        apply_source_build_releases_override(&mut payload, false);
+        apply_self_update_releases_override_with_blocker(
+            &mut payload,
+            false,
+            SOURCE_BUILD_RELEASE_BLOCKER,
+        );
 
         assert_eq!(payload["releases"][0]["updatable"], false);
         assert_eq!(

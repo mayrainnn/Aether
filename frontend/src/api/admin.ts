@@ -382,11 +382,19 @@ export interface CheckUpdateResponse {
 export interface SystemUpdateCapabilityResponse {
   supported: boolean
   build_type: string
+  update_strategy?: 'self' | 'docker' | 'manual' | string
+  strategy?: 'self' | 'docker' | 'manual' | string
+  deployment_topology?: 'single-node' | 'multi-node' | string
+  topology?: 'single-node' | 'multi-node' | string
   enabled: boolean
   rollback_available: boolean
   task_status: string
   task_error: string | null
   install_root?: string
+  base_dir?: string
+  data_dir?: string
+  logs_dir?: string
+  docker_update_command?: string | null
   message: string
 }
 
