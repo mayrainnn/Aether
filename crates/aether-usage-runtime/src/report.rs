@@ -351,14 +351,19 @@ pub fn stream_report_missing_terminal_event(payload: &GatewayStreamReportRequest
         return false;
     }
 
-    payload
-        .terminal_summary
-        .as_ref()
-        .is_some_and(|summary| stream_terminal_summary_missing_observed_finish(summary, true))
-        || matches!(
-            stream_report_captured_terminal_state(payload),
-            Some(StreamCapturedTerminalState::Missing)
-        )
+    if let Some(summary) = payload.terminal_summary.as_ref() {
+        if stream_terminal_summary_missing_observed_finish(summary, true) {
+            return true;
+        }
+        if summary.observed_finish {
+            return false;
+        }
+    }
+
+    matches!(
+        stream_report_captured_terminal_state(payload),
+        Some(StreamCapturedTerminalState::Missing)
+    )
 }
 
 pub fn stream_report_captured_terminal_failure(payload: &GatewayStreamReportRequest) -> bool {
@@ -403,10 +408,20 @@ fn stream_report_captured_terminal_state(
     payload: &GatewayStreamReportRequest,
 ) -> Option<StreamCapturedTerminalState> {
     let provider_state = stream_report_provider_capture_requires_terminal_event(payload)
-        .then(|| stream_capture_terminal_state_from_base64(payload.provider_body_base64.as_deref()))
+        .then(|| {
+            stream_capture_terminal_state_from_base64(
+                payload.provider_body_base64.as_deref(),
+                payload.provider_body_state,
+            )
+        })
         .flatten();
     let client_state = stream_report_client_capture_requires_terminal_event(payload)
-        .then(|| stream_capture_terminal_state_from_base64(payload.client_body_base64.as_deref()))
+        .then(|| {
+            stream_capture_terminal_state_from_base64(
+                payload.client_body_base64.as_deref(),
+                payload.client_body_state,
+            )
+        })
         .flatten();
     combine_stream_terminal_states(provider_state, client_state)
 }
@@ -477,16 +492,39 @@ fn stream_report_kind_requires_observed_terminal_event(report_kind: &str) -> boo
 
 fn stream_capture_terminal_state_from_base64(
     body_base64: Option<&str>,
+    body_state: Option<UsageBodyCaptureState>,
 ) -> Option<StreamCapturedTerminalState> {
     let body_base64 = body_base64?;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(body_base64)
         .ok()?;
-    if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
-        return stream_capture_terminal_state(&value);
+    let state = if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+        stream_capture_terminal_state(&value)
+    } else {
+        let text = String::from_utf8(bytes).ok()?;
+        stream_capture_terminal_state_from_sse_text(text.as_str())
+    };
+    filter_incomplete_capture_terminal_state(state, body_state)
+}
+
+fn filter_incomplete_capture_terminal_state(
+    state: Option<StreamCapturedTerminalState>,
+    body_state: Option<UsageBodyCaptureState>,
+) -> Option<StreamCapturedTerminalState> {
+    match state {
+        Some(StreamCapturedTerminalState::Missing)
+            if !stream_body_capture_can_prove_missing_terminal(body_state) =>
+        {
+            None
+        }
+        other => other,
     }
-    let text = String::from_utf8(bytes).ok()?;
-    stream_capture_terminal_state_from_sse_text(text.as_str())
+}
+
+fn stream_body_capture_can_prove_missing_terminal(
+    body_state: Option<UsageBodyCaptureState>,
+) -> bool {
+    matches!(body_state, None | Some(UsageBodyCaptureState::Inline))
 }
 
 pub fn stream_capture_terminal_state(value: &Value) -> Option<StreamCapturedTerminalState> {
@@ -898,6 +936,52 @@ mod tests {
         payload.provider_body_base64 =
             Some(base64::engine::general_purpose::STANDARD.encode(provider_sse.as_bytes()));
         payload.provider_body_state = Some(UsageBodyCaptureState::Inline);
+
+        assert!(!stream_report_represents_failure(&payload));
+        assert!(!super::stream_report_missing_terminal_event(&payload));
+    }
+
+    #[test]
+    fn accepts_terminal_summary_completion_when_captured_sse_is_truncated_before_terminal() {
+        let provider_sse = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\"}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n"
+        );
+        let mut payload = sample_stream_report("openai_responses_stream_success", 200);
+        payload.report_context = Some(json!({
+            "client_api_format": "openai:responses",
+            "provider_api_format": "openai:responses"
+        }));
+        payload.provider_body_base64 =
+            Some(base64::engine::general_purpose::STANDARD.encode(provider_sse.as_bytes()));
+        payload.provider_body_state = Some(UsageBodyCaptureState::Truncated);
+        payload.terminal_summary = Some(ExecutionStreamTerminalSummary {
+            observed_finish: true,
+            ..ExecutionStreamTerminalSummary::default()
+        });
+
+        assert!(!stream_report_represents_failure(&payload));
+        assert!(!super::stream_report_missing_terminal_event(&payload));
+    }
+
+    #[test]
+    fn ignores_missing_terminal_from_truncated_captured_sse_without_summary() {
+        let provider_sse = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\"}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n"
+        );
+        let mut payload = sample_stream_report("openai_responses_stream_success", 200);
+        payload.report_context = Some(json!({
+            "client_api_format": "openai:responses",
+            "provider_api_format": "openai:responses"
+        }));
+        payload.provider_body_base64 =
+            Some(base64::engine::general_purpose::STANDARD.encode(provider_sse.as_bytes()));
+        payload.provider_body_state = Some(UsageBodyCaptureState::Truncated);
 
         assert!(!stream_report_represents_failure(&payload));
         assert!(!super::stream_report_missing_terminal_event(&payload));

@@ -67,6 +67,8 @@ pub struct AdminSystemUpdateRelease {
     pub release_url: Option<String>,
     pub release_notes: Option<String>,
     pub published_at: Option<String>,
+    pub tarball_url: Option<String>,
+    pub sha256sums_url: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -826,16 +828,71 @@ pub fn build_admin_system_check_update_payload_with_release(
     let has_update = latest_release
         .as_ref()
         .is_some_and(|release| admin_system_update_available(&current_version, &release.version));
+    let update_blocker = latest_release
+        .as_ref()
+        .and_then(admin_system_update_blocker);
+    let updatable = latest_release
+        .as_ref()
+        .is_some_and(|release| admin_system_update_blocker(release).is_none());
 
     json!({
         "current_version": current_version,
         "latest_version": latest_release.as_ref().map(|release| release.version.clone()),
         "has_update": has_update,
+        "updatable": updatable,
+        "update_blocker": update_blocker,
         "release_url": latest_release.as_ref().and_then(|release| release.release_url.clone()),
         "release_notes": latest_release.as_ref().and_then(|release| release.release_notes.clone()),
         "published_at": latest_release.as_ref().and_then(|release| release.published_at.clone()),
         "error": error,
     })
+}
+
+pub fn build_admin_system_releases_payload(
+    current_version: String,
+    releases: Vec<AdminSystemUpdateRelease>,
+    error: Option<String>,
+) -> serde_json::Value {
+    let entries: Vec<serde_json::Value> = releases
+        .iter()
+        .map(|release| {
+            let is_current = {
+                let norm_current = normalized_admin_system_version(&current_version);
+                let norm_release = normalized_admin_system_version(&release.version);
+                norm_current == norm_release
+            };
+            let is_newer = admin_system_update_available(&current_version, &release.version);
+            let update_blocker = admin_system_update_blocker(release);
+            json!({
+                "version": release.version,
+                "release_url": release.release_url,
+                "release_notes": release.release_notes,
+                "published_at": release.published_at,
+                "tarball_url": release.tarball_url,
+                "sha256sums_url": release.sha256sums_url,
+                "is_current": is_current,
+                "is_newer": is_newer,
+                "updatable": update_blocker.is_none(),
+                "update_blocker": update_blocker,
+            })
+        })
+        .collect();
+
+    json!({
+        "current_version": current_version,
+        "releases": entries,
+        "error": error,
+    })
+}
+
+fn admin_system_update_blocker(release: &AdminSystemUpdateRelease) -> Option<&'static str> {
+    if release.tarball_url.is_none() {
+        Some("当前平台暂无安装包")
+    } else if release.sha256sums_url.is_none() {
+        Some("缺少 SHA256SUMS 校验文件")
+    } else {
+        None
+    }
 }
 
 fn normalized_admin_system_version(version: &str) -> String {
@@ -2950,6 +3007,8 @@ mod tests {
                 ),
                 release_notes: Some("release notes".to_string()),
                 published_at: Some("2026-05-13T00:00:00Z".to_string()),
+                tarball_url: None,
+                sha256sums_url: None,
             }),
             None,
         );
@@ -2963,7 +3022,29 @@ mod tests {
         );
         assert_eq!(payload["release_notes"], "release notes");
         assert_eq!(payload["published_at"], "2026-05-13T00:00:00Z");
+        assert_eq!(payload["updatable"], false);
+        assert_eq!(payload["update_blocker"], "当前平台暂无安装包");
         assert_eq!(payload["error"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn build_admin_system_check_update_payload_reports_updatable_release() {
+        let payload = build_admin_system_check_update_payload_with_release(
+            "0.7.0-rc27".to_string(),
+            Some(AdminSystemUpdateRelease {
+                version: "v0.7.0-rc28".to_string(),
+                release_url: None,
+                release_notes: None,
+                published_at: None,
+                tarball_url: Some("https://github.com/fawney19/Aether/releases/download/v0.7.0-rc28/aether.tar.gz".to_string()),
+                sha256sums_url: Some("https://github.com/fawney19/Aether/releases/download/v0.7.0-rc28/SHA256SUMS".to_string()),
+            }),
+            None,
+        );
+
+        assert_eq!(payload["has_update"], true);
+        assert_eq!(payload["updatable"], true);
+        assert_eq!(payload["update_blocker"], serde_json::Value::Null);
     }
 
     #[test]
@@ -2975,6 +3056,8 @@ mod tests {
                 release_url: None,
                 release_notes: None,
                 published_at: None,
+                tarball_url: None,
+                sha256sums_url: None,
             }),
             None,
         );
@@ -2992,6 +3075,8 @@ mod tests {
                 release_url: None,
                 release_notes: None,
                 published_at: None,
+                tarball_url: None,
+                sha256sums_url: None,
             }),
             None,
         );
@@ -3009,6 +3094,8 @@ mod tests {
                 release_url: None,
                 release_notes: None,
                 published_at: None,
+                tarball_url: None,
+                sha256sums_url: None,
             }),
             None,
         );
@@ -3026,6 +3113,8 @@ mod tests {
                 release_url: None,
                 release_notes: None,
                 published_at: None,
+                tarball_url: None,
+                sha256sums_url: None,
             }),
             None,
         );

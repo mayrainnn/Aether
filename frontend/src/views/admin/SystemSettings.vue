@@ -8,13 +8,25 @@
           description="管理系统级别的配置和参数"
         />
 
-        <div class="mt-6 space-y-6">
+        <div
+          class="mt-6 space-y-6 transition-opacity"
+          :class="{ 'pointer-events-none opacity-60': systemConfigLoading }"
+          :inert="systemConfigLoading"
+          :aria-busy="systemConfigLoading"
+        >
+          <div
+            v-if="systemConfigLoading"
+            class="rounded-lg border border-border bg-card px-4 py-3 text-sm text-muted-foreground"
+          >
+            系统配置加载中...
+          </div>
+
           <!-- 站点信息 -->
           <SiteInfoSection
             id="section-site-info"
             :site-name="systemConfig.site_name"
             :site-subtitle="systemConfig.site_subtitle"
-            :loading="siteInfoLoading"
+            :loading="systemConfigLoading || siteInfoLoading"
             :has-changes="hasSiteInfoChanges"
             @save="saveSiteInfo"
             @update:site-name="systemConfig.site_name = $event"
@@ -40,7 +52,7 @@
             :proxy-node-id="systemConfig.system_proxy_node_id"
             :online-nodes="proxyNodesStore.onlineNodes"
             :all-nodes="proxyNodesStore.nodes"
-            :loading="proxyConfigLoading"
+            :loading="systemConfigLoading || proxyConfigLoading"
             :has-changes="hasProxyConfigChanges"
             @save="saveProxyConfig"
             @update:proxy-node-id="systemConfig.system_proxy_node_id = $event"
@@ -70,7 +82,7 @@
             :auto-delete-expired-keys="systemConfig.auto_delete_expired_keys"
             :enable-format-conversion="systemConfig.enable_format_conversion"
             :enable-openai-image-sync-heartbeat="systemConfig.enable_openai_image_sync_heartbeat"
-            :loading="basicConfigLoading"
+            :loading="systemConfigLoading || basicConfigLoading"
             :has-changes="hasBasicConfigChanges"
             @save="saveBasicConfig"
             @update:default-user-initial-gift-usd="systemConfig.default_user_initial_gift_usd = $event"
@@ -103,7 +115,7 @@
             :max-request-body-size-k-b="maxRequestBodySizeKB"
             :max-response-body-size-k-b="maxResponseBodySizeKB"
             :sensitive-headers-str="sensitiveHeadersStr"
-            :loading="logConfigLoading"
+            :loading="systemConfigLoading || logConfigLoading"
             :has-changes="hasLogConfigChanges"
             @save="saveLogConfig"
             @update:request-record-level="systemConfig.request_record_level = $event"
@@ -127,7 +139,7 @@
             :proxy-node-metrics-1m-retention-days="systemConfig.proxy_node_metrics_1m_retention_days"
             :proxy-node-metrics-1h-retention-days="systemConfig.proxy_node_metrics_1h_retention_days"
             :proxy-node-metrics-cleanup-batch-size="systemConfig.proxy_node_metrics_cleanup_batch_size"
-            :loading="cleanupConfigLoading"
+            :loading="systemConfigLoading || cleanupConfigLoading"
             :has-changes="hasCleanupConfigChanges"
             @save="saveCleanupConfig"
             @toggle-auto-cleanup="handleAutoCleanupToggle"
@@ -332,6 +344,7 @@ function setupScrollSpy() {
 const {
   systemConfig,
   systemVersion,
+  systemConfigLoading,
   siteInfoLoading,
   proxyConfigLoading,
   basicConfigLoading,

@@ -267,7 +267,7 @@ validate_env_line_for_copy() {
 
 should_skip_single_node_env_key() {
   case "$1" in
-    APP_IMAGE|LOCAL_APP_IMAGE|APP_PORT|DB_HOST|DB_PORT|DB_USER|DB_NAME|DB_PASSWORD|POSTGRES_*|MYSQL_*|REDIS_HOST|REDIS_PORT|REDIS_PASSWORD|REDIS_URL|AETHER_GATEWAY_DATA_REDIS_URL|AETHER_GATEWAY_DATA_REDIS_KEY_PREFIX|DATABASE_URL|AETHER_DATABASE_URL|AETHER_DATABASE_DRIVER|AETHER_GATEWAY_DATA_POSTGRES_URL|AETHER_RUNTIME_BACKEND|AETHER_RUNTIME_REDIS_URL|AETHER_RUNTIME_REDIS_KEY_PREFIX|AETHER_GATEWAY_DEPLOYMENT_TOPOLOGY|AETHER_GATEWAY_NODE_ROLE|AETHER_GATEWAY_STATIC_DIR|AETHER_LOG_DIR|AETHER_GATEWAY_AUTO_PREPARE_DATABASE)
+    APP_IMAGE|LOCAL_APP_IMAGE|APP_PORT|DB_HOST|DB_PORT|DB_USER|DB_NAME|DB_PASSWORD|POSTGRES_*|MYSQL_*|REDIS_HOST|REDIS_PORT|REDIS_PASSWORD|REDIS_URL|AETHER_GATEWAY_DATA_REDIS_URL|AETHER_GATEWAY_DATA_REDIS_KEY_PREFIX|DATABASE_URL|AETHER_DATABASE_URL|AETHER_DATABASE_DRIVER|AETHER_GATEWAY_DATA_POSTGRES_URL|AETHER_RUNTIME_BACKEND|AETHER_RUNTIME_REDIS_URL|AETHER_RUNTIME_REDIS_KEY_PREFIX|AETHER_GATEWAY_DEPLOYMENT_TOPOLOGY|AETHER_GATEWAY_NODE_ROLE|AETHER_GATEWAY_STATIC_DIR|AETHER_UPDATE_STRATEGY|AETHER_DOCKER_UPDATE_COMMAND|AETHER_LOG_DIR|AETHER_GATEWAY_AUTO_PREPARE_DATABASE)
       return 0
       ;;
     *)
@@ -315,13 +315,15 @@ write_single_node_env() {
     printf '\n# Single-node Compose runtime overrides\n'
     printf 'APP_IMAGE=%s\n' "$app_image"
     printf 'APP_PORT=%s\n' "$app_port"
-    printf 'AETHER_GATEWAY_STATIC_DIR=/srv/frontend\n'
-    printf 'AETHER_LOG_DESTINATION=both\n'
+    printf 'AETHER_GATEWAY_STATIC_DIR=/opt/aether/current/frontend\n'
+    printf 'AETHER_UPDATE_STRATEGY=docker\n'
+    printf 'AETHER_DOCKER_UPDATE_COMMAND=./update.sh\n'
+    printf 'AETHER_LOG_DESTINATION=stdout\n'
     printf 'AETHER_LOG_FORMAT=pretty\n'
-    printf 'AETHER_LOG_DIR=/app/logs\n'
+    printf 'AETHER_LOG_DIR=/opt/aether/logs\n'
     printf 'AETHER_DATABASE_DRIVER=sqlite\n'
-    printf 'AETHER_DATABASE_URL=sqlite://./data/aether.db\n'
-    printf 'DATABASE_URL=sqlite://./data/aether.db\n'
+    printf 'AETHER_DATABASE_URL=sqlite:///opt/aether/data/aether.db\n'
+    printf 'DATABASE_URL=sqlite:///opt/aether/data/aether.db\n'
     printf 'AETHER_RUNTIME_BACKEND=memory\n'
     printf 'AETHER_GATEWAY_DEPLOYMENT_TOPOLOGY=single-node\n'
     printf 'AETHER_GATEWAY_NODE_ROLE=all\n'
@@ -728,13 +730,15 @@ preflight() {
 
   NOW="$(date +%Y%m%d%H%M%S)"
   if [[ -z "$WORK_DIR" ]]; then
-    WORK_DIR="${SOURCE_COMPOSE_DIR}/data/pg-compose-to-single-node-${NOW}"
+    WORK_DIR="${SOURCE_COMPOSE_DIR}/datas/sqlite/pg-compose-to-single-node-${NOW}"
   fi
   WORK_DIR="$(absolute_path_maybe_missing "$WORK_DIR")"
   mkdir -p "$WORK_DIR"
 
   prepare_target_compose
-  TARGET_DB="${TARGET_DB:-${TARGET_COMPOSE_DIR}/data/aether.db}"
+  mkdir -p "${TARGET_COMPOSE_DIR}/logs"
+  mkdir -p "${TARGET_COMPOSE_DIR}/datas/sqlite"
+  TARGET_DB="${TARGET_DB:-${TARGET_COMPOSE_DIR}/datas/sqlite/aether.db}"
   TARGET_DB="$(absolute_path_maybe_missing "$TARGET_DB")"
 
   DB_USER="$(env_file_get "$SOURCE_ENV" "DB_USER")"

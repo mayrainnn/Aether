@@ -934,7 +934,9 @@ pub fn build_stream_terminal_usage_seed(
         context_seed.client_contract.as_str(),
         context_seed.provider_contract.as_str(),
         provider_response_full.as_ref(),
+        provider_response_body_state,
         client_response.as_ref(),
+        client_response_body_state,
     );
     let requires_observed_terminal_event = stream_usage_requires_observed_terminal_event(
         report_kind.as_str(),
@@ -1083,7 +1085,9 @@ fn captured_stream_terminal_state(
     client_contract: &str,
     provider_contract: &str,
     provider_response: Option<&Value>,
+    provider_response_body_state: Option<UsageBodyCaptureState>,
     client_response: Option<&Value>,
+    client_response_body_state: Option<UsageBodyCaptureState>,
 ) -> Option<StreamCapturedTerminalState> {
     let report_kind_requires_terminal_event =
         stream_report_kind_requires_observed_terminal_event(report_kind);
@@ -1097,12 +1101,43 @@ fn captured_stream_terminal_state(
 
     combine_stream_capture_terminal_states(
         (provider_contract_requires_terminal_event || fallback_requires_terminal_event)
-            .then(|| provider_response.and_then(stream_capture_terminal_state))
+            .then(|| {
+                captured_stream_terminal_state_from_body(
+                    provider_response,
+                    provider_response_body_state,
+                )
+            })
             .flatten(),
         (client_contract_requires_terminal_event || fallback_requires_terminal_event)
-            .then(|| client_response.and_then(stream_capture_terminal_state))
+            .then(|| {
+                captured_stream_terminal_state_from_body(
+                    client_response,
+                    client_response_body_state,
+                )
+            })
             .flatten(),
     )
+}
+
+fn captured_stream_terminal_state_from_body(
+    response: Option<&Value>,
+    body_state: Option<UsageBodyCaptureState>,
+) -> Option<StreamCapturedTerminalState> {
+    let state = response.and_then(stream_capture_terminal_state);
+    match state {
+        Some(StreamCapturedTerminalState::Missing)
+            if !stream_body_capture_can_prove_missing_terminal(body_state) =>
+        {
+            None
+        }
+        other => other,
+    }
+}
+
+fn stream_body_capture_can_prove_missing_terminal(
+    body_state: Option<UsageBodyCaptureState>,
+) -> bool {
+    matches!(body_state, None | Some(UsageBodyCaptureState::Inline))
 }
 
 fn combine_stream_capture_terminal_states(
@@ -4107,6 +4142,71 @@ mod tests {
             event.data.error_message.as_deref(),
             Some("execution runtime stream ended before provider terminal event")
         );
+    }
+
+    #[test]
+    fn stream_terminal_usage_ignores_missing_terminal_from_truncated_capture() {
+        let plan = ExecutionPlan {
+            request_id: "req-stream-truncated-captured-finish-1".to_string(),
+            candidate_id: Some("cand-stream-truncated-captured-finish-1".to_string()),
+            provider_name: Some("OpenAI".to_string()),
+            provider_id: "provider-1".to_string(),
+            endpoint_id: "endpoint-1".to_string(),
+            key_id: "key-1".to_string(),
+            method: "POST".to_string(),
+            url: "https://example.com/v1/responses".to_string(),
+            headers: BTreeMap::new(),
+            content_type: None,
+            content_encoding: None,
+            body: RequestBody {
+                json_body: None,
+                body_bytes_b64: None,
+                body_ref: None,
+            },
+            stream: true,
+            client_api_format: "openai:responses".to_string(),
+            provider_api_format: "openai:responses".to_string(),
+            model_name: Some("gpt-5.5".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        };
+        let provider_sse = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\"}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n"
+        );
+        let payload = GatewayStreamReportRequest {
+            trace_id: "trace-stream-truncated-captured-finish-1".to_string(),
+            report_kind: "openai_responses_stream_success".to_string(),
+            report_context: Some(json!({
+                "client_api_format": "openai:responses",
+                "provider_api_format": "openai:responses"
+            })),
+            status_code: 200,
+            headers: BTreeMap::from([(
+                "content-type".to_string(),
+                "text/event-stream".to_string(),
+            )]),
+            provider_body_base64: Some(
+                base64::engine::general_purpose::STANDARD.encode(provider_sse.as_bytes()),
+            ),
+            provider_body_state: Some(UsageBodyCaptureState::Truncated),
+            client_body_base64: None,
+            client_body_state: Some(UsageBodyCaptureState::None),
+            terminal_summary: None,
+            telemetry: None,
+        };
+
+        let event =
+            build_stream_terminal_usage_event(&plan, payload.report_context.as_ref(), &payload)
+                .expect("usage event should build");
+
+        assert_eq!(event.event_type, UsageEventType::Completed);
+        assert_eq!(event.data.status_code, Some(200));
+        assert_eq!(event.data.error_category, None);
+        assert_eq!(event.data.error_message, None);
     }
 
     #[test]
