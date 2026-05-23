@@ -1,6 +1,6 @@
 # syntax=docker.m.daocloud.io/docker/dockerfile:1
-# Aether 运行镜像：Rust gateway 直接服务 API + 前端静态文件（国内镜像源版本）
-# 构建命令: docker build --build-arg AETHER_BUILD_VERSION=v0.7.2 -f Dockerfile.app.local -t aether-app:latest .
+# Aether 本地发布版联调镜像
+# 作用：用当前源码构建一个 release-layout 容器，专门测试管理后台在线更新流程。
 
 ARG RUST_VERSION=1.95.0
 ARG NODE_BASE_IMAGE=docker.m.daocloud.io/library/node:22-slim
@@ -23,7 +23,6 @@ RUN npm run build
 FROM ${RUST_BASE_IMAGE} AS gateway-base
 WORKDIR /build
 
-# 本地镜像优先缩短构建时间，保留 release 语义，但改用更快的 thin LTO。
 ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
     CARGO_PROFILE_RELEASE_LTO=thin \
     CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
@@ -53,12 +52,14 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 FROM gateway-base AS gateway-builder
 ARG AETHER_BUILD_VERSION
+ARG AETHER_BUILD_TYPE=release
 ENV AETHER_BUILD_VERSION=${AETHER_BUILD_VERSION} \
-    AETHER_VERSION=${AETHER_BUILD_VERSION}
+    AETHER_VERSION=${AETHER_BUILD_VERSION} \
+    AETHER_BUILD_TYPE=${AETHER_BUILD_TYPE}
 COPY --from=gateway-planner /build/recipe.json ./recipe.json
 RUN --mount=type=cache,id=aether-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=aether-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=aether-cargo-target-local,target=/build/target,sharing=locked \
+    --mount=type=cache,id=aether-cargo-target-release-local,target=/build/target,sharing=locked \
     cargo chef cook --release --locked --package aether-gateway --bin aether-gateway --recipe-path recipe.json
 
 COPY Cargo.toml Cargo.lock ./
@@ -66,7 +67,7 @@ COPY apps/ ./apps/
 COPY crates/ ./crates/
 RUN --mount=type=cache,id=aether-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=aether-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=aether-cargo-target-local,target=/build/target,sharing=locked \
+    --mount=type=cache,id=aether-cargo-target-release-local,target=/build/target,sharing=locked \
     cargo build --release --locked -p aether-gateway && \
     cp target/release/aether-gateway /tmp/aether-gateway
 
@@ -75,13 +76,16 @@ FROM gateway-builder AS runtime-prep
 RUN set -eux; \
     mkdir -p \
     /runtime-root/app/data \
-    /runtime-root/app/logs \
     /runtime-root/etc \
     /runtime-root/etc/ssl \
     /runtime-root/lib \
     /runtime-root/lib64 \
-    /runtime-root/usr/local/bin; \
-    cp /tmp/aether-gateway /runtime-root/usr/local/bin/aether-gateway; \
+    /runtime-root/usr/lib \
+    /runtime-root/opt/aether/logs \
+    /runtime-root/opt/aether/releases/image/bin \
+    /runtime-root/opt/aether/releases/image/frontend; \
+    cp /tmp/aether-gateway /runtime-root/opt/aether/releases/image/bin/aether-gateway; \
+    ln -s /opt/aether/releases/image /runtime-root/opt/aether/current; \
     : > /tmp/runtime-libs.txt; \
     : > /tmp/runtime-scan-queue.txt; \
     printf '%s\n' /tmp/aether-gateway >> /tmp/runtime-scan-queue.txt; \
@@ -121,26 +125,25 @@ RUN set -eux; \
     if [ -f /etc/nsswitch.conf ]; then \
         cp /etc/nsswitch.conf /runtime-root/etc/nsswitch.conf; \
     fi
+COPY --from=frontend-builder /app/frontend/dist /runtime-root/opt/aether/releases/image/frontend
 
 # ==================== 运行时镜像 ====================
 FROM scratch
 
-# 复制 gateway 二进制
 COPY --from=runtime-prep /runtime-root/ /
 
-# 复制前端构建产物
-COPY --from=frontend-builder /app/frontend/dist /srv/frontend
 WORKDIR /app
 
 ENV LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
     RUST_LOG=aether_gateway=info \
     APP_PORT=8084 \
-    AETHER_GATEWAY_STATIC_DIR=/srv/frontend
+    AETHER_BASE_DIR=/opt/aether \
+    AETHER_GATEWAY_STATIC_DIR=/opt/aether/current/frontend
 
 EXPOSE 8084
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD ["/usr/local/bin/aether-gateway", "--healthcheck"]
+    CMD ["/opt/aether/current/bin/aether-gateway", "--healthcheck"]
 
-ENTRYPOINT ["/usr/local/bin/aether-gateway"]
+ENTRYPOINT ["/opt/aether/current/bin/aether-gateway"]

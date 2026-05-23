@@ -146,6 +146,7 @@ jobs:
       - name: Build
         env:
           AETHER_VERSION: ${{ needs.preflight.outputs.version_tag }}
+          AETHER_BUILD_TYPE: release
           CARGO_TERM_COLOR: always
         shell: bash
         run: |
@@ -270,6 +271,7 @@ jobs:
                 -e "s/^VERSION=\"\${AETHER_VERSION:-}\"/VERSION=\"\${AETHER_VERSION:-${VERSION}}\"/" \
                 install.sh > "${root}/install.sh"
               chmod 0755 "${root}/install.sh"
+              install -m 0755 update.sh "${root}/update.sh"
               install -m 0644 docker-compose.yml "${root}/docker-compose.yml"
               install -m 0644 docker-compose.single-node.yml "${root}/docker-compose.single-node.yml"
               install -m 0755 scripts/migrate-pg-compose-to-single-node.sh "${root}/scripts/migrate-pg-compose-to-single-node.sh"

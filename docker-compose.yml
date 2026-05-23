@@ -82,9 +82,10 @@ services:
       DATABASE_URL: postgresql://postgres:${DB_PASSWORD}@postgres:5432/aether
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       TZ: Asia/Shanghai
-      AETHER_LOG_DESTINATION: ${AETHER_LOG_DESTINATION:-both}
+      AETHER_BASE_DIR: /opt/aether
+      AETHER_LOG_DESTINATION: ${AETHER_LOG_DESTINATION:-stdout}
       AETHER_LOG_FORMAT: ${AETHER_LOG_FORMAT:-pretty}
-      AETHER_LOG_DIR: ${AETHER_LOG_DIR:-/app/logs}
+      AETHER_LOG_DIR: ${AETHER_LOG_DIR:-/opt/aether/logs}
       AETHER_LOG_ROTATION: ${AETHER_LOG_ROTATION:-daily}
       AETHER_LOG_RETENTION_DAYS: ${AETHER_LOG_RETENTION_DAYS:-7}
       AETHER_LOG_MAX_FILES: ${AETHER_LOG_MAX_FILES:-30}
@@ -97,14 +98,6 @@ services:
         condition: service_healthy
     ports:
       - "${APP_PORT:-8084}:${APP_PORT:-8084}"
-    volumes:
-      - ./logs:/app/logs
-    healthcheck:
-      test: ["CMD", "aether-gateway", "--healthcheck"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 60s
     restart: unless-stopped
 
 volumes:

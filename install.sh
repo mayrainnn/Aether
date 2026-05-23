@@ -34,6 +34,18 @@ fi
 SERVICE_USER="${SERVICE_USER:-aether}"
 SERVICE_GROUP="${SERVICE_GROUP:-aether}"
 SERVICE_NAME="aether-gateway"
+COMPOSE_RELEASE_BASE_DIR="/opt/aether"
+COMPOSE_RELEASE_CURRENT_DIR="${COMPOSE_RELEASE_BASE_DIR}/current"
+COMPOSE_RELEASE_FRONTEND_DIR="${COMPOSE_RELEASE_CURRENT_DIR}/frontend"
+COMPOSE_RELEASE_LOG_DIR="${COMPOSE_RELEASE_BASE_DIR}/logs"
+COMPOSE_RELEASE_SQLITE_DATABASE_URL="sqlite://${COMPOSE_RELEASE_BASE_DIR}/data/aether.db"
+COMPOSE_LOG_DESTINATION_DEFAULT="stdout"
+COMPOSE_LOG_FORMAT_DEFAULT="pretty"
+COMPOSE_LOG_ROTATION_DEFAULT="daily"
+COMPOSE_LOG_RETENTION_DAYS_DEFAULT="7"
+COMPOSE_LOG_MAX_FILES_DEFAULT="30"
+COMPOSE_APP_PORT_DEFAULT="8084"
+COMPOSE_CLI=()
 LAUNCHD_LABEL="${AETHER_LAUNCHD_LABEL:-com.aether.gateway}"
 LAUNCHD_LOG_DIR="${AETHER_LAUNCHD_LOG_DIR:-/var/log/aether}"
 ENV_TARGET="${CONFIG_DIR}/aether-gateway.env"
@@ -598,6 +610,7 @@ EOF
                 fi
                 ;;
         esac
+
         if [[ -z "${MIGRATE_FROM_COMPOSE}" && "${MODE}" != "compose" ]]; then
             if ui_is_zh; then
                 cat >/dev/tty <<'EOF'
@@ -904,11 +917,21 @@ ensure_directory() {
 }
 
 require_compose_runtime() {
+    resolve_compose_cli
+}
+
+resolve_compose_cli() {
+    if [[ "${#COMPOSE_CLI[@]}" -gt 0 ]]; then
+        return
+    fi
+
     if docker compose version >/dev/null 2>&1; then
+        COMPOSE_CLI=(docker compose)
         return
     fi
 
     if command -v docker-compose >/dev/null 2>&1; then
+        COMPOSE_CLI=(docker-compose)
         return
     fi
 
@@ -920,11 +943,13 @@ require_compose_runtime() {
 }
 
 compose_command() {
-    if docker compose version >/dev/null 2>&1; then
-        printf '%s\n' "docker compose"
-    else
-        printf '%s\n' "docker-compose"
-    fi
+    resolve_compose_cli
+    printf '%s\n' "${COMPOSE_CLI[*]}"
+}
+
+run_compose() {
+    resolve_compose_cli
+    "${COMPOSE_CLI[@]}" "$@"
 }
 
 compose_next_steps() {
@@ -940,8 +965,9 @@ Install complete.
 
 Docker Compose service:
   cd ${COMPOSE_DIR}
-  ${compose_cmd} ps
-  ${compose_cmd} logs -f app
+  ./update.sh
+  ${compose_cmd} -f docker-compose.yml ps
+  ${compose_cmd} -f docker-compose.yml logs -f app
 
 Health checks:
   curl -fsS http://127.0.0.1:${gateway_port}/_gateway/health
@@ -961,9 +987,13 @@ compose_manual_start_steps() {
 
 Next steps:
   cd ${COMPOSE_DIR}
-  ${compose_cmd} pull
-  ${compose_cmd} up -d
-  ${compose_cmd} logs -f app
+  ${compose_cmd} -f docker-compose.yml pull
+  ${compose_cmd} -f docker-compose.yml up -d
+  ${compose_cmd} -f docker-compose.yml logs -f app
+
+Later updates:
+  cd ${COMPOSE_DIR}
+  ./update.sh
 
 Generate a fresh key set any time:
   cd ${COMPOSE_DIR}
@@ -972,19 +1002,12 @@ EOF
 }
 
 start_compose_deployment() {
-    local compose_cmd
-    compose_cmd="$(compose_command)"
+    local -a compose_args=(--project-directory "${COMPOSE_DIR}" -f "${COMPOSE_DIR}/docker-compose.yml")
 
     info "pulling Docker Compose images"
-    if [[ "${compose_cmd}" == "docker compose" ]]; then
-        docker compose pull
-        info "starting Docker Compose services"
-        docker compose up -d
-    else
-        docker-compose pull
-        info "starting Docker Compose services"
-        docker-compose up -d
-    fi
+    run_compose "${compose_args[@]}" pull
+    info "starting Docker Compose services"
+    run_compose "${compose_args[@]}" up -d
 }
 
 migration_options_requested() {
@@ -1759,6 +1782,31 @@ compose_image() {
     printf '%s:%s\n' "${IMAGE_REPO}" "${tag}"
 }
 
+compose_app_port() {
+    printf '%s\n' "${APP_PORT:-${COMPOSE_APP_PORT_DEFAULT}}"
+}
+
+append_compose_log_env_defaults() {
+    local output="$1"
+    replace_or_append_env "${output}" "AETHER_LOG_DESTINATION" "${COMPOSE_LOG_DESTINATION_DEFAULT}"
+    replace_or_append_env "${output}" "AETHER_LOG_FORMAT" "${COMPOSE_LOG_FORMAT_DEFAULT}"
+    replace_or_append_env "${output}" "AETHER_LOG_DIR" "${COMPOSE_RELEASE_LOG_DIR}"
+    replace_or_append_env "${output}" "AETHER_LOG_ROTATION" "${COMPOSE_LOG_ROTATION_DEFAULT}"
+    replace_or_append_env "${output}" "AETHER_LOG_RETENTION_DAYS" "${COMPOSE_LOG_RETENTION_DAYS_DEFAULT}"
+    replace_or_append_env "${output}" "AETHER_LOG_MAX_FILES" "${COMPOSE_LOG_MAX_FILES_DEFAULT}"
+}
+
+compose_log_env_block() {
+    cat <<EOF
+AETHER_LOG_DESTINATION=${COMPOSE_LOG_DESTINATION_DEFAULT}
+AETHER_LOG_FORMAT=${COMPOSE_LOG_FORMAT_DEFAULT}
+AETHER_LOG_DIR=${COMPOSE_RELEASE_LOG_DIR}
+AETHER_LOG_ROTATION=${COMPOSE_LOG_ROTATION_DEFAULT}
+AETHER_LOG_RETENTION_DAYS=${COMPOSE_LOG_RETENTION_DAYS_DEFAULT}
+AETHER_LOG_MAX_FILES=${COMPOSE_LOG_MAX_FILES_DEFAULT}
+EOF
+}
+
 generate_compose_env() {
     local output="$1"
     local jwt_key encryption_key
@@ -1768,7 +1816,7 @@ generate_compose_env() {
 
     cp "${COMPOSE_DIR}/.env.example" "${output}"
     replace_or_append_env "${output}" "APP_IMAGE" "$(compose_image)"
-    replace_or_append_env "${output}" "APP_PORT" "${APP_PORT:-8084}"
+    replace_or_append_env "${output}" "APP_PORT" "$(compose_app_port)"
     replace_or_append_env "${output}" "DB_PASSWORD" "aether"
     replace_or_append_env "${output}" "REDIS_PASSWORD" "aether"
     replace_or_append_env "${output}" "JWT_SECRET_KEY" "${JWT_SECRET_KEY:-${jwt_key}}"
@@ -1776,9 +1824,7 @@ generate_compose_env() {
     replace_or_append_env "${output}" "ADMIN_EMAIL" "${ADMIN_EMAIL:-admin@example.local}"
     replace_or_append_env "${output}" "ADMIN_USERNAME" "${ADMIN_USERNAME:-admin}"
     replace_or_append_env "${output}" "ADMIN_PASSWORD" "${ADMIN_PASSWORD}"
-    replace_or_append_env "${output}" "AETHER_LOG_DESTINATION" "both"
-    replace_or_append_env "${output}" "AETHER_LOG_FORMAT" "pretty"
-    replace_or_append_env "${output}" "AETHER_LOG_DIR" "/app/logs"
+    append_compose_log_env_defaults "${output}"
     replace_or_append_env "${output}" "AETHER_GATEWAY_AUTO_PREPARE_DATABASE" "true"
 }
 
@@ -1793,24 +1839,19 @@ generate_compose_single_node_env() {
 ENVIRONMENT=production
 TZ=Asia/Shanghai
 RUST_LOG=aether_gateway=info
-AETHER_LOG_DESTINATION=both
-AETHER_LOG_FORMAT=pretty
-AETHER_LOG_DIR=/app/logs
-AETHER_LOG_ROTATION=daily
-AETHER_LOG_RETENTION_DAYS=7
-AETHER_LOG_MAX_FILES=30
+$(compose_log_env_block)
 
 APP_IMAGE=$(compose_image)
-APP_PORT=${APP_PORT:-8084}
-AETHER_GATEWAY_STATIC_DIR=/srv/frontend
+APP_PORT=$(compose_app_port)
+AETHER_GATEWAY_STATIC_DIR=${COMPOSE_RELEASE_FRONTEND_DIR}
 AETHER_GATEWAY_VIDEO_TASK_TRUTH_SOURCE_MODE=rust-authoritative
 AETHER_GATEWAY_AUTO_PREPARE_DATABASE=true
 AETHER_RUNTIME_BACKEND=memory
 API_KEY_PREFIX=sk
 
 AETHER_DATABASE_DRIVER=sqlite
-AETHER_DATABASE_URL=sqlite:///app/data/aether.db
-DATABASE_URL=sqlite:///app/data/aether.db
+AETHER_DATABASE_URL=${COMPOSE_RELEASE_SQLITE_DATABASE_URL}
+DATABASE_URL=${COMPOSE_RELEASE_SQLITE_DATABASE_URL}
 
 JWT_SECRET_KEY=${JWT_SECRET_KEY:-${jwt_key}}
 ENCRYPTION_KEY=${ENCRYPTION_KEY:-${encryption_key}}
@@ -2182,10 +2223,9 @@ install_compose_mode() {
     resolve_compose_dir
     info "preparing Docker Compose deployment in ${COMPOSE_DIR}"
     ensure_directory "${COMPOSE_DIR}"
-    ensure_directory "${COMPOSE_DIR}/logs"
-
     install_project_file "docker-compose.yml" "${COMPOSE_DIR}/docker-compose.yml" "0644"
     install_project_file ".env.example" "${COMPOSE_DIR}/.env.example" "0644"
+    install_project_file "update.sh" "${COMPOSE_DIR}/update.sh" "0755"
     install_generate_keys_script "${COMPOSE_DIR}/generate_keys.sh"
 
     if [[ -f "${COMPOSE_DIR}/.env" ]]; then
@@ -2202,8 +2242,8 @@ Docker Compose files are ready:
   ${COMPOSE_DIR}/docker-compose.yml
   ${COMPOSE_DIR}/.env
   ${COMPOSE_DIR}/.env.example
+  ${COMPOSE_DIR}/update.sh
   ${COMPOSE_DIR}/generate_keys.sh
-  ${COMPOSE_DIR}/logs
 EOF
 
     if [[ "${SKIP_START}" == "true" ]]; then
@@ -2220,11 +2260,11 @@ install_compose_single_node_mode() {
     resolve_compose_dir
     info "preparing Docker Compose single-node deployment in ${COMPOSE_DIR}"
     ensure_directory "${COMPOSE_DIR}"
-    ensure_directory "${COMPOSE_DIR}/logs"
     ensure_directory "${COMPOSE_DIR}/data"
 
     install_project_file "docker-compose.single-node.yml" "${COMPOSE_DIR}/docker-compose.yml" "0644"
     install_project_file ".env.example" "${COMPOSE_DIR}/.env.example" "0644"
+    install_project_file "update.sh" "${COMPOSE_DIR}/update.sh" "0755"
     install_generate_keys_script "${COMPOSE_DIR}/generate_keys.sh"
 
     if [[ -f "${COMPOSE_DIR}/.env" ]]; then
@@ -2241,9 +2281,9 @@ Docker Compose single-node files are ready:
   ${COMPOSE_DIR}/docker-compose.yml
   ${COMPOSE_DIR}/.env
   ${COMPOSE_DIR}/.env.example
+  ${COMPOSE_DIR}/update.sh
   ${COMPOSE_DIR}/generate_keys.sh
   ${COMPOSE_DIR}/data
-  ${COMPOSE_DIR}/logs
 EOF
 
     if [[ "${SKIP_START}" == "true" ]]; then
@@ -2277,7 +2317,10 @@ install_release() {
     [[ -d "${bundle}/frontend" ]] || die "frontend directory not found: ${bundle}/frontend"
 
     info "installing release ${VERSION} into ${release_dir}"
-    install -d -m 0755 "${INSTALL_ROOT}" "${INSTALL_ROOT}/releases" "${INSTALL_ROOT}/data" "${INSTALL_ROOT}/logs"
+    install -d -m 0755 "${INSTALL_ROOT}" "${INSTALL_ROOT}/releases"
+    chown root:"${SERVICE_GROUP}" "${INSTALL_ROOT}" "${INSTALL_ROOT}/releases"
+    chmod 2775 "${INSTALL_ROOT}" "${INSTALL_ROOT}/releases"
+    install -d -m 0755 "${INSTALL_ROOT}/data" "${INSTALL_ROOT}/logs"
     if is_darwin; then
         install -d -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" -m 0750 \
             "${INSTALL_ROOT}/data" \
@@ -2291,12 +2334,13 @@ install_release() {
     install -d -m 0755 "${release_dir}/bin" "${release_dir}/frontend"
     install -m 0755 "${bundle}/bin/aether-gateway" "${release_dir}/bin/aether-gateway"
     cp -R "${bundle}/frontend/." "${release_dir}/frontend/"
-    chmod -R u=rwX,go=rX "${release_dir}"
+    chmod -R u=rwX,g=rwX,o=rX "${release_dir}"
     if is_darwin; then
-        chown -R root:wheel "${release_dir}"
+        chown -R root:"${SERVICE_GROUP}" "${release_dir}"
     else
-        chown -R root:root "${release_dir}"
+        chown -R root:"${SERVICE_GROUP}" "${release_dir}"
     fi
+    chmod -R u=rwX,g=rwX,o=rX "${release_dir}"
     ln -sfn "${release_dir}" "${current_link}"
 }
 

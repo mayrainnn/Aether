@@ -315,7 +315,7 @@ write_single_node_env() {
     printf '\n# Single-node Compose runtime overrides\n'
     printf 'APP_IMAGE=%s\n' "$app_image"
     printf 'APP_PORT=%s\n' "$app_port"
-    printf 'AETHER_GATEWAY_STATIC_DIR=/srv/frontend\n'
+    printf 'AETHER_GATEWAY_STATIC_DIR=/opt/aether/current/frontend\n'
     printf 'AETHER_LOG_DESTINATION=both\n'
     printf 'AETHER_LOG_FORMAT=pretty\n'
     printf 'AETHER_LOG_DIR=/app/logs\n'
