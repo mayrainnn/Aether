@@ -19,25 +19,49 @@
               class="pl-8 h-9"
             />
           </div>
-          <Button
-            v-if="autoMatchKey"
-            variant="outline"
-            size="sm"
-            class="h-9 shrink-0"
-            :disabled="loadingGlobalModels || fetchingAutoMatchedModels"
-            :title="`按 ${autoMatchKeyLabel} 的上游模型自动勾选同名模型`"
-            @click="applyAutoMatchFromKey(true)"
-          >
-            <Loader2
-              v-if="fetchingAutoMatchedModels"
-              class="w-3.5 h-3.5 mr-1.5 animate-spin"
-            />
-            <ListChecks
-              v-else
-              class="w-3.5 h-3.5 mr-1.5"
-            />
-            匹配勾选
-          </Button>
+          <DropdownMenu :modal="false">
+            <DropdownMenuTrigger as-child>
+              <Button
+                variant="ghost"
+                size="icon"
+                class="h-9 w-9 shrink-0"
+                :disabled="loadingGlobalModels || loadingProviderKeys || fetchingAutoMatchedModels || providerKeys.length === 0"
+                :title="autoMatchButtonTitle"
+                aria-label="按密钥匹配"
+              >
+                <Loader2
+                  v-if="loadingProviderKeys || fetchingAutoMatchedModels"
+                  class="w-4 h-4 animate-spin"
+                />
+                <ListChecks
+                  v-else
+                  class="w-4 h-4"
+                />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
+              align="end"
+              class="w-72 max-h-80 overflow-y-auto"
+            >
+              <DropdownMenuItem
+                v-for="key in providerKeys"
+                :key="key.id"
+                class="flex-col items-start gap-0.5"
+                :disabled="fetchingAutoMatchedModels"
+                @select="applyAutoMatchFromKey(key)"
+              >
+                <span class="w-full truncate font-medium">
+                  {{ getAutoMatchKeyLabel(key) }}
+                </span>
+                <span
+                  v-if="getAutoMatchKeyDetail(key)"
+                  class="w-full truncate text-xs text-muted-foreground"
+                >
+                  {{ getAutoMatchKeyDetail(key) }}
+                </span>
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
 
         <!-- 模型列表 -->
@@ -149,6 +173,12 @@ import { Layers, Loader2, Search, Check, ListChecks } from 'lucide-vue-next'
 import Dialog from '@/components/ui/dialog/Dialog.vue'
 import Button from '@/components/ui/button.vue'
 import Input from '@/components/ui/input.vue'
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+} from '@/components/ui'
 import { useToast } from '@/composables/useToast'
 import { useConfirm } from '@/composables/useConfirm'
 import { parseApiError } from '@/utils/errorParser'
@@ -159,28 +189,33 @@ import {
 } from '@/api/endpoints/global-models'
 import {
   getProviderModels,
+  getProviderKeys,
   batchAssignModelsToProvider,
   deleteModel,
-  type Model
+  type Model,
+  type EndpointAPIKey
 } from '@/api/endpoints'
 
-interface AutoMatchKey {
-  id: string
-  name?: string | null
-  api_key_masked?: string | null
-}
+type AutoMatchKey = Pick<EndpointAPIKey, 'id' | 'name' | 'api_key_masked'>
 
-const props = defineProps<{
+interface Props {
   open: boolean
   providerId: string
   providerName?: string
-  autoMatchKey?: AutoMatchKey | null
-}>()
+}
+
+const props = defineProps<Props>()
 
 const emit = defineEmits<{
   'update:open': [value: boolean]
   'changed': []
 }>()
+
+interface AutoMatchKeyLike {
+  id: string
+  name?: string | null
+  api_key_masked?: string | null
+}
 
 const { error: showError, success, warning: showWarning } = useToast()
 const { confirmWarning } = useConfirm()
@@ -188,13 +223,14 @@ const { fetchModels: fetchCachedModels } = useUpstreamModelsCache()
 
 // 状态
 const loadingGlobalModels = ref(false)
+const loadingProviderKeys = ref(false)
 const saving = ref(false)
 const fetchingAutoMatchedModels = ref(false)
-const autoMatchedKeyId = ref<string | null>(null)
 
 // 数据
 const allGlobalModels = ref<GlobalModelResponse[]>([])
 const existingModels = ref<Model[]>([])
+const providerKeys = ref<AutoMatchKey[]>([])
 
 // 选择状态（本地状态，保存时才提交）
 const selectedGlobalModelIds = ref<Set<string>>(new Set())
@@ -205,11 +241,10 @@ const initialGlobalModelIds = ref<Set<string>>(new Set())
 // 搜索状态
 const searchQuery = ref('')
 
-const autoMatchKey = computed(() => props.autoMatchKey ?? null)
-const autoMatchKeyLabel = computed(() => {
-  const key = autoMatchKey.value
-  if (!key) return ''
-  return key.name || key.api_key_masked || key.id.slice(0, 8)
+const autoMatchButtonTitle = computed(() => {
+  if (loadingProviderKeys.value) return '正在加载密钥'
+  if (providerKeys.value.length === 0) return '暂无可用于匹配的密钥'
+  return '选择密钥，并按该密钥的上游模型自动勾选同名模型'
 })
 
 // 已关联的全局模型 ID 集合（从已有数据计算）
@@ -305,15 +340,22 @@ function normalizeModelName(name: string | null | undefined): string {
   return (name || '').trim()
 }
 
-async function applyAutoMatchFromKey(forceRefresh = false) {
-  const key = autoMatchKey.value
+function getAutoMatchKeyLabel(key: AutoMatchKeyLike): string {
+  return key.name || key.api_key_masked || key.id.slice(0, 8)
+}
+
+function getAutoMatchKeyDetail(key: AutoMatchKeyLike): string {
+  if (key.name && key.api_key_masked) return key.api_key_masked
+  return key.name ? key.id.slice(0, 8) : ''
+}
+
+async function applyAutoMatchFromKey(key: AutoMatchKey) {
   if (!props.providerId || !key || fetchingAutoMatchedModels.value) return
-  if (!forceRefresh && autoMatchedKeyId.value === key.id) return
 
   fetchingAutoMatchedModels.value = true
   try {
-    const result = await fetchCachedModels(props.providerId, key.id, forceRefresh)
-    if (!props.open || autoMatchKey.value?.id !== key.id) return
+    const result = await fetchCachedModels(props.providerId, key.id, true)
+    if (!props.open) return
 
     if (result.error && result.models.length > 0) {
       showWarning(`部分格式获取失败: ${result.error}`)
@@ -325,7 +367,6 @@ async function applyAutoMatchFromKey(forceRefresh = false) {
       } else {
         showWarning('此 Key 未返回可用模型')
       }
-      autoMatchedKeyId.value = key.id
       return
     }
 
@@ -337,8 +378,6 @@ async function applyAutoMatchFromKey(forceRefresh = false) {
     const matchedGlobalModelIds = allGlobalModels.value
       .filter(model => upstreamModelIds.has(normalizeModelName(model.name)))
       .map(model => model.id)
-
-    autoMatchedKeyId.value = key.id
 
     if (matchedGlobalModelIds.length === 0) {
       showWarning('未找到与此 Key 上游模型 ID 同名的全局模型')
@@ -357,7 +396,7 @@ async function applyAutoMatchFromKey(forceRefresh = false) {
     searchQuery.value = ''
 
     if (newlySelectedCount > 0) {
-      success(`已按 ${autoMatchKeyLabel.value} 勾选 ${matchedGlobalModelIds.length} 个同名模型`)
+      success(`已按 ${getAutoMatchKeyLabel(key)} 勾选 ${matchedGlobalModelIds.length} 个同名模型`)
     } else {
       success(`${matchedGlobalModelIds.length} 个同名模型已在选中列表中`)
     }
@@ -454,23 +493,19 @@ function syncGlobalModelSelection() {
 // 监听打开状态
 watch(() => props.open, async (isOpen) => {
   if (isOpen && props.providerId) {
-    autoMatchedKeyId.value = null
     await loadData()
-    if (autoMatchKey.value) {
-      await applyAutoMatchFromKey(false)
-    }
   } else {
     searchQuery.value = ''
     selectedGlobalModelIds.value = new Set()
     initialGlobalModelIds.value = new Set()
+    providerKeys.value = []
     fetchingAutoMatchedModels.value = false
-    autoMatchedKeyId.value = null
   }
 })
 
 // 加载数据
 async function loadData() {
-  await Promise.all([loadGlobalModels(), loadExistingModels()])
+  await Promise.all([loadGlobalModels(), loadExistingModels(), loadProviderKeys()])
   syncGlobalModelSelection()
 }
 
@@ -493,6 +528,19 @@ async function loadExistingModels() {
     existingModels.value = await getProviderModels(props.providerId)
   } catch (err: unknown) {
     showError(parseApiError(err, '加载已关联模型失败'), '错误')
+  }
+}
+
+// 加载密钥列表
+async function loadProviderKeys() {
+  try {
+    loadingProviderKeys.value = true
+    providerKeys.value = await getProviderKeys(props.providerId)
+  } catch (err: unknown) {
+    providerKeys.value = []
+    showError(parseApiError(err, '加载密钥失败'), '错误')
+  } finally {
+    loadingProviderKeys.value = false
   }
 }
 </script>
