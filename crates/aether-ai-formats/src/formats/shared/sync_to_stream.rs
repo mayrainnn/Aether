@@ -667,16 +667,17 @@ fn maybe_bridge_aether_sse_response_capture_to_stream(
         captured_api_format.as_str(),
         client_api_format,
     );
-    let sse_body = if captured_api_format == client_api_format {
-        body_text.as_bytes().to_vec()
-    } else {
-        rewrite_sse_body_between_formats(
-            body_text.as_bytes(),
-            captured_api_format.as_str(),
-            client_api_format,
-            &bridge_context,
-        )?
-    };
+    let sse_body =
+        if captured_api_format == client_api_format && captured_api_format != "claude:messages" {
+            body_text.as_bytes().to_vec()
+        } else {
+            rewrite_sse_body_between_formats(
+                body_text.as_bytes(),
+                captured_api_format.as_str(),
+                client_api_format,
+                &bridge_context,
+            )?
+        };
     let terminal_summary = observe_sse_terminal_summary(
         body_text.as_bytes(),
         captured_api_format.as_str(),
@@ -1347,6 +1348,42 @@ mod tests {
                 .and_then(|summary| summary.finish_reason.as_deref()),
             Some("stop")
         );
+    }
+
+    #[test]
+    fn rewrites_same_format_claude_capture_to_sanitize_read_tool_input() {
+        let captured_body = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_read_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"gpt-5.5\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_read_1\",\"name\":\"Read\",\"input\":{\"file_path\":\"D:/projects/UIAutoTest/docs/prd/msr.md\",\"offset\":0,\"limit\":2000,\"pages\":\"\"}}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        );
+        let outcome = maybe_bridge_standard_sync_json_to_stream(
+            &json!({
+                "status_code": 200,
+                "headers": {
+                    "content-type": "text/event-stream",
+                    "x-aether-control-endpoint-signature": "claude:messages"
+                },
+                "body": captured_body
+            }),
+            "openai:responses",
+            "claude:messages",
+            None,
+        )
+        .expect("bridge should succeed")
+        .expect("capture should bridge");
+
+        let output = utf8(outcome.sse_body);
+        assert!(output.contains("\"name\":\"Read\""));
+        assert!(output.contains("\\\"limit\\\":2000"));
+        assert!(!output.contains("\\\"pages\\\":\\\"\\\""));
     }
 
     #[test]
