@@ -3217,28 +3217,136 @@ pub(crate) type GeminiCanonicalTools = (
     Vec<Value>,
     Option<Value>,
     Option<Value>,
+    Option<Value>,
 );
+
+#[derive(Debug, Clone)]
+pub(crate) struct GeminiGoogleSearchGrounding {
+    pub source_field: &'static str,
+    pub source_dialect: &'static str,
+    pub legacy: bool,
+    pub payload: Value,
+    pub raw_payload: Value,
+    pub output_payload: Value,
+}
+
+pub(crate) fn gemini_google_search_grounding(
+    tool_object: &Map<String, Value>,
+) -> Option<GeminiGoogleSearchGrounding> {
+    for (field, source_dialect, legacy) in [
+        ("googleSearch", "gemini_current", false),
+        ("google_search", "gemini_current", false),
+        ("googleSearchRetrieval", "vertex_legacy", true),
+        ("google_search_retrieval", "vertex_legacy", true),
+    ] {
+        if let Some(raw_payload) = tool_object.get(field) {
+            let raw_payload = normalize_gemini_tool_payload(raw_payload);
+            let payload = lower_camelize_json_object_keys(&raw_payload);
+            let output_payload = if legacy { json!({}) } else { payload.clone() };
+            return Some(GeminiGoogleSearchGrounding {
+                source_field: field,
+                source_dialect,
+                legacy,
+                payload,
+                raw_payload,
+                output_payload,
+            });
+        }
+    }
+    None
+}
+
+pub(crate) fn gemini_google_search_grounding_extension(
+    grounding: &GeminiGoogleSearchGrounding,
+) -> Value {
+    json!({
+        "enabled": true,
+        "source_field": grounding.source_field,
+        "source_dialect": grounding.source_dialect,
+        "payload": grounding.payload,
+        "raw_payload": grounding.raw_payload,
+        "legacy": grounding.legacy,
+    })
+}
+
+fn normalize_gemini_tool_payload(payload: &Value) -> Value {
+    match payload {
+        Value::Null => json!({}),
+        value => value.clone(),
+    }
+}
+
+fn lower_camelize_json_object_keys(value: &Value) -> Value {
+    match value {
+        Value::Object(object) => Value::Object(
+            object
+                .iter()
+                .map(|(key, value)| {
+                    (
+                        snake_to_lower_camel(key),
+                        lower_camelize_json_object_keys(value),
+                    )
+                })
+                .collect(),
+        ),
+        Value::Array(items) => {
+            Value::Array(items.iter().map(lower_camelize_json_object_keys).collect())
+        }
+        other => other.clone(),
+    }
+}
+
+fn snake_to_lower_camel(key: &str) -> String {
+    let mut output = String::with_capacity(key.len());
+    let mut uppercase_next = false;
+    for character in key.chars() {
+        if character == '_' {
+            uppercase_next = true;
+            continue;
+        }
+        if uppercase_next {
+            for uppercase in character.to_uppercase() {
+                output.push(uppercase);
+            }
+            uppercase_next = false;
+        } else {
+            output.push(character);
+        }
+    }
+    output
+}
+
+fn gemini_builtin_tool_portion(tool_object: &Map<String, Value>) -> Option<Value> {
+    let builtin = tool_object
+        .iter()
+        .filter(|(key, _)| {
+            key.as_str() != "functionDeclarations" && key.as_str() != "function_declarations"
+        })
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<Map<_, _>>();
+    (!builtin.is_empty()).then_some(Value::Object(builtin))
+}
 
 pub(crate) fn gemini_tools_to_canonical(value: Option<&Value>) -> Option<GeminiCanonicalTools> {
     let Some(value) = value else {
-        return Some((Vec::new(), Vec::new(), None, None));
+        return Some((Vec::new(), Vec::new(), None, None, None));
     };
     let tools = value.as_array()?;
     let mut canonical = Vec::new();
     let mut builtin_tools = Vec::new();
     let mut web_search_options = None;
+    let mut google_search_grounding = None;
     for tool in tools {
         let tool_object = tool.as_object()?;
-        if tool_object.get("googleSearch").is_some() || tool_object.get("google_search").is_some() {
+        if let Some(grounding) = gemini_google_search_grounding(tool_object) {
             web_search_options = Some(json!({}));
-            builtin_tools.push(tool.clone());
+            if google_search_grounding.is_none() {
+                google_search_grounding =
+                    Some(gemini_google_search_grounding_extension(&grounding));
+            }
         }
-        if tool_object.get("codeExecution").is_some()
-            || tool_object.get("code_execution").is_some()
-            || tool_object.get("urlContext").is_some()
-            || tool_object.get("url_context").is_some()
-        {
-            builtin_tools.push(tool.clone());
+        if let Some(builtin_tool) = gemini_builtin_tool_portion(tool_object) {
+            builtin_tools.push(builtin_tool);
         }
         let declarations = tool_object
             .get("functionDeclarations")
@@ -3273,6 +3381,7 @@ pub(crate) fn gemini_tools_to_canonical(value: Option<&Value>) -> Option<GeminiC
         builtin_tools,
         web_search_options,
         Some(value.clone()),
+        google_search_grounding,
     ))
 }
 
@@ -4166,12 +4275,37 @@ pub(crate) fn apply_gemini_request_extensions(
         output_object.insert("cachedContent".to_string(), cached_content);
     }
     if let Some(raw_tools) = gemini.get("raw_tools").cloned() {
-        output_object.insert("tools".to_string(), raw_tools);
+        if should_reuse_raw_gemini_tools(gemini) {
+            output_object.insert("tools".to_string(), raw_tools);
+        } else {
+            output_object
+                .entry("tools".to_string())
+                .or_insert(raw_tools);
+        }
     }
     if let Some(raw_tool_config) = gemini.get("raw_tool_config").cloned() {
         output_object.insert("toolConfig".to_string(), raw_tool_config);
     }
     Some(())
+}
+
+fn should_reuse_raw_gemini_tools(gemini: &Map<String, Value>) -> bool {
+    let Some(google_search) = gemini
+        .get("grounding")
+        .and_then(Value::as_object)
+        .and_then(|grounding| grounding.get("google_search"))
+        .and_then(Value::as_object)
+    else {
+        return true;
+    };
+    google_search
+        .get("legacy")
+        .and_then(Value::as_bool)
+        .is_none_or(|legacy| !legacy)
+        && google_search
+            .get("source_field")
+            .and_then(Value::as_str)
+            .is_some_and(|source_field| source_field == "googleSearch")
 }
 
 pub(crate) fn assistant_image_placeholder(url: Option<&str>, has_data: bool) -> String {
@@ -6001,6 +6135,165 @@ mod tests {
     }
 
     #[test]
+    fn gemini_request_adapter_normalizes_google_search_grounding_aliases() {
+        let cases = [
+            (
+                "current_camel",
+                json!({"googleSearch": {"excludeDomains": ["example.com"]}}),
+                "googleSearch",
+                false,
+                json!({"excludeDomains": ["example.com"]}),
+                json!({"excludeDomains": ["example.com"]}),
+            ),
+            (
+                "current_snake",
+                json!({"google_search": {"exclude_domains": ["example.com"]}}),
+                "google_search",
+                false,
+                json!({"excludeDomains": ["example.com"]}),
+                json!({"excludeDomains": ["example.com"]}),
+            ),
+            (
+                "legacy_snake",
+                json!({
+                    "google_search_retrieval": {
+                        "dynamic_retrieval_config": {
+                            "mode": "MODE_DYNAMIC",
+                            "dynamic_threshold": 0.7
+                        }
+                    }
+                }),
+                "google_search_retrieval",
+                true,
+                json!({
+                    "dynamicRetrievalConfig": {
+                        "mode": "MODE_DYNAMIC",
+                        "dynamicThreshold": 0.7
+                    }
+                }),
+                json!({}),
+            ),
+            (
+                "legacy_camel",
+                json!({
+                    "googleSearchRetrieval": {
+                        "dynamicRetrievalConfig": {
+                            "mode": "MODE_DYNAMIC",
+                            "dynamicThreshold": 0.7
+                        }
+                    }
+                }),
+                "googleSearchRetrieval",
+                true,
+                json!({
+                    "dynamicRetrievalConfig": {
+                        "mode": "MODE_DYNAMIC",
+                        "dynamicThreshold": 0.7
+                    }
+                }),
+                json!({}),
+            ),
+        ];
+
+        for (
+            name,
+            tool,
+            source_field,
+            legacy,
+            expected_extension_payload,
+            expected_output_payload,
+        ) in cases
+        {
+            let request = json!({
+                "model": "gemini-2.5-pro",
+                "contents": [{"role": "user", "parts": [{"text": "search"}]}],
+                "tools": [tool]
+            });
+
+            let canonical = from_gemini_to_canonical_request(
+                &request,
+                "/v1beta/models/gemini-2.5-pro:generateContent",
+            )
+            .unwrap_or_else(|| panic!("{name}: canonical request"));
+
+            assert_eq!(
+                canonical
+                    .extensions
+                    .get("openai")
+                    .and_then(|value| value.get("web_search_options")),
+                Some(&json!({})),
+                "{name}: web search option"
+            );
+            let google_search = canonical
+                .extensions
+                .get("gemini")
+                .and_then(|value| value.get("grounding"))
+                .and_then(|value| value.get("google_search"))
+                .unwrap_or_else(|| panic!("{name}: gemini google_search grounding"));
+            assert_eq!(
+                google_search.get("source_field").and_then(Value::as_str),
+                Some(source_field),
+                "{name}: source field"
+            );
+            assert_eq!(
+                google_search.get("legacy").and_then(Value::as_bool),
+                Some(legacy),
+                "{name}: legacy flag"
+            );
+            assert_eq!(
+                google_search.get("payload"),
+                Some(&expected_extension_payload),
+                "{name}: normalized payload"
+            );
+
+            let rebuilt =
+                canonical_to_gemini_request(&canonical, "gemini-upstream", false).unwrap();
+            assert_eq!(
+                rebuilt["tools"],
+                json!([{"googleSearch": expected_output_payload}]),
+                "{name}: canonical output"
+            );
+        }
+    }
+
+    #[test]
+    fn gemini_request_adapter_keeps_agent_search_retrieval_separate_from_google_search() {
+        let request = json!({
+            "model": "gemini-2.5-pro",
+            "contents": [{"role": "user", "parts": [{"text": "private data"}]}],
+            "tools": [{
+                "retrieval": {
+                    "vertexAiSearch": {
+                        "datastore": "projects/p/locations/global/collections/default_collection/dataStores/d"
+                    }
+                }
+            }]
+        });
+
+        let canonical = from_gemini_to_canonical_request(
+            &request,
+            "/v1beta/models/gemini-2.5-pro:generateContent",
+        )
+        .expect("canonical request");
+
+        assert_eq!(
+            canonical
+                .extensions
+                .get("openai")
+                .and_then(|value| value.get("web_search_options")),
+            None
+        );
+
+        let rebuilt = canonical_to_gemini_request(&canonical, "gemini-upstream", false).unwrap();
+        assert_eq!(rebuilt["tools"], request["tools"]);
+        assert!(rebuilt["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|tool| tool.get("googleSearch").is_none()));
+    }
+
+    #[test]
     fn gemini_response_adapter_preserves_thought_signature_tool_and_usage() {
         let response = json!({
             "responseId": "resp_123",
@@ -6071,6 +6364,48 @@ mod tests {
             json!({"ok": true})
         );
         assert_eq!(rebuilt["usageMetadata"]["thoughtsTokenCount"], 2);
+    }
+
+    #[test]
+    fn gemini_response_adapter_preserves_grounding_metadata() {
+        let grounding_metadata = json!({
+            "webSearchQueries": ["query"],
+            "searchEntryPoint": {"renderedContent": "<style></style>"},
+            "groundingChunks": [{
+                "web": {
+                    "uri": "https://example.com",
+                    "title": "Example"
+                }
+            }],
+            "groundingSupports": []
+        });
+        let response = json!({
+            "responseId": "resp_grounded",
+            "modelVersion": "gemini-2.5-pro",
+            "candidates": [{
+                "index": 0,
+                "finishReason": "STOP",
+                "groundingMetadata": grounding_metadata,
+                "content": {
+                    "parts": [{"text": "grounded answer"}]
+                }
+            }]
+        });
+
+        let canonical = from_gemini_to_canonical_response(&response).expect("canonical response");
+        assert_eq!(
+            canonical.outputs[0]
+                .extensions
+                .get("gemini")
+                .and_then(|value| value.get("groundingMetadata")),
+            Some(&grounding_metadata)
+        );
+
+        let rebuilt = canonical_to_gemini_response(&canonical, &json!({})).expect("gemini");
+        assert_eq!(
+            rebuilt["candidates"][0]["groundingMetadata"],
+            grounding_metadata
+        );
     }
 
     #[test]
