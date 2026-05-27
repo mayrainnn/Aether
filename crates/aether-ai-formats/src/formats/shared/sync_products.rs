@@ -1720,22 +1720,25 @@ pub fn aggregate_openai_responses_stream_sync_response(body: &[u8]) -> Option<Va
             "response.output_text.delta" | "response.outtext.delta" => {
                 let output_index = openai_responses_event_output_index(event_object).unwrap_or(0);
                 let content_index = openai_responses_event_content_index(event_object);
-                let delta = match event_object.get("delta") {
-                    Some(Value::String(text)) => text.as_str(),
-                    Some(Value::Object(delta)) => delta
-                        .get("text")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default(),
-                    _ => "",
-                };
-                if delta.is_empty() {
-                    continue;
+                match event_object.get("delta") {
+                    Some(Value::String(delta)) => {
+                        append_openai_responses_message_text_delta(
+                            message_states.entry(output_index).or_default(),
+                            content_index,
+                            delta,
+                        );
+                    }
+                    Some(Value::Object(delta)) => {
+                        if let Some(text) = delta.get("text").and_then(Value::as_str) {
+                            merge_openai_responses_message_text_delta_object(
+                                message_states.entry(output_index).or_default(),
+                                content_index,
+                                text,
+                            );
+                        }
+                    }
+                    _ => {}
                 }
-                append_openai_responses_message_text_delta(
-                    message_states.entry(output_index).or_default(),
-                    content_index,
-                    delta,
-                );
             }
             "response.output_text.done" => {
                 let output_index = openai_responses_event_output_index(event_object).unwrap_or(0);
@@ -2105,6 +2108,46 @@ fn append_openai_responses_message_text_delta(
         "text".to_string(),
         Value::String(format!("{current}{delta}")),
     );
+    part.entry("annotations".to_string())
+        .or_insert_with(|| Value::Array(Vec::new()));
+}
+
+fn merge_openai_responses_message_text_delta_object(
+    state: &mut OpenAIResponsesSyncMessageState,
+    content_index: usize,
+    text: &str,
+) {
+    if text.is_empty() {
+        return;
+    }
+    let part = state
+        .parts
+        .entry(content_index)
+        .or_insert_with(default_openai_responses_output_text_part);
+    let Some(part) = part.as_object_mut() else {
+        return;
+    };
+    if !part
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|value| matches!(value, "output_text" | "text"))
+    {
+        return;
+    }
+    let current = part
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let merged = if text.starts_with(current.as_str()) {
+        text.to_string()
+    } else if current == text || current.starts_with(text) {
+        current
+    } else {
+        format!("{current}{text}")
+    };
+    part.insert("type".to_string(), Value::String("output_text".to_string()));
+    part.insert("text".to_string(), Value::String(merged));
     part.entry("annotations".to_string())
         .or_insert_with(|| Value::Array(Vec::new()));
 }
@@ -3753,6 +3796,25 @@ mod tests {
         assert_eq!(result["output"][0]["type"], "message");
         assert_eq!(result["output"][0]["content"][0]["text"], "Hello");
         assert_eq!(result["output"][0]["content"][1]["text"], " world");
+    }
+
+    #[test]
+    fn aggregates_openai_responses_text_snapshot_deltas_without_duplicates() {
+        let body = concat!(
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":{\"text\":\"Hello\"}}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":{\"text\":\"Hello world\"}}\n\n",
+            "event: response.output_text.done\n",
+            "data: {\"type\":\"response.output_text.done\",\"output_index\":0,\"content_index\":0,\"text\":\"Hello world\"}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_snapshot_123\",\"object\":\"response\",\"model\":\"gpt-5\",\"status\":\"completed\",\"output\":[]}}\n\n",
+        );
+
+        let result = aggregate_openai_responses_stream_sync_response(body.as_bytes())
+            .expect("openai-responses stream should aggregate into a sync body");
+
+        assert_eq!(result["output"][0]["content"][0]["text"], "Hello world");
     }
 
     #[test]

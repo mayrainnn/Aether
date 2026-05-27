@@ -574,6 +574,83 @@ mod tests {
     }
 
     #[test]
+    fn transforms_openai_responses_text_snapshot_deltas_to_openai_chat_without_duplicates() {
+        let report_context = report_context("openai:responses", "openai:chat");
+        let mut matrix = StreamingStandardFormatMatrix::default();
+        let mut output = Vec::new();
+
+        for line in [
+            data_line(json!({
+                "type": "response.output_text.delta",
+                "response_id": "resp_snapshot_delta",
+                "output_index": 0,
+                "content_index": 0,
+                "delta": {
+                    "text": "Hello",
+                }
+            })),
+            data_line(json!({
+                "type": "response.output_text.delta",
+                "response_id": "resp_snapshot_delta",
+                "output_index": 0,
+                "content_index": 0,
+                "delta": {
+                    "text": "Hello world",
+                }
+            })),
+            data_line(json!({
+                "type": "response.output_text.done",
+                "response_id": "resp_snapshot_delta",
+                "output_index": 0,
+                "content_index": 0,
+                "text": "Hello world",
+            })),
+            data_line(json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_snapshot_delta",
+                    "object": "response",
+                    "model": "gpt-5.4",
+                    "status": "completed",
+                    "output": [{
+                        "type": "message",
+                        "id": "msg_snapshot_delta",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{
+                            "type": "output_text",
+                            "text": "Hello world",
+                            "annotations": [],
+                        }]
+                    }],
+                }
+            })),
+        ] {
+            output.extend(
+                matrix
+                    .transform_line(&report_context, line)
+                    .expect("responses stream line should convert"),
+            );
+        }
+
+        let sse = String::from_utf8(output).expect("sse should be utf8");
+        let content = sse
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter_map(|payload| serde_json::from_str::<Value>(payload).ok())
+            .filter_map(|value| {
+                value
+                    .pointer("/choices/0/delta/content")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+            })
+            .collect::<String>();
+
+        assert_eq!(content, "Hello world");
+        assert!(!sse.contains("HelloHello"));
+    }
+
+    #[test]
     fn transforms_provider_errors_to_claude_error_events() {
         let cases = [
             (

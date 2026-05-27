@@ -428,7 +428,7 @@ impl OpenAIResponsesProviderState {
     ) {
         let missing = if text.starts_with(&self.text) {
             text[self.text.len()..].to_string()
-        } else if self.text == text {
+        } else if self.text == text || self.text.starts_with(text) {
             String::new()
         } else {
             text.to_string()
@@ -829,27 +829,24 @@ impl OpenAIResponsesProviderState {
             "response.created" | "response.in_progress" => {
                 self.ensure_started(report_context, &mut out);
             }
-            "response.output_text.delta" | "response.outtext.delta" => {
-                let piece = match value.get("delta") {
-                    Some(Value::String(text)) => text.clone(),
-                    Some(Value::Object(delta)) => delta
-                        .get("text")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string(),
-                    _ => String::new(),
-                };
-                if !piece.is_empty() {
+            "response.output_text.delta" | "response.outtext.delta" => match value.get("delta") {
+                Some(Value::String(piece)) if !piece.is_empty() => {
                     self.ensure_started(report_context, &mut out);
-                    self.text.push_str(&piece);
+                    self.text.push_str(piece);
                     let (id, model) = self.identity(report_context);
                     out.push(CanonicalStreamFrame {
                         id,
                         model,
-                        event: CanonicalStreamEvent::TextDelta(piece),
+                        event: CanonicalStreamEvent::TextDelta(piece.clone()),
                     });
                 }
-            }
+                Some(Value::Object(delta)) => {
+                    if let Some(text) = delta.get("text").and_then(Value::as_str) {
+                        self.emit_missing_text(report_context, &mut out, text);
+                    }
+                }
+                _ => {}
+            },
             "response.content_part.added" | "response.content_part.done" => {
                 if let Some(part) = value.get("part").and_then(Value::as_object) {
                     if part.get("type").and_then(Value::as_str) == Some("output_text") {
@@ -3156,6 +3153,85 @@ mod tests {
                 }),
             } if reason == "tool_calls"
         )));
+    }
+
+    #[test]
+    fn openai_responses_provider_state_does_not_duplicate_text_snapshot_deltas() {
+        let mut state = OpenAIResponsesProviderState::default();
+        let report_context = json!({});
+        let mut frames = Vec::new();
+
+        for event in [
+            json!({
+                "type": "response.output_text.delta",
+                "response_id": "resp_snapshot_delta",
+                "output_index": 0,
+                "content_index": 0,
+                "delta": {
+                    "text": "Hello",
+                }
+            }),
+            json!({
+                "type": "response.output_text.delta",
+                "response_id": "resp_snapshot_delta",
+                "output_index": 0,
+                "content_index": 0,
+                "delta": {
+                    "text": "Hello world",
+                }
+            }),
+            json!({
+                "type": "response.output_text.delta",
+                "response_id": "resp_snapshot_delta",
+                "output_index": 0,
+                "content_index": 0,
+                "delta": {
+                    "text": "Hello",
+                }
+            }),
+            json!({
+                "type": "response.output_text.done",
+                "response_id": "resp_snapshot_delta",
+                "output_index": 0,
+                "content_index": 0,
+                "text": "Hello world",
+            }),
+            json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_snapshot_delta",
+                    "object": "response",
+                    "model": "gpt-5.4",
+                    "status": "completed",
+                    "output": [{
+                        "type": "message",
+                        "id": "msg_snapshot_delta",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{
+                            "type": "output_text",
+                            "text": "Hello world",
+                            "annotations": [],
+                        }]
+                    }],
+                }
+            }),
+        ] {
+            frames.extend(
+                state
+                    .push_line(&report_context, data_line(event))
+                    .expect("responses text event should parse"),
+            );
+        }
+
+        let text = frames
+            .iter()
+            .filter_map(|frame| match &frame.event {
+                CanonicalStreamEvent::TextDelta(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(text, "Hello world");
     }
 
     #[test]
