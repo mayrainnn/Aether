@@ -458,17 +458,21 @@ export const usageApi = {
   }> {
     const statsParams = buildAdminUsageStatsParams(userId, filters)
     const { params: recordParams } = buildAdminUsageRecordParams(userId, filters)
-    const clientSendUnixMs = beginServerTimingSample()
+    const statsRequest = apiClient.get<UsageStats>('/api/admin/usage/stats', { params: statsParams })
+    const recordsClientSendUnixMs = beginServerTimingSample()
+    const recordsRequest = apiClient
+      .get<UsageListResponse>('/api/admin/usage/records', { params: recordParams })
+      .then(response => withServerTiming(response.data, recordsClientSendUnixMs))
+
     const [statsResponse, recordsResponse] = await Promise.all([
-      apiClient.get<UsageStats>('/api/admin/usage/stats', { params: statsParams }),
-      apiClient.get<UsageListResponse>('/api/admin/usage/records', { params: recordParams }),
+      statsRequest,
+      recordsRequest,
     ])
-    const recordsPayload = withServerTiming(recordsResponse.data, clientSendUnixMs)
 
     return {
-      records: assertUsageRecords(recordsPayload.records),
+      records: assertUsageRecords(recordsResponse.records),
       stats: statsResponse.data,
-      ...(recordsPayload.server_timing ? { server_timing: recordsPayload.server_timing } : {}),
+      ...(recordsResponse.server_timing ? { server_timing: recordsResponse.server_timing } : {}),
     }
   },
 
