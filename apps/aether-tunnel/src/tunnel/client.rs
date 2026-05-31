@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use base64::Engine as _;
 use tokio::net::TcpStream;
 use tokio::sync::watch;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -16,7 +17,9 @@ use crate::egress_proxy::{
     connect_target_via_proxy, IpFamily, ProxyConnectOptions, UpstreamProxyConfig,
 };
 use crate::state::{AppState, ServerContext};
-use aether_contracts::tunnel::{CURRENT_TUNNEL_PROTOCOL_VERSION, TUNNEL_PROTOCOL_VERSION_HEADER};
+use aether_contracts::tunnel::{
+    CURRENT_TUNNEL_PROTOCOL_VERSION, TUNNEL_NODE_NAME_B64_HEADER, TUNNEL_PROTOCOL_VERSION_HEADER,
+};
 use aether_contracts::tunnel_security::{
     SecureFrameCodec, TunnelSecurityRole, TUNNEL_SECURITY_HEADER, TUNNEL_SECURITY_NON_TLS_REQUIRED,
     TUNNEL_SECURITY_SESSION_HEADER,
@@ -50,36 +53,37 @@ pub async fn connect_and_run(
     let mut request = ws_url.clone().into_client_request()?;
     let headers = request.headers_mut();
     if server.tunnel_security != crate::config::TunnelSecurity::NonTlsRequired {
-        headers.insert(
+        insert_ascii_header(
+            headers,
             "Authorization",
-            http::HeaderValue::from_str(&format!("Bearer {}", server.management_token))?,
-        );
+            &format!("Bearer {}", server.management_token),
+            "management_token",
+        )?;
     }
     headers.insert(
         TUNNEL_PROTOCOL_VERSION_HEADER,
         http::HeaderValue::from_str(&CURRENT_TUNNEL_PROTOCOL_VERSION.to_string())?,
     );
     let node_id = server.node_id.read().unwrap().clone();
-    headers.insert("X-Node-Id", http::HeaderValue::from_str(&node_id)?);
+    insert_ascii_header(headers, "X-Node-Id", &node_id, "node_id")?;
     let security_session = uuid::Uuid::new_v4().simple().to_string();
     if server.tunnel_security == crate::config::TunnelSecurity::NonTlsRequired {
         headers.insert(
             TUNNEL_SECURITY_HEADER,
             http::HeaderValue::from_static(TUNNEL_SECURITY_NON_TLS_REQUIRED),
         );
-        headers.insert(
+        insert_ascii_header(
+            headers,
             TUNNEL_SECURITY_SESSION_HEADER,
-            http::HeaderValue::from_str(&security_session)?,
-        );
+            &security_session,
+            "tunnel security session",
+        )?;
     }
     // Use dynamic node_name (may be updated by remote config) instead of
     // the static server.node_name, so that remote name changes take effect
     // on the next reconnect.
     let dynamic_node_name = server.dynamic.load().node_name.clone();
-    headers.insert(
-        "X-Node-Name",
-        http::HeaderValue::from_str(&dynamic_node_name)?,
-    );
+    insert_node_name_headers(headers, &dynamic_node_name)?;
     // Advertise per-connection max concurrent streams so the backend can
     // respect the proxy's capacity limit.
     let max_streams = state.config.tunnel_max_streams.unwrap_or(128);
@@ -469,6 +473,36 @@ fn build_tunnel_url(server: &ServerContext) -> String {
     format!("{}/api/internal/proxy-tunnel", ws_base)
 }
 
+fn insert_ascii_header(
+    headers: &mut http::HeaderMap,
+    name: &'static str,
+    value: &str,
+    field: &str,
+) -> anyhow::Result<()> {
+    if !value.is_ascii() {
+        anyhow::bail!(
+            "{field} contains non-ASCII characters and cannot be sent in the WebSocket handshake"
+        );
+    }
+    let value = http::HeaderValue::from_str(value)
+        .map_err(|err| anyhow::anyhow!("{field} is not a valid WebSocket header value: {err}"))?;
+    headers.insert(name, value);
+    Ok(())
+}
+
+fn insert_node_name_headers(headers: &mut http::HeaderMap, node_name: &str) -> anyhow::Result<()> {
+    if node_name.is_ascii() {
+        return insert_ascii_header(headers, "X-Node-Name", node_name, "node_name");
+    }
+
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(node_name.as_bytes());
+    let value = http::HeaderValue::from_str(&encoded).map_err(|err| {
+        anyhow::anyhow!("encoded node_name is not a valid WebSocket header value: {err}")
+    })?;
+    headers.insert(TUNNEL_NODE_NAME_B64_HEADER, value);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr};
@@ -503,5 +537,37 @@ mod tests {
         let addrs = filter_socket_addrs(mixed_addrs(), IpFamily::Ipv6Only);
 
         assert_eq!(addrs, vec![SocketAddr::from((Ipv6Addr::LOCALHOST, 443))]);
+    }
+
+    #[test]
+    fn node_name_header_uses_legacy_header_for_ascii() {
+        let mut headers = http::HeaderMap::new();
+
+        insert_node_name_headers(&mut headers, "edge-1").expect("header should insert");
+
+        assert_eq!(
+            headers
+                .get("x-node-name")
+                .and_then(|value| value.to_str().ok()),
+            Some("edge-1")
+        );
+        assert!(headers.get(TUNNEL_NODE_NAME_B64_HEADER).is_none());
+    }
+
+    #[test]
+    fn node_name_header_encodes_non_ascii_name() {
+        let mut headers = http::HeaderMap::new();
+
+        insert_node_name_headers(&mut headers, "日本节点").expect("header should insert");
+
+        assert!(headers.get("x-node-name").is_none());
+        let encoded = headers
+            .get(TUNNEL_NODE_NAME_B64_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .expect("encoded node name header should be present");
+        let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(encoded)
+            .expect("encoded value should decode");
+        assert_eq!(decoded, "日本节点".as_bytes());
     }
 }

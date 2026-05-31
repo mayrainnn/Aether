@@ -9,6 +9,7 @@ pub const HEADER_SIZE: usize = 10;
 pub const TUNNEL_RELAY_FORWARDED_BY_HEADER: &str = "x-aether-tunnel-forwarded-by";
 pub const TUNNEL_RELAY_OWNER_INSTANCE_HEADER: &str = "x-aether-tunnel-owner-instance-id";
 pub const TUNNEL_PROTOCOL_VERSION_HEADER: &str = "x-aether-tunnel-protocol-version";
+pub const TUNNEL_NODE_NAME_B64_HEADER: &str = "x-aether-tunnel-node-name-b64";
 pub const CURRENT_TUNNEL_PROTOCOL_VERSION: u8 = 2;
 pub const CURRENT_TUNNEL_PROTOCOL_VERSION_STR: &str = "2";
 
